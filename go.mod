@@ -5,7 +5,11 @@ go 1.14
 require (
 	// when updating containerd, adjust the replace rules accordingly
 	github.com/containerd/containerd v1.5.0-beta.3
+	github.com/containerd/ttrpc v1.0.2
+	github.com/gogo/protobuf v1.3.2
+	github.com/golang/protobuf v1.4.3 // indirect
 	github.com/pkg/errors v0.9.1
+	k8s.io/cri-api v0.21.0
 )
 
 replace (
