@@ -1,0 +1,317 @@
+/*
+   Copyright The containerd Authors.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
+syntax = "proto3";
+
+import "github.com/gogo/protobuf/gogoproto/gogo.proto";
+import "google/protobuf/empty.proto";
+import "k8s.io/cri-api/pkg/apis/runtime/v1alpha2/api.proto";
+
+package vproto;
+
+option go_package = "github.com/containerd/nri/api/plugin/vproto;vproto";
+
+option (gogoproto.goproto_unkeyed_all) = false;
+option (gogoproto.goproto_unrecognized_all) = false;
+option (gogoproto.goproto_sizecache_all) = false;
+option (gogoproto.goproto_getters_all) = true;
+
+
+//
+// Plugin is the ttRPC service than NRI plugins must implement.
+//
+service Plugin {
+  // Configure the plugin.
+  //
+  // Static plugins, IOW plugins that are started by NRI, get passed any
+  // plugin-specific raw configuration data found in the NRI configuration.
+  // Dynamic plugins, IOW plugins started by means external to NRI that
+  // register themselves by connecting to the well-known NRI socket, get
+  // empty configuration data.
+  //
+  // A plugin responds to a configuration request with the set of events it
+  // wants to subscribe to.
+  //
+  rpc Configure(ConfigureRequest) returns (ConfigureResponse);
+
+  // Synchronize the plugin with the state of the runtime.
+  //
+  // Upon startup NRI synchronizes the state of the plugin with the runtime
+  // by sending a list of all pods and containers. The plugin responds
+  // with any changes it wishes to make to the containers.
+  //
+  rpc Synchronize(SynchronizeRequest) returns (SynchronizeResponse);
+
+  // Shutdown lets the plugin know the runtime is going down.
+  //
+  // Once a plugin has responded to this request it should shut itself down.
+  rpc Shutdown(google.protobuf.Empty) returns (google.protobuf.Empty);
+
+  // RunPodSandbox relays the corresponding CRI event to the plugin.
+  //
+  // The response is empty. It is not possible for a plugin to update
+  // containers in response to this request.
+  rpc RunPodSandbox(RunPodSandboxRequest) returns (google.protobuf.Empty);
+
+  // StopPodSandbox relays the corresponding CRI event to the plugin.
+  //
+  // The response is empty. It is not possible for a plugin to update
+  // containers in response to this request. All containers in the pod
+  // will be explicitly stopped before the pod is stopped.
+  rpc StopPodSandbox(StopPodSandboxRequest) returns (google.protobuf.Empty);
+
+  // RemovePodSandbox relays the corresponding CRI event to the plugin.
+  //
+  // The response is empty. It is not possible for a plugin to update
+  // containers in response to this request. All containers in the pod
+  // will be explicitly stopped and removed before removing the pod.
+  rpc RemovePodSandbox(RemovePodSandboxRequest) returns (google.protobuf.Empty);
+
+  // CreateContainer relays the corresponding CRI event to the plugin.
+  //
+  // The plugin responds with any modifications to the container being created
+  // and updates to other containers.
+  rpc CreateContainer(CreateContainerRequest) returns (CreateContainerResponse);
+
+  // StartContainer relays the corresponding CRI event to the plugin.
+  //
+  // The response is empty. It is not possible for a plugin to update
+  // containers in response to this request.
+  rpc StartContainer(StartContainerRequest) returns (google.protobuf.Empty);
+
+  // UpdateContainer relays the corresponding UpdateContainerResources event
+  // to the plugin.
+  //
+  // The plugin responds with any updates to the container being modified
+  // and to other containers.
+  rpc UpdateContainer(UpdateContainerRequest) returns (UpdateContainerResponse);
+
+  // StopContainer relays the corresponding CRI event to the plugin.
+  //
+  // The plugin responds with any updates to remaining containers in the
+  // system.
+  rpc StopContainer(StopContainerRequest) returns (StopContainerResponse);
+
+  // RemoveContainer relays the corresponding CRI event to the plugin.
+  //
+  // The response is empty. It is not possible for a plugin to update
+  // containers in response to this request. All containers will be explicitly
+  // stopped before removal.
+  rpc RemoveContainer(RemoveContainerRequest) returns (google.protobuf.Empty);
+}
+
+// Event is used by plugins to subscribe for pod and container lifecycle
+// events.
+enum Event {
+  // Hook into RunPodSandbox.
+  RUN_POD_SANDBOX = 0;
+  // Hook into StopPodSandbox.
+  STOP_POD_SANDBOX = 1;
+  // Hook into RemovePodSandbox.
+  REMOVE_POD_SANDBOX = 2;
+  // Hook into CreateContainer.
+  CREATE_CONTAINER = 3;
+  // Hook into StartContainer.
+  START_CONTAINER = 4;
+  // Hook into UpdateContainer.
+  UPDATE_CONTAINER = 5;
+  // Hook into StopContainer.
+  STOP_CONTAINER = 6;
+  // Hook into RemoveContainer.
+  REMOVE_CONTAINER = 7;
+  // Hook into all events.
+  ALL = 8;
+}
+
+// ConfigureRequest contains plugin-specific raw configuration data.
+message ConfigureRequest {
+  // Opaque plugin-specific raw configuration data.
+  string config = 1;
+}
+
+// ConfigureResponse is used by plugins to subscribe to pod and container events.
+message ConfigureResponse {
+  // ID reported by plugin (used as sorting order for dynamic plugins).
+  string id = 1;
+  // Subscribe the plugins to these events.
+  repeated Event subscribe = 2;
+}
+
+// ShutdownRequest is empty/google.protobuf.Empty.
+
+// ShutdownResponse is empty/google.protobuf.Empty.
+
+// PodSandbox describes a single pod for a plugin.
+message PodSandbox {
+  // Pod ID.
+  string id = 1;
+  // Pod name.
+  string name = 2;
+  // Pod UID.
+  string uid = 3;
+  // Pod namespace.
+  string namespace = 4;
+  // Pod labels.
+  map<string, string> labels = 5;
+  // Pod annotations.
+  map<string, string> annotations = 6;
+  // Pod cgroup parent directory.
+  string cgroup_parent = 7;
+  // Pod cgroup directory.
+  string cgroup_path = 8;
+  // Pod runtime handler.
+  string runtime_handler = 9;
+}
+
+// Hook describes a single runtime hook for a container.
+message Hook {
+  string path = 1;
+  repeated string args = 2;
+  repeated runtime.v1alpha2.KeyValue env = 3;
+  int32 timeout = 4;
+}
+
+// Hooks describe a set of runtime hooks for a container.
+message Hooks {
+  repeated Hook prestart = 1;
+  repeated Hook create_runtime = 2;
+  repeated Hook create_container = 3;
+  repeated Hook start_container = 4;
+  repeated Hook poststart = 5;
+  repeated Hook poststop = 6;
+}
+
+// ContainerCreateUpdate contains changes for a container being created.
+message ContainerCreateUpdate {
+  runtime.v1alpha2.LinuxContainerResources linux_resources = 1;
+  map<string, string> labels = 2;
+  map<string, string> annotations = 3;
+  repeated runtime.v1alpha2.KeyValue envs = 4;
+  repeated runtime.v1alpha2.Mount mounts = 5;
+  repeated runtime.v1alpha2.Device devices = 6;
+  repeated Hooks hooks = 7;
+}
+
+// ContainerUpdate contains changes for an existing container.
+message ContainerUpdate {
+  string container_id = 1;
+  runtime.v1alpha2.LinuxContainerResources linux_resources = 2;
+  map<string, string> annotations = 3;
+}
+
+// Container describes a single container for a plugin.
+message Container {
+  string id = 1;
+  string pod_sandbox_id = 2;
+  string name = 3;
+  map<string, string> labels = 4;
+  map<string, string> annotations = 5;
+  repeated string command = 6;
+  repeated string args = 7;
+  repeated runtime.v1alpha2.KeyValue envs = 8;
+  repeated runtime.v1alpha2.Mount mounts = 9;
+  repeated runtime.v1alpha2.Device devices = 10;
+  runtime.v1alpha2.LinuxContainerResources linux_resources = 11;
+}
+
+// RunPodSandboxRequest describes the pod being created.
+message RunPodSandboxRequest {
+  PodSandbox pod = 1;
+}
+
+// RunPodSandboxResponse is empty/google.protobuf.Empty.
+
+// StopPodSandboxRequest describes the pod being stopped.
+message StopPodSandboxRequest {
+  PodSandbox pod = 1;
+}
+
+// StopPodSandboxResponse is empty/google.protobuf.Empty.
+
+// RemovePodSandboxRequest describes the pod being removed.
+message RemovePodSandboxRequest {
+  PodSandbox pod = 1;
+}
+
+// RemovePodSandboxResponse is empty/google.protobuf.Empty.
+
+// CreateContainerRequest describes the container being created.
+message CreateContainerRequest {
+  PodSandbox pod = 1;
+  Container container = 2;
+}
+
+// CreateContainerResponse describes requested updates to containers.
+message CreateContainerResponse {
+  // Updates for the container being created.
+  ContainerCreateUpdate create = 1;
+  // Updates for other running containers.
+  repeated ContainerUpdate updates = 2;
+}
+
+// StartContainerRequest describes the container being started.
+message StartContainerRequest {
+  PodSandbox pod = 1;
+  Container container = 2;
+}
+
+// StartContainerResponse is empty/google.protobuf.Empty.
+
+// UpdateContainerRequest describes the container being updated.
+message UpdateContainerRequest {
+  PodSandbox pod = 1;
+  Container container = 2;
+  runtime.v1alpha2.LinuxContainerResources linux_resources = 3;
+  map<string, string> annotations = 4;
+}
+
+// UpdateContainerResponse contains requested container updates.
+message UpdateContainerResponse {
+  // Updates to running containers.
+  repeated ContainerUpdate updates = 1;
+}
+
+// StopContainerRequest describes the container being stopped.
+message StopContainerRequest {
+  PodSandbox pod = 1;
+  Container container = 2;
+}
+
+// StopContainerResponse describes requested updates to containers.
+message StopContainerResponse {
+  // Update to running containers.
+  repeated ContainerUpdate updates = 1;
+}
+
+// RemoveContainerRequest describes the container being removed.
+message RemoveContainerRequest {
+  PodSandbox pod = 1;
+  Container container = 2;
+}
+
+// RemoveContainerResponse is empty/google.protobuf.Empty.
+
+// SynchronizeRequest describes the runtime state for dynamic plugins.
+message SynchronizeRequest {
+  repeated PodSandbox pods = 1;
+  repeated Container containers = 2;
+}
+
+// SynchronizeResponse describes requested updates to containers.
+message SynchronizeResponse {
+  repeated ContainerUpdate updates = 1;
+}
+
