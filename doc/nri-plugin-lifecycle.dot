@@ -1,0 +1,7 @@
+digraph {
+        node [shape="box"];
+        "No NRI plugin (NRI-PI) process" -> "NRI-PI process running" [label="invoke NRI-PI executable" ]
+        "NRI-PI process running" -> "NRI-PI registered" [label="NRI-PI connects to CRI/NRI runtime via nri.sock" ]
+        "NRI-PI registered" -> "NRI-PI ready" [label="NRI-PI.Sync()\l- input: sends running pods and containers\l- output: updates on running containers\l"]
+        "NRI-PI ready" -> "NRI-PI ready" [label="NRI-PI.EVENT() on pod/container EVENT\lCRI/NRI.EVENT() on NRI-PI EVENT\l"]
+}

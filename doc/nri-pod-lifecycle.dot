@@ -1,0 +1,29 @@
+digraph {
+        node [shape="box"];
+        subgraph cluster_0 {
+                label="Pod lifecycle";
+                "No sandbox" -> "Sandbox ready" [label="RunPodSandbox()"]
+                "Sandbox ready" -> "Sandbox stopped" [label="[no existing containers]\nStopPodSandbox()"]
+                "Sandbox stopped" -> "No sandbox" [label="RemovePodSandbox()"]
+        }
+
+        "Sandbox ready" -> "Creating..." [label="CreateContainer()* **"]
+        "Exists" -> "Sandbox ready" [label="RemoveContainer()"]
+
+        subgraph cluster_1 {
+                "Creating..." -> "Exists" [label="PostCreateContainer()"]
+                "Exists" -> "Updating..." [label="UpdateContainer()**"]
+                "Updating..." -> "Exists" [label="PostUpdateContainer()"]
+                "Exists" -> "Starting..." [label="StartContainer()"]
+
+                "Starting..." -> "Runs" [label="PostStartContainer()"]
+                "Starting..." -> "Exists" [label="StopContainer()**"]
+
+                "Runs" -> "Updating running..." [label="UpdateContainer()**"]
+                "Updating running..." -> "Runs" [label="PostUpdateContainer()"]
+                "Runs" -> "Exists" [label="StopContainer()**"];
+                label="Container lifecycle";
+        }
+
+        label="*: adjust container before creation\l**: adjust any existing containers\l"
+}
