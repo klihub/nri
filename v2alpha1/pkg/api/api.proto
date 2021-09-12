@@ -1,0 +1,307 @@
+/*
+   Copyright The containerd Authors.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
+syntax = "proto3";
+
+package nri.v2alpha1.pkg.api;
+
+import "github.com/gogo/protobuf/gogoproto/gogo.proto";
+
+option go_package = "github.com/containerd/nri/v2alpha1/pkg/api";
+option (gogoproto.goproto_getters_all) = true;
+
+//
+// Runtime defines the API the NRI infrastructure implements for plugins.
+//
+// Plugins use this interface to make unsolicited adjustments (to the
+// resources assigned to) an arbitrary set of existing containers.
+//
+service Runtime {
+  // RegisterPlugin registers a plugin with the runtime.
+  rpc RegisterPlugin(RegisterPluginRequest) returns (Empty);
+  // AdjustContainers requests adjustments to a set of existing containers.
+  rpc AdjustContainers(AdjustContainersRequest) returns (AdjustContainersResponse);
+}
+
+message RegisterPluginRequest {
+  string plugin_name = 1;
+  string plugin_id = 2;
+}
+
+message AdjustContainersRequest {
+  repeated ContainerAdjustment adjust = 1;
+}
+
+message AdjustContainersResponse {
+  repeated ContainerAdjustment failed = 1;
+}
+
+
+//
+// Plugin defines the API that plugins implement for the NRI infra.
+//
+// NRI uses this API to set up plugins, hook them into the lifecycle
+// requests/events of pods and containers, and allow them to make some
+// adjustments to containers.
+//
+service Plugin {
+  // Configure a plugin with opaque plugin-specific data.
+  rpc Configure(ConfigureRequest) returns (ConfigureResponse);
+  // Synchronize a freshly started plugin with the state of the runtime.
+  rpc Synchronize(SynchronizeRequest) returns (SynchronizeResponse);
+  // Shutdown lets a plugin know the runtime is going down.
+  rpc Shutdown(Empty) returns (Empty);
+
+  // RunPodSandbox relays the corresponding request/event to the plugin.
+  rpc RunPodSandbox(RunPodSandboxEvent) returns (Empty);
+  // StopPodSandbox relays the corresponding request/event to the plugin.
+  rpc StopPodSandbox(StopPodSandboxEvent) returns (Empty);
+  // RemovePodSandbox relays the corresponding request/event to the plugin.
+  rpc RemovePodSandbox(RemovePodSandboxEvent) returns (Empty);
+
+  // CreateContainer relays the corresponding request to the plugin.
+  // The plugin is can adjust the container being created and any other
+  // already created containers in response.
+  rpc CreateContainer(CreateContainerRequest) returns (CreateContainerResponse);
+  // PostCreateContainer relays successful container creation to the plugin.
+  rpc PostCreateContainer(PostCreateContainerEvent) returns (Empty);
+  // StartContainer relays a container start request/event to the plugin.
+  rpc StartContainer(StartContainerEvent) returns (Empty);
+  // PostStartContainer relays successful container start event to the plugin.
+  rpc PostStartContainer(PostStartContainerEvent) returns (Empty);
+  // UpdateContainer relays the corresponding request to the plugin.
+  // The plugin can adjust any container in response.
+  rpc UpdateContainer(UpdateContainerRequest) returns (UpdateContainerResponse);
+  // PostUpdateContainer relays container post-update event to the plugin.
+  rpc PostUpdateContainer(PostUpdateContainerEvent) returns (Empty);
+  // StopContainer relays a container stop request to the plugin.
+  rpc StopContainer(StopContainerRequest) returns (StopContainerResponse);
+
+  // RemoveContainer relays the corresponsing request/event to the plugin.
+  rpc RemoveContainer(RemoveContainerEvent) returns (Empty);
+
+}
+
+message ConfigureRequest {
+  string config = 1;
+}
+
+message ConfigureResponse {
+  repeated Event subscribe = 2;
+}
+
+message SynchronizeRequest {
+  repeated PodSandbox pods = 1;
+  repeated Container containers = 2;
+}
+
+message SynchronizeResponse {
+  repeated ContainerAdjustment adjust = 1;
+}
+
+message RunPodSandboxEvent {
+  PodSandbox pod = 1;
+}
+
+message StopPodSandboxEvent {
+  PodSandbox pod = 1;
+}
+
+message RemovePodSandboxEvent {
+  PodSandbox pod = 1;
+}
+
+message CreateContainerRequest {
+  PodSandbox pod = 1;
+  Container container = 2;
+}
+
+message CreateContainerResponse {
+  ContainerCreateAdjustment create = 1;
+  repeated ContainerAdjustment adjust = 2;
+}
+
+message StartContainerEvent {
+  PodSandbox pod = 1;
+  Container container = 2;
+}
+
+message UpdateContainerRequest {
+  PodSandbox pod = 1;
+  Container container = 2;
+  LinuxContainerResources linux_resources = 3;
+  map<string, string> annotations = 4;
+
+}
+
+message UpdateContainerResponse {
+  repeated ContainerAdjustment adjust = 1;
+}
+
+message StopContainerRequest {
+  PodSandbox pod = 1;
+  Container container = 2;
+}
+
+message StopContainerResponse {
+  repeated ContainerAdjustment adjust = 1;
+}
+
+message RemoveContainerEvent {
+  PodSandbox pod = 1;
+  Container container = 2;
+}
+
+message PostCreateContainerEvent {
+  PodSandbox pod = 1;
+  Container container = 2;
+}
+
+message PostStartContainerEvent {
+  PodSandbox pod = 1;
+  Container container = 2;
+}
+
+message PostUpdateContainerEvent {
+  PodSandbox pod = 1;
+  Container container = 2;
+}
+
+message Empty {}
+
+enum Event {
+  RUN_POD_SANDBOX = 0;
+  STOP_POD_SANDBOX = 1;
+  REMOVE_POD_SANDBOX = 2;
+  CREATE_CONTAINER = 3;
+  POST_CREATE_CONTAINER = 4;
+  START_CONTAINER = 5;
+  POST_START_CONTAINER = 6;
+  UPDATE_CONTAINER = 7;
+  POST_UPDATE_CONTAINER = 8;
+  STOP_CONTAINER = 9;
+  REMOVE_CONTAINER = 10;
+  ALL = 11;
+}
+
+message PodSandbox {
+  string id = 1;
+  string name = 2;
+  string uid = 3;
+  string namespace = 4;
+  map<string, string> labels = 5;
+  map<string, string> annotations = 6;
+  string cgroup_parent = 7;
+  string runtime_handler = 8;
+}
+
+message Container {
+  string id = 1;
+  string pod_sandbox_id = 2;
+  string name = 3;
+  ContainerState state = 4;  
+  map<string, string> labels = 5;
+  map<string, string> annotations = 6;
+  repeated string command = 7;
+  repeated string args = 8;
+  repeated KeyValue envs = 9;
+  repeated Mount mounts = 10;
+  repeated Device devices = 11;
+  LinuxContainerResources linux_resources = 12;
+}
+
+enum ContainerState {
+  CONTAINER_CREATED = 0;
+  CONTAINER_RUNNING = 1;
+  CONTAINER_EXITED = 2;
+}
+
+message LinuxContainerResources {
+  int64 cpu_period = 1;
+  int64 cpu_quota = 2;
+  int64 cpu_shares = 3;
+  int64 memory_limit_in_bytes = 4;
+  int64 oom_score_adj = 5;
+  string cpuset_cpus = 6;
+  string cpuset_mems = 7;
+  repeated HugepageLimit hugepage_limits = 8;
+  map<string, string> unified = 9;
+  int64 memory_swap_limit_bytes = 10;
+}
+
+message HugepageLimit {
+  string page_size = 1;
+  uint64 limit = 2;
+}
+
+message KeyValue {
+  string key = 1;
+  string value = 2;
+}
+
+message Mount {
+  string container_path = 1;
+  string host_path = 2;
+  bool readonly = 3;
+  bool selinux_relabel = 4;
+  MountPropagation propagation = 5;
+}
+
+enum MountPropagation {
+  PROPAGATION_PRIVATE = 0;
+  PROPAGATION_HOST_TO_CONTAINER = 1;
+  PROPAGATION_BIDIRECTIONAL = 2;
+}
+
+message Device {
+  string container_path = 1;
+  string host_path = 2;
+  string permissions = 3;
+}
+
+message Hooks {
+  repeated Hook prestart = 1;
+  repeated Hook create_runtime = 2;
+  repeated Hook create_container = 3;
+  repeated Hook start_container = 4;
+  repeated Hook poststart = 5;
+  repeated Hook poststop = 6;
+}
+
+message Hook {
+  string path = 1;
+  repeated string args = 2;
+  repeated string env = 3;
+  int32 timeout = 4;
+}
+
+message ContainerCreateAdjustment {
+  LinuxContainerResources linux_resources = 1;
+  map<string, string> labels = 2;
+  map<string, string> annotations = 3;
+  repeated KeyValue envs = 4;
+  repeated Mount mounts = 5;
+  repeated Device devices = 6;
+  Hooks hooks = 7;
+}
+
+message ContainerAdjustment {
+  string container_id = 1;
+  LinuxContainerResources linux_resources = 2;
+  map<string, string> annotations = 3;
+  bool ignore_failure = 4;
+}
+
