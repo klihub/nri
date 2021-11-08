@@ -29,7 +29,7 @@ GO_FETCH   := GO111MODULE=off go get -u
 GO_TEST    := $(GO_CMD) test
 GO_MODULES := $(shell $(GO_CMD) list ./... | grep -v vendor/)
 
-PLUGINS := bin/logger
+PLUGINS := bin/logger bin/hook-injector
 
 all: build
 
@@ -46,6 +46,10 @@ binaries: $(PLUGINS)
 	$(TTRPC_COMPILE) -I$(dir $<) --gogottrpc_out=plugins=ttrpc:$(dir $<) $<
 
 bin/logger: $(wildcard v2alpha1/plugins/logger/*.go)
+	@echo "Building $@..."; \
+	$(GO_BUILD) -o $@ ./$(dir $<)
+
+bin/hook-injector: $(wildcard v2alpha1/plugins/hook-injector/*.go)
 	@echo "Building $@..."; \
 	$(GO_BUILD) -o $@ ./$(dir $<)
 
