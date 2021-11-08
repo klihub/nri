@@ -31,6 +31,9 @@ GO_MODULES := $(shell $(GO_CMD) list ./... | grep -v vendor/)
 
 PLUGINS := bin/logger bin/hook-injector bin/cdi-resolver bin/device-injector
 
+GO_CILINT := golangci-lint
+
+
 all: build
 
 build: protos binaries
@@ -73,3 +76,6 @@ unittest:
 	@for m in $(GO_MODULES); do \
 	    $(GO_TEST) -race $$m || exit $?; \
 	done
+
+golangci-lint ci-lint cilint:
+	@$(Q)$(GO_CILINT) run
