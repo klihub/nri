@@ -1,0 +1,83 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test0
+  labels:
+    app: test
+  annotations:
+    devices.nri.io/container.test0c0: |
+      - path: "test.vendor/device=null"
+      - path: "/dev/zero"
+        type: "c"
+        major: 1
+        minor: 5
+    devices.nri.io/container.test0c1: |
+      - path: test.vendor/device=zero
+      - path: "/dev/null"
+        type: "c"
+        major: 1
+        minor: 3
+    devices.nri.io/container.test0c2: |
+      - path: test.vendor/device=null
+      - path: test.vendor/device=zero
+    devices.nri.io/container.test0c3: |
+      - path: test.vendor/device=nullzero
+spec:
+  containers:
+  - name: test0c0
+    image: busybox
+    imagePullPolicy: IfNotPresent
+    command:
+      - sh
+      - -c
+      - echo test0c0 $(sleep inf)
+    resources:
+      requests:
+        cpu: 500m
+        memory: '100M'
+      limits:
+        cpu: 500m
+        memory: '100M'
+  - name: test0c1
+    image: busybox
+    imagePullPolicy: IfNotPresent
+    command:
+      - sh
+      - -c
+      - echo test0c1 $(sleep inf)
+    resources:
+      requests:
+        cpu: 500m
+        memory: '100M'
+      limits:
+        cpu: 500m
+        memory: '100M'
+  - name: test0c2
+    image: busybox
+    imagePullPolicy: IfNotPresent
+    command:
+      - sh
+      - -c
+      - echo test0c2 $(sleep inf)
+    resources:
+      requests:
+        cpu: 500m
+        memory: '100M'
+      limits:
+        cpu: 500m
+        memory: '100M'
+  - name: test0c3
+    image: busybox
+    imagePullPolicy: IfNotPresent
+    command:
+      - sh
+      - -c
+      - echo test0c3 $(sleep inf)
+    resources:
+      requests:
+        cpu: 500m
+        memory: '100M'
+      limits:
+        cpu: 500m
+        memory: '100M'
+  terminationGracePeriodSeconds: 1

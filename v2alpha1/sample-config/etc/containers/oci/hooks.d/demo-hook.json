@@ -1,0 +1,17 @@
+{
+    "version": "1.0.0",
+    "hook": {
+        "path": "/usr/local/sbin/demo-hook.sh",
+        "args": ["this", "is", "a", "demo-hook", "invocation"],
+        "env": [
+            "DEMO_HOOK_VAR1=value1",
+            "DEMO_HOOK_VAR2=value2"
+        ]
+    },
+    "when": {
+        "annotations": {
+            "hookdemo": "true"
+        }
+    },
+    "stages": ["prestart", "poststop"]
+}
