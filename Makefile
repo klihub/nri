@@ -29,17 +29,25 @@ GO_FETCH   := GO111MODULE=off go get -u
 GO_TEST    := $(GO_CMD) test
 GO_MODULES := $(shell $(GO_CMD) list ./... | grep -v vendor/)
 
+PLUGINS := bin/logger
+
 all: build
 
-build: protos
+build: protos binaries
 	go build -v $(shell go list ./...)
 
 protos: $(PROTO_GOFILES)
+
+binaries: $(PLUGINS)
 
 %.pb.go: %.proto
 	@echo "Generating $@..."; \
         PATH=$(PATH):$(shell go env GOPATH)/bin; \
 	$(TTRPC_COMPILE) -I$(dir $<) --gogottrpc_out=plugins=ttrpc:$(dir $<) $<
+
+bin/logger: $(wildcard v2alpha1/plugins/logger/*.go)
+	@echo "Building $@..."; \
+	$(GO_BUILD) -o $@ ./$(dir $<)
 
 install-ttrpc-plugin:
 	$(GO_INSTALL) github.com/containerd/ttrpc/cmd/protoc-gen-gogottrpc
