@@ -29,7 +29,7 @@ GO_FETCH   := GO111MODULE=off go get -u
 GO_TEST    := $(GO_CMD) test
 GO_MODULES := $(shell $(GO_CMD) list ./... | grep -v vendor/)
 
-PLUGINS := bin/logger bin/hook-injector
+PLUGINS := bin/logger bin/hook-injector bin/cdi-resolver
 
 all: build
 
@@ -50,6 +50,10 @@ bin/logger: $(wildcard v2alpha1/plugins/logger/*.go)
 	$(GO_BUILD) -o $@ ./$(dir $<)
 
 bin/hook-injector: $(wildcard v2alpha1/plugins/hook-injector/*.go)
+	@echo "Building $@..."; \
+	$(GO_BUILD) -o $@ ./$(dir $<)
+
+bin/cdi-resolver: $(wildcard v2alpha1/plugins/cdi-resolver/*.go)
 	@echo "Building $@..."; \
 	$(GO_BUILD) -o $@ ./$(dir $<)
 
