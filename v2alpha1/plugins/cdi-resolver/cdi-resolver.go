@@ -20,17 +20,23 @@ import (
 	"context"
 	"flag"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"sigs.k8s.io/yaml"
 
-	cdi "github.com/container-orchestrated-devices/container-device-interface/pkg"
+	"github.com/container-orchestrated-devices/container-device-interface/pkg/cdi"
 	rspec "github.com/opencontainers/runtime-spec/specs-go"
 
 	"github.com/containerd/nri/v2alpha1/pkg/api"
 	"github.com/containerd/nri/v2alpha1/pkg/stub"
+)
+
+const (
+	// Annotation value used for CDI devices by CDI Device Plugin.
+	cdiDeviceAnnotation = "CDI_Device"
 )
 
 var (
@@ -44,6 +50,14 @@ type plugin struct {
 
 // CreateContainer handles container creation requests.
 func (p *plugin) CreateContainer(pod *api.PodSandbox, container *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
+	var (
+		registry   = cdi.GetRegistry()
+		annotated  []string
+		cdiDevices []string
+		unresolved []string
+		err        error
+	)
+
 	ctrName := containerName(pod, container)
 
 	if verbose {
@@ -55,25 +69,35 @@ func (p *plugin) CreateContainer(pod *api.PodSandbox, container *api.Container) 
 		return nil, nil, nil
 	}
 
-	ociDevs := []rspec.LinuxDevice{}
-	cdiDevs := []string{}
-	for _, d := range container.Linux.Devices {
-		isCDI, err := isCDIDevice(d.Path)
-		if err != nil {
-			log.Errorf("CDI device query failed: %v", err)
-			return nil, nil, errors.Wrap(err, "CDI device query failed")
-		}
-		if isCDI {
-			cdiDevs = append(cdiDevs, d.Path)
-		} else {
-			ociDevs = append(ociDevs, d.ToOCI())
+	annotated = []string{}
+	for k, v := range container.Annotations {
+		if v == cdiDeviceAnnotation {
+			annotated = append(annotated, k)
 		}
 	}
 
-	if len(cdiDevs) == 0 {
-		log.Infof("%s: no CDI devices, ignoring...", ctrName)
-		return nil, nil, nil
+	log.Infof("annotated CDI Devices: %s", strings.Join(annotated, ", "))
+
+	registry.Refresh()
+	for _, devRef := range annotated {
+		var (
+			vendor string
+			name   string
+		)
+		split := strings.SplitN(devRef, "/", 2)
+		if len(split) != 2 {
+			return nil, nil, errors.Errorf("malformed CDI device annotation %q", devRef)
+		}
+		vendor, name = split[0], split[1]
+
+		for _, device := range registry.DeviceDB().ListDevices() {
+			if match, _ := filepath.Match(vendor+"/*="+name, device); match {
+				cdiDevices = append(cdiDevices, device)
+			}
+		}
 	}
+
+	log.Infof("resolved to CDI Devices: %s", strings.Join(cdiDevices, ", "))
 
 	ociSpec := &rspec.Spec{
 		Process: &rspec.Process{
@@ -81,14 +105,13 @@ func (p *plugin) CreateContainer(pod *api.PodSandbox, container *api.Container) 
 		},
 	}
 
-	if verbose {
-		dump(ctrName, "OCI Devices", ociDevs)
-		dump(ctrName, "CDI Devices", cdiDevs)
-	}
+	unresolved, err = registry.InjectDevices(ociSpec, cdiDevices...)
 
-	if err := cdi.UpdateOCISpecForDevices(ociSpec, cdiDevs); err != nil {
-		log.Errorf("%s: CDI device injection failed for: %v", ctrName, err)
-		return nil, nil, errors.Wrap(err, "CDI device injection failed")
+	if len(unresolved) != 0 {
+		log.Errorf("unresolved CDI devices: %s", strings.Join(unresolved, ", "))
+	}
+	if err != nil {
+		return nil, nil, err
 	}
 
 	adjust := &api.ContainerAdjustment{
@@ -97,12 +120,13 @@ func (p *plugin) CreateContainer(pod *api.PodSandbox, container *api.Container) 
 		Hooks:  api.FromOCIHooks(ociSpec.Hooks),
 	}
 
-	for _, path := range cdiDevs {
+	for _, path := range annotated {
 		adjust.RemoveDevice(path)
 		if !verbose {
 			log.Infof("%s: removed virtual CDI device %q...", ctrName, path)
 		}
 	}
+
 	for _, d := range api.FromOCILinuxDevices(ociSpec.Linux.Devices) {
 		adjust.AddDevice(d)
 		if !verbose {
@@ -115,17 +139,6 @@ func (p *plugin) CreateContainer(pod *api.PodSandbox, container *api.Container) 
 	}
 
 	return adjust, nil, nil
-}
-
-// isCDIDevice checks if a path corresponds to a CDI device.
-func isCDIDevice(path string) (bool, error) {
-	// cdi.HasDevice() fails for all unqualified unresolvable devices.
-	// As a workaround don't try to resolve devices that look ordinary.
-	if strings.HasPrefix(path, "/dev/") {
-		return false, nil
-	}
-	isCDI, err := cdi.HasDevice(path)
-	return isCDI, err
 }
 
 // Construct a container name for log messages.
