@@ -26,7 +26,9 @@ GO_CMD     := go
 GO_BUILD   := $(GO_CMD) build
 GO_INSTALL := $(GO_CMD) install
 GO_FETCH   := GO111MODULE=off go get -u
-GO_TEST    := $(GO_CMD) test
+GO_TEST    := $(GO_CMD) test -cover -race
+GO_GINKGO  := ginkgo -cover -race
+
 GO_MODULES := $(shell $(GO_CMD) list ./... | grep -v vendor/)
 
 PLUGINS := bin/logger bin/hook-injector bin/cdi-resolver bin/device-injector
@@ -64,18 +66,26 @@ bin/device-injector: $(wildcard v2alpha1/plugins/device-injector/*.go)
 	@echo "Building $@..."; \
 	$(GO_BUILD) -o $@ ./$(dir $<)
 
-install-ttrpc-plugin:
-	$(GO_INSTALL) github.com/containerd/ttrpc/cmd/protoc-gen-gogottrpc
+test: testunit
 
-install-proto-dependencies:
-	$(GO_FETCH) github.com/gogo/protobuf/gogoproto
-
-test: unittest
-
-unittest:
+testunit:
 	@for m in $(GO_MODULES); do \
-	    $(GO_TEST) -race $$m || exit $?; \
+	    dir=$$(echo $$m | sed 's:^.*/nri:.:g'); \
+	    ls $$dir | grep _test.go | grep -q _suite && { \
+	        $(GO_GINKGO) $$dir || exit $?; \
+	    } || { \
+	        $(GO_TEST) $$dir || exit $?; \
+	    }; \
 	done
 
 golangci-lint ci-lint cilint:
 	@$(Q)$(GO_CILINT) run
+
+install-ttrpc-plugin:
+	@$(GO_INSTALL) github.com/containerd/ttrpc/cmd/protoc-gen-gogottrpc
+
+install-protoc-dependencies:
+	@$(GO_FETCH) github.com/gogo/protobuf/gogoproto
+
+install-ginkgo:
+	@$(GO_INSTALL) -mod=mod github.com/onsi/ginkgo/v2/ginkgo
