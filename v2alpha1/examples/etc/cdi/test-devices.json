@@ -1,0 +1,31 @@
+{
+  "cdiVersion": "0.2.0",
+  "kind": "test.vendor/device",
+  "devices": [
+      {
+	  "name": "null",
+	  "containerEdits": {
+              "deviceNodes": [
+		  { "path": "/dev/null-dev", "type": "c", "major": 1, "minor": 3 }
+              ]
+	  }
+      },
+      {
+	  "name": "zero",
+	  "containerEdits": {
+              "deviceNodes": [
+		  { "path": "/dev/zero-dev", "type": "c", "major": 1, "minor": 5 }
+              ]
+	  }
+      },
+      {
+	  "name": "nullzero",
+	  "containerEdits": {
+              "deviceNodes": [
+		  { "path": "/dev/null-dev", "type": "c", "major": 1, "minor": 3 },
+		  { "path": "/dev/zero-dev", "type": "c", "major": 1, "minor": 5 }
+              ]
+	  }
+      }
+  ]
+}

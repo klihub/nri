@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: hook-injection-demo
+spec:
+  containers:
+  - name: shell
+    image: busybox
+    imagePullPolicy: IfNotPresent
+    command:
+      - sh
+      - -c
+      - echo I am a shell $(sleep inf)
+    resources:
+      requests:
+        cpu: 100m
+        memory: '100M'
+      limits:
+        cpu: 100m
+        memory: '100M'
+  - name: busybox
+    image: busybox
+    imagePullPolicy: IfNotPresent
+    command:
+      - busybox
+      - sh
+      - -c
+      - echo busybox $(sleep inf)
+    resources:
+      requests:
+        cpu: 100m
+        memory: '100M'
+      limits:
+        cpu: 100m
+        memory: '100M'
+  terminationGracePeriodSeconds: 1
