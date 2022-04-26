@@ -26,6 +26,11 @@ issues:
       linters:
         - golint
       text: "should be claim"
+    # Ignore naming violation in the test suite as well.
+    - path: v2alpha1/pkg/adaptation/adaptation_suite_test.go
+      linters:
+        - golint
+      text: "should be strip"
 
 run:
   timeout: 2m
