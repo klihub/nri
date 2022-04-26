@@ -17,6 +17,19 @@ linters:
 issues:
   include:
     - EXC0002
+  # We have protoc-generated ttRPC/gRPC code. When adding extra functions
+  # for generated types we want to consistently violate golint's semantic
+  # function name spelling rules, instead of inconsistently doing so only
+  # from automatically generated files. These rules are for that.
+  exclude-rules:
+    - path: v2alpha1/pkg/runtime/result.go
+      linters:
+        - golint
+      text: "should be claim"
+    - path: v2alpha1/pkg/runtime/runtime_suite_test.go
+      linters:
+        - golint
+      text: "should be strip"
 
 run:
   timeout: 2m
