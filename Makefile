@@ -37,6 +37,8 @@ BUILD_PATH    := $(shell pwd)/build
 BIN_PATH      := $(BUILD_PATH)/bin
 COVERAGE_PATH := $(BUILD_PATH)/coverage
 
+PLUGINS := $(BIN_PATH)/logger $(BIN_PATH)/hook-injector $(BIN_PATH)/device-injector
+
 ifneq ($(V),1)
   Q := @
 endif
@@ -47,9 +49,11 @@ endif
 
 all: build
 
-build: build-proto build-check
+build: build-proto build-check build-plugins
 
-allclean: clean-cache
+clean: clean-plugins
+
+allclean: clean clean-cache
 
 test: test-gopkgs
 
@@ -62,9 +66,14 @@ build-proto: $(PROTO_GOFILES)
 build-check:
 	$(Q)$(GO_BUILD) -v $(GO_MODULES)
 
+build-plugins: $(PLUGINS)
+
 #
 # clean targets
 #
+
+clean-plugins:
+	$(Q)rm -f $(PLUGINS)
 
 clean-cache:
 	$(Q)$(GO_CMD) clean -cache -testcache
@@ -115,6 +124,22 @@ golangci-lint:
 %.pb.go: %.proto
 	$(Q)echo "Generating $@..."; \
 	$(PROTO_COMPILE) $<
+
+#
+# plugin generation targets
+#
+
+$(BIN_PATH)/logger: $(wildcard v2alpha1/plugins/logger/*.go)
+	$(Q)echo "Building $@..."; \
+	$(GO_BUILD) -o $@ ./$(dir $<)
+
+$(BIN_PATH)/hook-injector: $(wildcard v2alpha1/plugins/hook-injector/*.go)
+	$(Q)echo "Building $@..."; \
+	$(GO_BUILD) -o $@ ./$(dir $<)
+
+$(BIN_PATH)/device-injector: $(wildcard v2alpha1/plugins/device-injector/*.go)
+	$(Q)echo "Building $@..."; \
+	$(GO_BUILD) -o $@ ./$(dir $<)
 
 #
 # targets for installing dependencies
