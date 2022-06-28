@@ -6,6 +6,7 @@ require (
 	// when updating containerd, adjust the replace rules accordingly
 	github.com/containerd/containerd v1.6.0
 	github.com/containerd/ttrpc v1.1.0
+	github.com/containers/podman/v3 v3.2.0-rc1.0.20211005134800-8bcc086b1b9d
 	github.com/moby/sys/mountinfo v0.5.0
 	github.com/onsi/ginkgo/v2 v2.1.4
 	github.com/onsi/gomega v1.19.0
