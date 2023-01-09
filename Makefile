@@ -44,7 +44,8 @@ PLUGINS := \
 	$(BIN_PATH)/differ \
 	$(BIN_PATH)/ulimit-adjuster \
 	$(BIN_PATH)/v010-adapter \
-	$(BIN_PATH)/template
+	$(BIN_PATH)/sgx-config \
+	$(BIN_PATH)/template \
 
 
 ifneq ($(V),1)
@@ -111,6 +112,10 @@ $(BIN_PATH)/ulimit-adjuster: $(wildcard plugins/ulimit-adjuster/*.go)
 	cd $(dir $<) && $(GO_BUILD) -o $@ .
 
 $(BIN_PATH)/v010-adapter: $(wildcard plugins/v010-adapter/*.go)
+	$(Q)echo "Building $@..."; \
+	cd $(dir $<) && $(GO_BUILD) -o $@ .
+
+$(BIN_PATH)/sgx-config: $(wildcard plugins/sgx-config/*.go)
 	$(Q)echo "Building $@..."; \
 	cd $(dir $<) && $(GO_BUILD) -o $@ .
 
