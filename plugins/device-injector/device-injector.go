@@ -27,7 +27,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/containerd/nri/pkg/api"
-	"github.com/containerd/nri/pkg/stub"
+	stub "github.com/containerd/nri/pkg/stub/external"
 )
 
 const (

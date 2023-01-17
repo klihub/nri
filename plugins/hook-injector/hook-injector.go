@@ -29,7 +29,7 @@ import (
 	rspec "github.com/opencontainers/runtime-spec/specs-go"
 
 	"github.com/containerd/nri/pkg/api"
-	"github.com/containerd/nri/pkg/stub"
+	stub "github.com/containerd/nri/pkg/stub/external"
 	"github.com/containers/podman/v3/pkg/hooks"
 )
 

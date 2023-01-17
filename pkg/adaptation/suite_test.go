@@ -31,7 +31,7 @@ import (
 	"github.com/containerd/nri/pkg/api"
 	"github.com/sirupsen/logrus"
 
-	"github.com/containerd/nri/pkg/stub"
+	stub "github.com/containerd/nri/pkg/stub/external"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"

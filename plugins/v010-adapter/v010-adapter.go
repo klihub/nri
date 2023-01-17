@@ -25,7 +25,7 @@ import (
 
 	"github.com/containerd/nri"
 	"github.com/containerd/nri/pkg/api"
-	"github.com/containerd/nri/pkg/stub"
+	stub "github.com/containerd/nri/pkg/stub/external"
 	nriv1 "github.com/containerd/nri/types/v1"
 	oci "github.com/opencontainers/runtime-spec/specs-go"
 )
