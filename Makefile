@@ -43,7 +43,8 @@ PLUGINS := \
 	$(BIN_PATH)/hook-injector \
 	$(BIN_PATH)/differ \
 	$(BIN_PATH)/v010-adapter \
-	$(BIN_PATH)/template
+	$(BIN_PATH)/template \
+	$(BIN_PATH)/cgroup-hook-hack
 
 
 ifneq ($(V),1)
@@ -110,6 +111,10 @@ $(BIN_PATH)/v010-adapter: $(wildcard plugins/v010-adapter/*.go)
 	cd $(dir $<) && $(GO_BUILD) -o $@ .
 
 $(BIN_PATH)/template: $(wildcard plugins/template/*.go)
+	$(Q)echo "Building $@..."; \
+	cd $(dir $<) && $(GO_BUILD) -o $@ .
+
+$(BIN_PATH)/cgroup-hook-hack: $(wildcard plugins/cgroup-hook-hack/*.go)
 	$(Q)echo "Building $@..."; \
 	cd $(dir $<) && $(GO_BUILD) -o $@ .
 
