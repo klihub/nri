@@ -31,11 +31,13 @@ type result struct {
 type resultRequest struct {
 	create *CreateContainerRequest
 	update *UpdateContainerRequest
+	networkpolicy *NetworkPolicyRequest
 }
 
 type resultReply struct {
 	adjust *ContainerAdjustment
 	update []*ContainerUpdate
+	networkpolicy *NetworkPolicyUpdate
 }
 
 type resultOwners map[string]*owners
@@ -130,6 +132,17 @@ func collectStopContainerResult() *result {
 	return collectUpdateContainerResult(nil)
 }
 
+func collectNetworkPolicyResult(request *NetworkPolicyRequest) *result {
+	return &result{
+		request: resultRequest{
+			networkpolicy: request,
+		},
+		reply: resultReply{},
+		updates: nil,
+		owners: resultOwners{},
+	}
+}
+
 func (r *result) createContainerResponse() *CreateContainerResponse {
 	return &CreateContainerResponse{
 		Adjust: r.reply.adjust,
@@ -147,6 +160,12 @@ func (r *result) updateContainerResponse() *UpdateContainerResponse {
 func (r *result) stopContainerResponse() *StopContainerResponse {
 	return &StopContainerResponse{
 		Update: r.reply.update,
+	}
+}
+
+func (r *result) networkPolicyResponse() *NetworkPolicyResponse {
+	return &NetworkPolicyResponse{
+		NetworkPolicy: r.reply.networkpolicy,
 	}
 }
 
@@ -174,6 +193,13 @@ func (r *result) apply(response interface{}, plugin string) error {
 			return nil
 		}
 		if err := r.update(rpl.Update, plugin); err != nil {
+			return err
+		}
+	case *NetworkPolicyResponse:
+		if rpl == nil {
+			return nil
+		}
+		if err := r.networkpolicyadjust(rpl.NetworkPolicy, plugin); err != nil {
 			return err
 		}
 	default:
@@ -659,6 +685,23 @@ func (r *result) adjustCgroupsPath(path, plugin string) error {
 	return nil
 }
 
+func (r *result) networkpolicyadjust(networkpolicy *NetworkPolicyUpdate, plugin string) error {
+	id := r.request.create.Container.Id
+
+	if networkpolicy == nil || networkpolicy.Bar == "" {
+		return nil
+	}
+
+	if err := r.owners.claimNetworkPolicy(id, plugin); err != nil {
+		return err
+	}
+
+	r.request.networkpolicy.NetworkPolicy = networkpolicy
+	r.reply.networkpolicy = networkpolicy
+
+	return nil
+}
+
 func (r *result) updateResources(reply, u *ContainerUpdate, plugin string) error {
 	if u.Linux == nil || u.Linux.Resources == nil {
 		return nil
@@ -873,6 +916,7 @@ type owners struct {
 	rdtClass            string
 	unified             map[string]string
 	cgroupsPath         string
+	networkPolicy       string
 }
 
 func (ro resultOwners) ownersFor(id string) *owners {
@@ -978,6 +1022,10 @@ func (ro resultOwners) claimUnified(id, key, plugin string) error {
 
 func (ro resultOwners) claimCgroupsPath(id, plugin string) error {
 	return ro.ownersFor(id).claimCgroupsPath(plugin)
+}
+
+func (ro resultOwners) claimNetworkPolicy(id, plugin string) error {
+	return ro.ownersFor(id).claimNetworkPolicy(plugin)
 }
 
 func (o *owners) claimAnnotation(key, plugin string) error {
@@ -1188,6 +1236,14 @@ func (o *owners) claimCgroupsPath(plugin string) error {
 		return conflict(plugin, other, "cgroups path")
 	}
 	o.cgroupsPath = plugin
+	return nil
+}
+
+func (o *owners) claimNetworkPolicy(plugin string) error {
+	if other := o.networkPolicy; other != "" {
+		return conflict(plugin, other, "network policy")
+	}
+	o.networkPolicy = plugin
 	return nil
 }
 

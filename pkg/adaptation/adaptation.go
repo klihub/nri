@@ -276,6 +276,25 @@ func (r *Adaptation) RemoveContainer(ctx context.Context, evt *StateChangeEvent)
 	return r.StateChange(ctx, evt)
 }
 
+func (r *Adaptation) NetworkPolicy(ctx context.Context, req *NetworkPolicyRequest) (*NetworkPolicyResponse, error) {
+	r.Lock()
+	defer r.Unlock()
+	defer r.removeClosedPlugins()
+
+	result := collectNetworkPolicyResult(req)
+	for _, plugin := range r.plugins {
+		reply, err := plugin.networkPolicy(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		err = result.apply(reply, plugin.name())
+		if err != nil {
+			return nil, err
+		}
+	}
+	return result.networkPolicyResponse(), nil
+}
+
 // StateChange relays pod- or container events to plugins.
 func (r *Adaptation) StateChange(ctx context.Context, evt *StateChangeEvent) error {
 	if evt.Event == Event_UNKNOWN {

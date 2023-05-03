@@ -105,6 +105,9 @@ service Plugin {
   // plugin-specific processing which needs to occur in connection with any of
   // these events.
   rpc StateChange(StateChangeEvent) returns (Empty);
+
+  //
+  rpc NetworkPolicy(NetworkPolicyRequest) returns (NetworkPolicyResponse);
 }
 
 message ConfigureRequest {
@@ -192,6 +195,18 @@ message StateChangeEvent {
 // Empty response for those *Requests that are semantically events.
 message Empty {}
 
+message NetworkPolicyRequest {
+  // Pod whose network policy is under consideration
+  PodSandbox pod = 1;
+  // network parameter
+  NetworkPolicyUpdate NetworkPolicy = 2;
+}
+
+message NetworkPolicyResponse {
+  // network response parameter
+  NetworkPolicyUpdate NetworkPolicy = 1;
+}
+
 // Events that plugins can subscribe to in ConfigureResponse.
 enum Event {
   UNKNOWN = 0;
@@ -206,7 +221,8 @@ enum Event {
   POST_UPDATE_CONTAINER = 9;
   STOP_CONTAINER = 10;
   REMOVE_CONTAINER = 11;
-  LAST = 12;
+  NETWORK_POLICY = 12;
+  LAST = 13;
 }
 
 // Pod metadata that is considered relevant for a plugin.
@@ -392,6 +408,10 @@ message ContainerEviction {
   string container_id = 1;
   // Human-readable reason for eviction.
   string reason = 2;
+}
+
+message NetworkPolicyUpdate {
+  string bar = 1;
 }
 
 // KeyValue represents an environment variable.

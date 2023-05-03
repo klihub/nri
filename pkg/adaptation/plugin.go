@@ -489,6 +489,28 @@ func (p *plugin) stopContainer(ctx context.Context, req *StopContainerRequest) (
 	return rpl, nil
 }
 
+func (p *plugin) networkPolicy(ctx context.Context, req* NetworkPolicyRequest) (*NetworkPolicyResponse, error) {
+	if !p.events.IsSet(Event_NETWORK_POLICY) {
+		return nil, nil
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, getPluginRequestTimeout())
+	defer cancel()
+
+	rpl, err := p.stub.NetworkPolicy(ctx, req)
+	if err != nil {
+		if isFatalError(err) {
+			log.Errorf(ctx, "closing plugin %s, failed to handle NetworkPolicy request: %v",
+				p.name(), err)
+			p.close()
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	return rpl, nil
+}
+
 // Relay other pod or container state change events to the plugin.
 func (p *plugin) StateChange(ctx context.Context, evt *StateChangeEvent) error {
 	if !p.events.IsSet(evt.Event) {

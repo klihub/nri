@@ -60,6 +60,9 @@ type (
 	PostUpdateContainerRequest  = api.PostUpdateContainerRequest
 	PostUpdateContainerResponse = api.PostUpdateContainerResponse
 
+	NetworkPolicyRequest        = api.NetworkPolicyRequest
+	NetworkPolicyResponse       = api.NetworkPolicyResponse
+
 	PodSandbox               = api.PodSandbox
 	LinuxPodSandbox          = api.LinuxPodSandbox
 	Container                = api.Container
@@ -78,6 +81,7 @@ type (
 	LinuxMemory              = api.LinuxMemory
 	LinuxDevice              = api.LinuxDevice
 	LinuxDeviceCgroup        = api.LinuxDeviceCgroup
+	NetworkPolicyUpdate      = api.NetworkPolicyUpdate
 	HugepageLimit            = api.HugepageLimit
 	Hooks                    = api.Hooks
 	Hook                     = api.Hook
@@ -100,6 +104,7 @@ const (
 	Event_POST_UPDATE_CONTAINER = api.Event_POST_UPDATE_CONTAINER
 	Event_STOP_CONTAINER        = api.Event_STOP_CONTAINER
 	Event_REMOVE_CONTAINER      = api.Event_REMOVE_CONTAINER
+	Event_NETWORK_POLICY        = api.Event_NETWORK_POLICY
 	ValidEvents                 = api.ValidEvents
 
 	ContainerState_CONTAINER_UNKNOWN = api.ContainerState_CONTAINER_UNKNOWN

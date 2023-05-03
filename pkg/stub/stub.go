@@ -135,6 +135,10 @@ type PostUpdateContainerInterface interface {
 	PostUpdateContainer(*api.PodSandbox, *api.Container) error
 }
 
+type NetworkPolicyInterface interface {
+	NetworkPolicy(*api.PodSandbox) (*api.NetworkPolicyUpdate, error)
+}
+
 // Stub is the interface the stub provides for the plugin implementation.
 type Stub interface {
 	// Run the plugin. Starts the plugin then waits for an error or the plugin to stop
@@ -267,6 +271,7 @@ type handlers struct {
 	PostCreateContainer func(*api.PodSandbox, *api.Container) error
 	PostStartContainer  func(*api.PodSandbox, *api.Container) error
 	PostUpdateContainer func(*api.PodSandbox, *api.Container) error
+	NetworkPolicy       func(*api.PodSandbox) (*api.NetworkPolicyUpdate, error)
 }
 
 // New creates a stub with the given plugin and options.
@@ -637,6 +642,17 @@ func (stub *stub) StopContainer(ctx context.Context, req *api.StopContainerReque
 	}, err
 }
 
+func (stub *stub) NetworkPolicy(ctx context.Context, req *api.NetworkPolicyRequest) (*api.NetworkPolicyResponse, error) {
+	handler := stub.handlers.NetworkPolicy
+	if handler == nil {
+		return nil, nil
+	}
+	networkpolicy, err := handler(req.Pod)
+	return &api.NetworkPolicyResponse{
+		NetworkPolicy: networkpolicy,
+	}, err
+}
+
 // StateChange event handler.
 func (stub *stub) StateChange(ctx context.Context, evt *api.StateChangeEvent) (*api.Empty, error) {
 	var err error
@@ -755,6 +771,11 @@ func (stub *stub) setupHandlers() error {
 	if plugin, ok := stub.plugin.(PostUpdateContainerInterface); ok {
 		stub.handlers.PostUpdateContainer = plugin.PostUpdateContainer
 		stub.events.Set(api.Event_POST_UPDATE_CONTAINER)
+	}
+
+	if plugin, ok := stub.plugin.(NetworkPolicyInterface); ok {
+		stub.handlers.NetworkPolicy = plugin.NetworkPolicy
+		stub.events.Set(api.Event_NETWORK_POLICY)
 	}
 
 	if stub.events == 0 {
