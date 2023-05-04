@@ -320,6 +320,7 @@ type mockPlugin struct {
 	postUpdateContainer func(*mockPlugin, *api.PodSandbox, *api.Container) error
 	stopContainer       func(*mockPlugin, *api.PodSandbox, *api.Container) ([]*api.ContainerUpdate, error)
 	removeContainer     func(*mockPlugin, *api.PodSandbox, *api.Container) error
+	networkPolicy       func(*mockPlugin, *api.PodSandbox) (*api.NetworkPolicyUpdate, error)
 }
 
 var (
@@ -336,6 +337,7 @@ var (
 	_ = stub.PostCreateContainerInterface(&mockPlugin{})
 	_ = stub.PostStartContainerInterface(&mockPlugin{})
 	_ = stub.PostUpdateContainerInterface(&mockPlugin{})
+	_ = stub.NetworkPolicyInterface(&mockPlugin{})
 )
 
 func (m *mockPlugin) Log(format string, args ...interface{}) {
@@ -432,7 +434,9 @@ func (m *mockPlugin) Init(dir string) error {
 	if m.removeContainer == nil {
 		m.removeContainer = nopEvent
 	}
-
+	if m.networkPolicy == nil {
+		m.networkPolicy = nopNetworkPolicy
+	}
 	return nil
 }
 
@@ -577,6 +581,13 @@ func (m *mockPlugin) RemoveContainer(pod *api.PodSandbox, ctr *api.Container) er
 	return m.removeContainer(m, pod, ctr)
 }
 
+func (m *mockPlugin) NetworkPolicy(pod *api.PodSandbox) (*api.NetworkPolicyUpdate, error) {
+	m.pods[pod.Id] = pod
+	m.q.Add(PodSandboxEvent(pod, NetworkPolicy))
+
+	return m.networkPolicy(m, pod)
+}
+
 func nopEvent(*mockPlugin, *api.PodSandbox, *api.Container) error {
 	return nil
 }
@@ -590,6 +601,10 @@ func nopUpdateContainer(*mockPlugin, *api.PodSandbox, *api.Container) ([]*api.Co
 }
 
 func nopStopContainer(*mockPlugin, *api.PodSandbox, *api.Container) ([]*api.ContainerUpdate, error) {
+	return nil, nil
+}
+
+func nopNetworkPolicy(*mockPlugin, *api.PodSandbox) (*api.NetworkPolicyUpdate, error) {
 	return nil, nil
 }
 
@@ -616,6 +631,7 @@ const (
 	PostCreateContainer = "PostCreateContainer"
 	PostStartContainer  = "PostStartContainer"
 	PostUpdateContainer = "PostUpdateContainer"
+	NetworkPolicy       = "NetworkPolicy"
 
 	Error   = "Error"
 	Timeout = ""
