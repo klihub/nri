@@ -489,18 +489,18 @@ func (p *plugin) stopContainer(ctx context.Context, req *StopContainerRequest) (
 	return rpl, nil
 }
 
-func (p *plugin) networkPolicy(ctx context.Context, req* NetworkPolicyRequest) (*NetworkPolicyResponse, error) {
-	if !p.events.IsSet(Event_NETWORK_POLICY) {
+func (p *plugin) adjustPodSandboxNetwork(ctx context.Context, req* AdjustPodSandboxNetworkRequest) (*AdjustPodSandboxNetworkResponse, error) {
+	if !p.events.IsSet(Event_ADJUST_POD_SANDBOX_NETWORK) {
 		return nil, nil
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, getPluginRequestTimeout())
 	defer cancel()
 
-	rpl, err := p.stub.NetworkPolicy(ctx, req)
+	rpl, err := p.stub.AdjustPodSandboxNetwork(ctx, req)
 	if err != nil {
 		if isFatalError(err) {
-			log.Errorf(ctx, "closing plugin %s, failed to handle NetworkPolicy request: %v",
+			log.Errorf(ctx, "closing plugin %s, failed to handle AdjustPodSandboxNetwork request: %v",
 				p.name(), err)
 			p.close()
 			return nil, nil

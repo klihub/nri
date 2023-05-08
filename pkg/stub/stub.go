@@ -135,8 +135,12 @@ type PostUpdateContainerInterface interface {
 	PostUpdateContainer(*api.PodSandbox, *api.Container) error
 }
 
-type NetworkPolicyInterface interface {
-	NetworkPolicy(*api.PodSandbox) (*api.NetworkPolicyUpdate, error)
+//type NetworkPolicyInterface interface {
+//	NetworkPolicy(*api.PodSandbox) (*api.NetworkPolicyUpdate, error)
+//}
+
+type AdjustPodSandboxNetworkInterface interface {
+	AdjustPodSandboxNetwork(*api.PodSandbox) (*api.AdjustPodSandboxNetworkUpdate, error)
 }
 
 // Stub is the interface the stub provides for the plugin implementation.
@@ -271,7 +275,8 @@ type handlers struct {
 	PostCreateContainer func(*api.PodSandbox, *api.Container) error
 	PostStartContainer  func(*api.PodSandbox, *api.Container) error
 	PostUpdateContainer func(*api.PodSandbox, *api.Container) error
-	NetworkPolicy       func(*api.PodSandbox) (*api.NetworkPolicyUpdate, error)
+	//	NetworkPolicy       func(*api.PodSandbox) (*api.NetworkPolicyUpdate, error)
+	AdjustPodSandboxNetwork func(*api.PodSandbox) (*api.AdjustPodSandboxNetworkUpdate, error)
 }
 
 // New creates a stub with the given plugin and options.
@@ -642,14 +647,14 @@ func (stub *stub) StopContainer(ctx context.Context, req *api.StopContainerReque
 	}, err
 }
 
-func (stub *stub) NetworkPolicy(ctx context.Context, req *api.NetworkPolicyRequest) (*api.NetworkPolicyResponse, error) {
-	handler := stub.handlers.NetworkPolicy
+func (stub *stub) AdjustPodSandboxNetwork(ctx context.Context, req *api.AdjustPodSandboxNetworkRequest) (*api.AdjustPodSandboxNetworkResponse, error) {
+	handler := stub.handlers.AdjustPodSandboxNetwork
 	if handler == nil {
 		return nil, nil
 	}
-	networkpolicy, err := handler(req.Pod)
-	return &api.NetworkPolicyResponse{
-		NetworkPolicy: networkpolicy,
+	adjust, err := handler(req.Pod)
+	return &api.AdjustPodSandboxNetworkResponse{
+		Adjust: adjust,
 	}, err
 }
 
@@ -773,9 +778,9 @@ func (stub *stub) setupHandlers() error {
 		stub.events.Set(api.Event_POST_UPDATE_CONTAINER)
 	}
 
-	if plugin, ok := stub.plugin.(NetworkPolicyInterface); ok {
-		stub.handlers.NetworkPolicy = plugin.NetworkPolicy
-		stub.events.Set(api.Event_NETWORK_POLICY)
+	if plugin, ok := stub.plugin.(AdjustPodSandboxNetworkInterface); ok {
+		stub.handlers.AdjustPodSandboxNetwork = plugin.AdjustPodSandboxNetwork
+		stub.events.Set(api.Event_ADJUST_POD_SANDBOX_NETWORK)
 	}
 
 	if stub.events == 0 {

@@ -31,13 +31,13 @@ type result struct {
 type resultRequest struct {
 	create *CreateContainerRequest
 	update *UpdateContainerRequest
-	networkpolicy *NetworkPolicyRequest
+	networkadjust *AdjustPodSandboxNetworkRequest
 }
 
 type resultReply struct {
 	adjust *ContainerAdjustment
 	update []*ContainerUpdate
-	networkpolicy *NetworkPolicyUpdate
+	networkupdate *AdjustPodSandboxNetworkUpdate
 }
 
 type resultOwners map[string]*owners
@@ -132,10 +132,10 @@ func collectStopContainerResult() *result {
 	return collectUpdateContainerResult(nil)
 }
 
-func collectNetworkPolicyResult(request *NetworkPolicyRequest) *result {
+func collectAdjustPodSandboxNetworkResult(request *AdjustPodSandboxNetworkRequest) *result {
 	return &result{
 		request: resultRequest{
-			networkpolicy: request,
+			networkadjust: request,
 		},
 		reply: resultReply{},
 		updates: nil,
@@ -163,9 +163,9 @@ func (r *result) stopContainerResponse() *StopContainerResponse {
 	}
 }
 
-func (r *result) networkPolicyResponse() *NetworkPolicyResponse {
-	return &NetworkPolicyResponse{
-		NetworkPolicy: r.reply.networkpolicy,
+func (r *result) adjustPodSandboxNetworkResponse() *AdjustPodSandboxNetworkResponse {
+	return &AdjustPodSandboxNetworkResponse{
+		Adjust: r.reply.networkupdate,
 	}
 }
 
@@ -195,11 +195,11 @@ func (r *result) apply(response interface{}, plugin string) error {
 		if err := r.update(rpl.Update, plugin); err != nil {
 			return err
 		}
-	case *NetworkPolicyResponse:
+	case *AdjustPodSandboxNetworkResponse:
 		if rpl == nil {
 			return nil
 		}
-		if err := r.networkpolicyadjust(rpl.NetworkPolicy, plugin); err != nil {
+		if err := r.adjustpodsandboxnetwork(rpl.Adjust, plugin); err != nil {
 			return err
 		}
 	default:
@@ -685,19 +685,19 @@ func (r *result) adjustCgroupsPath(path, plugin string) error {
 	return nil
 }
 
-func (r *result) networkpolicyadjust(networkpolicy *NetworkPolicyUpdate, plugin string) error {
+func (r *result) adjustpodsandboxnetwork(update *AdjustPodSandboxNetworkUpdate, plugin string) error {
 	id := r.request.create.Container.Id
 
-	if networkpolicy == nil || networkpolicy.Bar == "" {
+	if update == nil || update.Bar == "" {
 		return nil
 	}
 
-	if err := r.owners.claimNetworkPolicy(id, plugin); err != nil {
+	if err := r.owners.claimAdjustPodSandboxNetwork(id, plugin); err != nil {
 		return err
 	}
 
-	r.request.networkpolicy.NetworkPolicy = networkpolicy
-	r.reply.networkpolicy = networkpolicy
+	r.request.networkadjust.Adjust = update
+	r.reply.networkupdate = update
 
 	return nil
 }
@@ -916,7 +916,7 @@ type owners struct {
 	rdtClass            string
 	unified             map[string]string
 	cgroupsPath         string
-	networkPolicy       string
+	adjustPodSandboxNetwork       string
 }
 
 func (ro resultOwners) ownersFor(id string) *owners {
@@ -1024,8 +1024,8 @@ func (ro resultOwners) claimCgroupsPath(id, plugin string) error {
 	return ro.ownersFor(id).claimCgroupsPath(plugin)
 }
 
-func (ro resultOwners) claimNetworkPolicy(id, plugin string) error {
-	return ro.ownersFor(id).claimNetworkPolicy(plugin)
+func (ro resultOwners) claimAdjustPodSandboxNetwork(id, plugin string) error {
+	return ro.ownersFor(id).claimAdjustPodSandboxNetwork(plugin)
 }
 
 func (o *owners) claimAnnotation(key, plugin string) error {
@@ -1239,11 +1239,11 @@ func (o *owners) claimCgroupsPath(plugin string) error {
 	return nil
 }
 
-func (o *owners) claimNetworkPolicy(plugin string) error {
-	if other := o.networkPolicy; other != "" {
-		return conflict(plugin, other, "network policy")
+func (o *owners) claimAdjustPodSandboxNetwork(plugin string) error {
+	if other := o.adjustPodSandboxNetwork; other != "" {
+		return conflict(plugin, other, "adjust pod sandbox network")
 	}
-	o.networkPolicy = plugin
+	o.adjustPodSandboxNetwork = plugin
 	return nil
 }
 

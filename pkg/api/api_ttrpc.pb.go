@@ -63,7 +63,7 @@ type PluginService interface {
 	UpdateContainer(ctx context.Context, req *UpdateContainerRequest) (*UpdateContainerResponse, error)
 	StopContainer(ctx context.Context, req *StopContainerRequest) (*StopContainerResponse, error)
 	StateChange(ctx context.Context, req *StateChangeEvent) (*Empty, error)
-	NetworkPolicy(ctx context.Context, req *NetworkPolicyRequest) (*NetworkPolicyResponse, error)
+	AdjustPodSandboxNetwork(ctx context.Context, req *AdjustPodSandboxNetworkRequest) (*AdjustPodSandboxNetworkResponse, error)
 }
 
 func RegisterPluginService(srv *ttrpc.Server, svc PluginService) {
@@ -117,12 +117,12 @@ func RegisterPluginService(srv *ttrpc.Server, svc PluginService) {
 			}
 			return svc.StateChange(ctx, &req)
 		},
-		"NetworkPolicy": func(ctx context.Context, unmarshal func(interface{}) error) (interface{}, error) {
-			var req NetworkPolicyRequest
+		"AdjustPodSandboxNetwork": func(ctx context.Context, unmarshal func(interface{}) error) (interface{}, error) {
+			var req AdjustPodSandboxNetworkRequest
 			if err := unmarshal(&req); err != nil {
 				return nil, err
 			}
-			return svc.NetworkPolicy(ctx, &req)
+			return svc.AdjustPodSandboxNetwork(ctx, &req)
 		},
 	})
 }
@@ -185,9 +185,9 @@ func (c *pluginClient) StateChange(ctx context.Context, req *StateChangeEvent) (
 	}
 	return &resp, nil
 }
-func (c *pluginClient) NetworkPolicy(ctx context.Context, req *NetworkPolicyRequest) (*NetworkPolicyResponse, error) {
-	var resp NetworkPolicyResponse
-	if err := c.client.Call(ctx, "nri.pkg.api.v1alpha1.Plugin", "NetworkPolicy", req, &resp); err != nil {
+func (c *pluginClient) AdjustPodSandboxNetwork(ctx context.Context, req *AdjustPodSandboxNetworkRequest) (*AdjustPodSandboxNetworkResponse, error) {
+	var resp AdjustPodSandboxNetworkResponse
+	if err := c.client.Call(ctx, "nri.pkg.api.v1alpha1.Plugin", "AdjustPodSandboxNetwork", req, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
