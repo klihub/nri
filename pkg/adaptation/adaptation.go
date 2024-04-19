@@ -65,6 +65,7 @@ type Adaptation struct {
 	serverOpts []ttrpc.ServerOpt
 	listener   net.Listener
 	plugins    []*plugin
+	syncLock   sync.RWMutex
 }
 
 var (
@@ -135,6 +136,7 @@ func New(name, version string, syncFn SyncFn, updateFn UpdateFn, opts ...Option)
 		pluginPath: DefaultPluginPath,
 		dropinPath: DefaultPluginConfigPath,
 		socketPath: DefaultSocketPath,
+		syncLock:   sync.RWMutex{},
 	}
 
 	for _, o := range opts {
@@ -431,6 +433,8 @@ func (r *Adaptation) acceptPluginConnections(l net.Listener) error {
 				continue
 			}
 
+			r.requestPluginSync()
+
 			err = r.syncFn(ctx, p.synchronize)
 			if err != nil {
 				log.Infof(ctx, "failed to synchronize plugin: %v", err)
@@ -440,6 +444,8 @@ func (r *Adaptation) acceptPluginConnections(l net.Listener) error {
 				r.sortPlugins()
 				r.Unlock()
 			}
+
+			r.finishedPluginSync()
 
 			log.Infof(ctx, "plugin %q connected", p.name())
 		}
@@ -511,4 +517,20 @@ func (r *Adaptation) sortPlugins() {
 			log.Infof(noCtx, "  #%d: %q (%s)", i+1, p.name(), p.qualifiedName())
 		}
 	}
+}
+
+func (r *Adaptation) BlockPluginSync() {
+	r.syncLock.RLock()
+}
+
+func (r *Adaptation) AllowPluginSync() {
+	r.syncLock.RUnlock()
+}
+
+func (r *Adaptation) requestPluginSync() {
+	r.syncLock.Lock()
+}
+
+func (r *Adaptation) finishedPluginSync() {
+	r.syncLock.Unlock()
 }
