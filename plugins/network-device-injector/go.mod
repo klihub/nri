@@ -2,6 +2,8 @@ module github.com/containerd/nri/plugins/network-device-injector
 
 go 1.22.0
 
+toolchain go1.22.1
+
 require (
 	github.com/containerd/nri v0.2.0
 	github.com/containernetworking/plugins v1.4.1
