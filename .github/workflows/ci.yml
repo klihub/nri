@@ -51,6 +51,7 @@ jobs:
           echo "${{ github.workspace }}/bin" >> $GITHUB_PATH
 
       - run: |
+          sudo make install-protoc install-protoc-dependencies install-ttrpc-plugin 
           make all
 
   linters:
