@@ -31,6 +31,7 @@ import (
 	nrilog "github.com/containerd/nri/pkg/log"
 	"github.com/containerd/nri/pkg/net"
 	"github.com/containerd/nri/pkg/net/multiplex"
+	"github.com/containerd/nri/pkg/utils"
 	"github.com/containerd/ttrpc"
 )
 
@@ -178,6 +179,9 @@ type Stub interface {
 	// This is the default timeout if the plugin has not been started or
 	// the timeout received in the Configure request otherwise.
 	RequestTimeout() time.Duration
+
+	// PeerNRIVersion returns the NRI version used in our peer, if known.
+	PeerNRIVersion() string
 }
 
 const (
@@ -295,6 +299,7 @@ type stub struct {
 
 	registrationTimeout time.Duration
 	requestTimeout      time.Duration
+	peerNRIVersion      string
 }
 
 // Handlers for NRI plugin event and request.
@@ -329,6 +334,7 @@ func New(p interface{}, opts ...Option) (Stub, error) {
 
 		registrationTimeout: DefaultRegistrationTimeout,
 		requestTimeout:      DefaultRequestTimeout,
+		peerNRIVersion:      "unknown",
 	}
 
 	for _, o := range opts {
@@ -530,6 +536,10 @@ func (stub *stub) RequestTimeout() time.Duration {
 	return stub.requestTimeout
 }
 
+func (stub *stub) PeerNRIVersion() string {
+	return stub.peerNRIVersion
+}
+
 // Connect the plugin to NRI.
 func (stub *stub) connect() error {
 	if stub.conn != nil {
@@ -574,6 +584,7 @@ func (stub *stub) register(ctx context.Context) error {
 	req := &api.RegisterPluginRequest{
 		PluginName: stub.name,
 		PluginIdx:  stub.idx,
+		NRIVersion: utils.GetVersionFromBuildInfo(utils.NRIModulePath),
 	}
 	if _, err := stub.runtime.RegisterPlugin(ctx, req); err != nil {
 		return fmt.Errorf("failed to register with NRI/Runtime: %w", err)
@@ -621,11 +632,12 @@ func (stub *stub) Configure(ctx context.Context, req *api.ConfigureRequest) (rpl
 		err    error
 	)
 
-	log.Infof(ctx, "Configuring plugin %s for runtime %s/%s...", stub.Name(),
-		req.RuntimeName, req.RuntimeVersion)
+	log.Infof(ctx, "Configuring plugin %s for runtime %s/%s (NRI version %s)...", stub.Name(),
+		req.RuntimeName, req.RuntimeVersion, req.NRIVersion)
 
 	stub.registrationTimeout = time.Duration(req.RegistrationTimeout * int64(time.Millisecond))
 	stub.requestTimeout = time.Duration(req.RequestTimeout * int64(time.Millisecond))
+	stub.peerNRIVersion = req.NRIVersion
 
 	defer func() {
 		stub.cfgErrC <- retErr

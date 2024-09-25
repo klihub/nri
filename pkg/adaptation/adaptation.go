@@ -30,6 +30,7 @@ import (
 	"github.com/containerd/nri/pkg/adaptation/builtin"
 	"github.com/containerd/nri/pkg/api"
 	"github.com/containerd/nri/pkg/log"
+	"github.com/containerd/nri/pkg/utils"
 	validator "github.com/containerd/nri/plugins/default-validator/builtin"
 	"github.com/containerd/ttrpc"
 	"github.com/tetratelabs/wazero"
@@ -61,6 +62,7 @@ type Adaptation struct {
 	sync.Mutex
 	name        string
 	version     string
+	nriVersion  string
 	dropinPath  string
 	pluginPath  string
 	socketPath  string
@@ -177,6 +179,7 @@ func New(name, version string, syncFn SyncFn, updateFn UpdateFn, opts ...Option)
 	r := &Adaptation{
 		name:        name,
 		version:     version,
+		nriVersion:  utils.GetVersionFromBuildInfo(utils.NRIModulePath),
 		syncFn:      syncFn,
 		updateFn:    updateFn,
 		pluginPath:  DefaultPluginPath,
