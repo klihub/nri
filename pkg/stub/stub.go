@@ -150,11 +150,23 @@ type Stub interface {
 
 	// UpdateContainer requests unsolicited updates to containers.
 	UpdateContainers([]*api.ContainerUpdate) ([]*api.ContainerUpdate, error)
+
+	// RegistrationTimeout returns the registration timeout for the stub.
+	// This is the default timeout if the plugin has not been started or
+	// the timeout received in the Configure request otherwise.
+	RegistrationTimeout() time.Duration
+
+	// RequestTimeout returns the request timeout for the stub.
+	// This is the default timeout if the plugin has not been started or
+	// the timeout received in the Configure request otherwise.
+	RequestTimeout() time.Duration
 }
 
 const (
-	// Plugin registration timeout.
-	registrationTimeout = 2 * time.Second
+	// DefaultRegistrationTimeout is the default plugin registration timeout.
+	DefaultRegistrationTimeout = api.DefaultPluginRegistrationTimeout
+	// DefaultRequestTimeout is the default plugin request processing timeout.
+	DefaultRequestTimeout = api.DefaultPluginRequestTimeout
 )
 
 var (
@@ -262,6 +274,9 @@ type stub struct {
 	srvErrC    chan error
 	cfgErrC    chan error
 	syncReq    *api.SynchronizeRequest
+
+	registrationTimeout time.Duration
+	requestTimeout      time.Duration
 }
 
 // Handlers for NRI plugin event and request.
@@ -290,6 +305,9 @@ func New(p interface{}, opts ...Option) (Stub, error) {
 		idx:        os.Getenv(api.PluginIdxEnvVar),
 		socketPath: api.DefaultSocketPath,
 		dialer:     func(p string) (stdnet.Conn, error) { return stdnet.Dial("unix", p) },
+
+		registrationTimeout: DefaultRegistrationTimeout,
+		requestTimeout:      DefaultRequestTimeout,
 	}
 
 	for _, o := range opts {
@@ -483,6 +501,14 @@ func (stub *stub) Name() string {
 	return stub.idx + "-" + stub.name
 }
 
+func (stub *stub) RegistrationTimeout() time.Duration {
+	return stub.registrationTimeout
+}
+
+func (stub *stub) RequestTimeout() time.Duration {
+	return stub.requestTimeout
+}
+
 // Connect the plugin to NRI.
 func (stub *stub) connect() error {
 	if stub.conn != nil {
@@ -521,7 +547,7 @@ func (stub *stub) connect() error {
 func (stub *stub) register(ctx context.Context) error {
 	log.Infof(ctx, "Registering plugin %s...", stub.Name())
 
-	ctx, cancel := context.WithTimeout(ctx, registrationTimeout)
+	ctx, cancel := context.WithTimeout(ctx, stub.registrationTimeout)
 	defer cancel()
 
 	req := &api.RegisterPluginRequest{
@@ -578,6 +604,9 @@ func (stub *stub) Configure(ctx context.Context, req *api.ConfigureRequest) (rpl
 
 	log.Infof(ctx, "Configuring plugin %s for runtime %s/%s...", stub.Name(),
 		req.RuntimeName, req.RuntimeVersion)
+
+	stub.registrationTimeout = time.Duration(req.RegistrationTimeout * int64(time.Millisecond))
+	stub.requestTimeout = time.Duration(req.RequestTimeout * int64(time.Millisecond))
 
 	defer func() {
 		stub.cfgErrC <- retErr
