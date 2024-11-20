@@ -79,6 +79,7 @@ type (
 	LinuxMemory              = api.LinuxMemory
 	LinuxDevice              = api.LinuxDevice
 	LinuxDeviceCgroup        = api.LinuxDeviceCgroup
+	LinuxSeccomp             = api.LinuxSeccomp
 	CDIDevice                = api.CDIDevice
 	HugepageLimit            = api.HugepageLimit
 	Hooks                    = api.Hooks

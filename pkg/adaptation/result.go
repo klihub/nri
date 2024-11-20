@@ -204,6 +204,9 @@ func (r *result) adjust(rpl *ContainerAdjustment, plugin string) error {
 		if err := r.adjustNamespaces(rpl.Linux.Namespaces, plugin); err != nil {
 			return err
 		}
+		if err := r.adjustSeccompPolicy(rpl.Linux.SeccompPolicy, plugin); err != nil {
+			return err
+		}
 	}
 	if err := r.adjustRlimits(rpl.Rlimits, plugin); err != nil {
 		return err
@@ -760,6 +763,22 @@ func (r *result) adjustNamespaces(adjustment []*LinuxNamespace, plugin string) e
 	return nil
 }
 
+func (r *result) adjustSeccompPolicy(adjustment *LinuxSeccomp, plugin string) error {
+	if adjustment == nil {
+		return nil
+	}
+	create, id := r.request.create, r.request.create.Container.Id
+
+	if err := r.owners.claimSeccompPolicy(id, plugin); err != nil {
+		return err
+	}
+
+	create.Container.Linux.SeccompPolicy = adjustment
+	r.reply.adjust.Linux.SeccompPolicy = adjustment
+
+	return nil
+}
+
 func (r *result) adjustRlimits(rlimits []*POSIXRlimit, plugin string) error {
 	if len(rlimits) == 0 {
 		return nil
@@ -1076,6 +1095,7 @@ type owners struct {
 	cgroupsPath         string
 	oomScoreAdj         string
 	namespaces          string
+	seccompPolicy       string
 	rlimits             map[string]string
 }
 
@@ -1198,6 +1218,10 @@ func (ro resultOwners) claimOomScoreAdj(id, plugin string) error {
 
 func (ro resultOwners) claimNamespaces(id, plugin string) error {
 	return ro.ownersFor(id).claimNamespaces(plugin)
+}
+
+func (ro resultOwners) claimSeccompPolicy(id, plugin string) error {
+	return ro.ownersFor(id).claimSeccompPolicy(plugin)
 }
 
 func (ro resultOwners) claimRlimits(id, typ, plugin string) error {
@@ -1458,6 +1482,14 @@ func (o *owners) claimNamespaces(plugin string) error {
 		return conflict(plugin, other, "namespaces")
 	}
 	o.namespaces = plugin
+	return nil
+}
+
+func (o *owners) claimSeccompPolicy(plugin string) error {
+	if other := o.seccompPolicy; other != "" {
+		return conflict(plugin, other, "seccomp policy")
+	}
+	o.seccompPolicy = plugin
 	return nil
 }
 
