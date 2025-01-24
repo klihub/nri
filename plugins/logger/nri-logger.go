@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -45,9 +46,10 @@ type plugin struct {
 }
 
 var (
-	cfg config
-	log *logrus.Logger
-	_   = stub.ConfigureInterface(&plugin{})
+	cfg    config
+	log    *logrus.Logger
+	_      = stub.ConfigureInterface(&plugin{})
+	dumpCh = make(chan []interface{}, 128)
 )
 
 func (p *plugin) Configure(_ context.Context, config, runtime, version string) (stub.EventMask, error) {
@@ -165,35 +167,40 @@ func (p *plugin) onClose() {
 	os.Exit(0)
 }
 
-// Dump one or more objects, with an optional global prefix and per-object tags.
 func dump(args ...interface{}) {
-	var (
-		prefix string
-		idx    int
-	)
+	dumpCh <- args
+}
 
-	if len(args)&0x1 == 1 {
-		prefix = args[0].(string)
-		idx++
-	}
+func dumper() {
+	for args := range dumpCh {
+		var (
+			prefix string
+			idx    int
+		)
 
-	for ; idx < len(args)-1; idx += 2 {
-		tag, obj := args[idx], args[idx+1]
-		msg, err := yaml.Marshal(obj)
-		if err != nil {
-			log.Infof("%s: %s: failed to dump object: %v", prefix, tag, err)
-			continue
+		if len(args)&0x1 == 1 {
+			prefix = args[0].(string)
+			idx++
 		}
 
-		if prefix != "" {
-			log.Infof("%s: %s:", prefix, tag)
-			for _, line := range strings.Split(strings.TrimSpace(string(msg)), "\n") {
-				log.Infof("%s:    %s", prefix, line)
+		for ; idx < len(args)-1; idx += 2 {
+			tag, obj := args[idx], args[idx+1]
+			msg, err := yaml.Marshal(obj)
+			if err != nil {
+				log.Infof("%s: %s: failed to dump object: %v", prefix, tag, err)
+				continue
 			}
-		} else {
-			log.Infof("%s:", tag)
-			for _, line := range strings.Split(strings.TrimSpace(string(msg)), "\n") {
-				log.Infof("  %s", line)
+
+			if prefix != "" {
+				log.Infof("%s: %s:", prefix, tag)
+				for _, line := range strings.Split(strings.TrimSpace(string(msg)), "\n") {
+					log.Infof("%s:    %s", prefix, line)
+				}
+			} else {
+				log.Infof("%s:", tag)
+				for _, line := range strings.Split(strings.TrimSpace(string(msg)), "\n") {
+					log.Infof("  %s", line)
+				}
 			}
 		}
 	}
@@ -238,7 +245,9 @@ func main() {
 		opts = append(opts, stub.WithPluginIdx(pluginIdx))
 	}
 
+	go dumper()
 	p := &plugin{}
+
 	if p.mask, err = api.ParseEventMask(events); err != nil {
 		log.Fatalf("failed to parse events: %v", err)
 	}
@@ -250,7 +259,15 @@ func main() {
 
 	err = p.stub.Run(context.Background())
 	if err != nil {
-		log.Errorf("plugin exited with error %v", err)
-		os.Exit(1)
+		if errors.Is(err, context.DeadlineExceeded) {
+			log.Infof("registration timed out, retying with runtime set timeout (%v)",
+				p.stub.RegistrationTimeout())
+			err = p.stub.Run(context.Background())
+		}
+
+		if err != nil {
+			log.Errorf("plugin exited with error %v", err)
+			os.Exit(1)
+		}
 	}
 }
