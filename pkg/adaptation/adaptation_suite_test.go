@@ -20,9 +20,11 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
+	"unsafe"
 
 	"sigs.k8s.io/yaml"
 
@@ -871,6 +873,75 @@ var _ = Describe("Plugin container creation adjustments", func() {
 		)
 	})
 
+	When("there are restrictions", func() {
+		BeforeEach(func() {
+			s.Prepare(
+				&mockRuntime{
+					restrictions: &api.Restrictions{
+						OciHooks: true,
+					},
+				},
+				&mockPlugin{idx: "10", name: "foo"},
+			)
+		})
+
+		DescribeTable("restricted adjustments should fail to",
+			func(subject string, remove, shouldFail bool, expected *api.ContainerAdjustment) {
+				var (
+					runtime = s.runtime
+					plugins = s.plugins
+					ctx     = context.Background()
+
+					pod = &api.PodSandbox{
+						Id:        "pod0",
+						Name:      "pod0",
+						Uid:       "uid0",
+						Namespace: "default",
+					}
+					ctr = &api.Container{
+						Id:           "ctr0",
+						PodSandboxId: "pod0",
+						Name:         "ctr0",
+						State:        api.ContainerState_CONTAINER_CREATED, // XXX FIXME-kludge
+					}
+				)
+
+				create := func(p *mockPlugin, pod *api.PodSandbox, ctr *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
+					return adjust(subject, p, pod, ctr, p == plugins[0] && remove)
+				}
+
+				plugins[0].createContainer = create
+
+				s.Startup()
+
+				podReq := &api.RunPodSandboxRequest{Pod: pod}
+				Expect(runtime.RunPodSandbox(ctx, podReq)).To(Succeed())
+				ctrReq := &api.CreateContainerRequest{
+					Pod:       pod,
+					Container: ctr,
+				}
+				reply, err := runtime.CreateContainer(ctx, ctrReq)
+				if shouldFail {
+					Expect(err).ToNot(BeNil())
+				} else {
+					Expect(err).To(BeNil())
+					reply.Adjust = strip(reply.Adjust, &api.ContainerAdjustment{}).(*api.ContainerAdjustment)
+					Expect(stripAdjustment(reply.Adjust)).Should(Equal(stripAdjustment(expected)))
+				}
+			},
+
+			Entry("adjust annotations", "annotation", true, false,
+				&api.ContainerAdjustment{
+					Annotations: map[string]string{
+						"-key": "",
+						"key":  "10-foo",
+					},
+				},
+			),
+
+			Entry("adjust hooks", "hooks", false, false, nil),
+		)
+	})
 })
 
 // --------------------------------------------
@@ -1946,13 +2017,28 @@ var _ = Describe("Plugin configuration request", func() {
 //	around we marshal then unmarshal compared objects in offending test cases to
 //	clear those unexported fields.
 func strip(obj interface{}, ptr interface{}) interface{} {
+	if isNil(obj) {
+		return nilPtrFor(ptr)
+	}
 	bytes, err := yaml.Marshal(obj)
 	Expect(err).To(BeNil())
 	Expect(yaml.Unmarshal(bytes, ptr)).To(Succeed())
 	return ptr
 }
 
+func isNil(obj interface{}) bool {
+	return (*[2]uintptr)(unsafe.Pointer(&obj))[1] == 0
+}
+
+func nilPtrFor(ptr interface{}) interface{} {
+	t := reflect.TypeOf(ptr)
+	return reflect.Zero(t).Interface()
+}
+
 func stripAdjustment(a *api.ContainerAdjustment) *api.ContainerAdjustment {
+	if a == nil {
+		return nil
+	}
 	stripAnnotations(a)
 	stripMounts(a)
 	stripEnv(a)
