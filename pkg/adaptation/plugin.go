@@ -440,6 +440,7 @@ func (p *plugin) configure(ctx context.Context, name, version, config string) (e
 		RuntimeVersion:      version,
 		RegistrationTimeout: getPluginRegistrationTimeout().Milliseconds(),
 		RequestTimeout:      getPluginRequestTimeout().Milliseconds(),
+		Restrictions:        p.r.getRestrictions(p),
 	}
 
 	rpl, err := p.impl.Configure(ctx, req)
@@ -572,6 +573,9 @@ func (p *plugin) createContainer(ctx context.Context, req *CreateContainerReques
 	defer cancel()
 
 	rpl, err := p.impl.CreateContainer(ctx, req)
+	if err == nil {
+		err = p.r.getRestrictions(p).CheckAdjustment(rpl.Adjust)
+	}
 	if err != nil {
 		if isFatalError(err) {
 			log.Errorf(ctx, "closing plugin %s, failed to handle CreateContainer request: %v",
@@ -663,6 +667,8 @@ func isFatalError(err error) bool {
 	case errors.Is(err, ttrpc.ErrProtocol):
 		return true
 	case errors.Is(err, context.DeadlineExceeded):
+		return true
+	case errors.Is(err, api.RestrictionError):
 		return true
 	}
 	return false
