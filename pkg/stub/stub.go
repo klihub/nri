@@ -160,6 +160,9 @@ type Stub interface {
 	// This is the default timeout if the plugin has not been started or
 	// the timeout received in the Configure request otherwise.
 	RequestTimeout() time.Duration
+
+	// Restrictions returns any extra restrictions effective for the plugin.
+	Restrictions() *api.Restrictions
 }
 
 const (
@@ -277,6 +280,7 @@ type stub struct {
 
 	registrationTimeout time.Duration
 	requestTimeout      time.Duration
+	restrictions        *api.Restrictions
 }
 
 // Handlers for NRI plugin event and request.
@@ -509,6 +513,10 @@ func (stub *stub) RequestTimeout() time.Duration {
 	return stub.requestTimeout
 }
 
+func (stub *stub) Restrictions() *api.Restrictions {
+	return stub.restrictions
+}
+
 // Connect the plugin to NRI.
 func (stub *stub) connect() error {
 	if stub.conn != nil {
@@ -607,6 +615,7 @@ func (stub *stub) Configure(ctx context.Context, req *api.ConfigureRequest) (rpl
 
 	stub.registrationTimeout = time.Duration(req.RegistrationTimeout * int64(time.Millisecond))
 	stub.requestTimeout = time.Duration(req.RequestTimeout * int64(time.Millisecond))
+	stub.restrictions = req.Restrictions
 
 	defer func() {
 		stub.cfgErrC <- retErr
