@@ -150,6 +150,16 @@ test-gopkgs: ginkgo-tests test-ulimits
 
 SKIPPED_PKGS="ulimit-adjuster,device-injector"
 
+GINKGO_VERBOSE ?=
+ifeq ($(GINKGO_VERBOSE),"")
+    GINKGO_VERBOSE := --succinct
+endif
+
+GINKGO_FOCUS ?= '.*'
+ifeq ($(GINKGO_FOCUS),"")
+    GINKGO_FOCUS = '.*'
+endif
+
 ginkgo-tests:
 	$(Q)$(GINKGO) run \
 	    --race \
@@ -159,7 +169,8 @@ ginkgo-tests:
 	    --output-dir $(COVERAGE_PATH) \
 	    --junit-report junit.xml \
 	    --coverprofile coverprofile \
-	    --succinct \
+	    $(GINKGO_VERBOSE) \
+	    --focus $(GINKGO_FOCUS) \
 	    --skip-package $(SKIPPED_PKGS) \
 	    -r && \
 	$(GO_CMD) tool cover -html=$(COVERAGE_PATH)/coverprofile -o $(COVERAGE_PATH)/coverage.html
