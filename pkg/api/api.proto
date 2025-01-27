@@ -127,6 +127,12 @@ message LogRequest {
   Level level = 2;
 }
 
+// Administrative restrictions imposed by the runtime.
+message Restrictions {
+    // If set to true, adjustment of OCI hooks is disabled.
+    bool oci_hooks = 1;
+}
+
 message ConfigureRequest {
   // Any plugin-specific data, if present among the NRI configuration.
   string config = 1;
@@ -138,6 +144,8 @@ message ConfigureRequest {
   int64 registration_timeout = 4;
   // Configured request processing timeout in milliseconds.
   int64 request_timeout = 5;
+  // Extra restrictions imposed by the runtime.
+  Restrictions restrictions = 6;
 }
 
 message ConfigureResponse {
