@@ -36,6 +36,7 @@ type (
 	ConfigureResponse   = api.ConfigureResponse
 	SynchronizeRequest  = api.SynchronizeRequest
 	SynchronizeResponse = api.SynchronizeResponse
+	Restrictions        = api.Restrictions
 
 	CreateContainerRequest  = api.CreateContainerRequest
 	CreateContainerResponse = api.CreateContainerResponse

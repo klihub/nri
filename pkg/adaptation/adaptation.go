@@ -55,20 +55,21 @@ type UpdateFn func(context.Context, []*ContainerUpdate) ([]*ContainerUpdate, err
 // Adaptation is the NRI abstraction for container runtime NRI adaptation/integration.
 type Adaptation struct {
 	sync.Mutex
-	name        string
-	version     string
-	dropinPath  string
-	pluginPath  string
-	socketPath  string
-	dontListen  bool
-	syncFn      SyncFn
-	updateFn    UpdateFn
-	clientOpts  []ttrpc.ClientOpts
-	serverOpts  []ttrpc.ServerOpt
-	listener    net.Listener
-	plugins     []*plugin
-	syncLock    sync.RWMutex
-	wasmService *api.PluginPlugin
+	name         string
+	version      string
+	dropinPath   string
+	pluginPath   string
+	socketPath   string
+	dontListen   bool
+	syncFn       SyncFn
+	updateFn     UpdateFn
+	clientOpts   []ttrpc.ClientOpts
+	serverOpts   []ttrpc.ServerOpt
+	restrictions *Restrictions
+	listener     net.Listener
+	plugins      []*plugin
+	syncLock     sync.RWMutex
+	wasmService  *api.PluginPlugin
 }
 
 var (
@@ -116,6 +117,14 @@ func WithTTRPCOptions(clientOpts []ttrpc.ClientOpts, serverOpts []ttrpc.ServerOp
 	return func(r *Adaptation) error {
 		r.clientOpts = append(r.clientOpts, clientOpts...)
 		r.serverOpts = append(r.serverOpts, serverOpts...)
+		return nil
+	}
+}
+
+// WithRestrictions sets extra administrative restrictions for NRI plugins.
+func WithRestrictions(restrictions *Restrictions) Option {
+	return func(r *Adaptation) error {
+		r.restrictions = restrictions
 		return nil
 	}
 }
@@ -599,4 +608,9 @@ func (b *PluginSyncBlock) Unblock() {
 		b.r.syncLock.RUnlock()
 		b.r = nil
 	}
+}
+
+func (r *Adaptation) getRestrictions(p *plugin) *Restrictions {
+	// Currently we have a single common set of restrictions for all plugins.
+	return r.restrictions
 }
