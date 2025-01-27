@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -40,6 +41,15 @@ var (
 type plugin struct {
 	stub stub.Stub
 	mgr  *hooks.Manager
+}
+
+func (p *plugin) Configure(_ context.Context, _, _, _ string) (stub.EventMask, error) {
+	if !p.stub.Restrictions().AllowOciHooks() {
+		log.Errorf("OCI hook adjustments are disallowed by the runtime.")
+		return 0, errors.New("insufficient permissions: OCI hook adjustment restricted")
+	}
+
+	return 0, nil
 }
 
 func (p *plugin) CreateContainer(_ context.Context, pod *api.PodSandbox, container *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
