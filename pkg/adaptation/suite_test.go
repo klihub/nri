@@ -135,12 +135,13 @@ func Log(format string, args ...interface{}) {
 }
 
 type mockRuntime struct {
-	name    string
-	version string
-	options []nri.Option
-	runtime *nri.Adaptation
-	pods    map[string]*api.PodSandbox
-	ctrs    map[string]*api.Container
+	name         string
+	version      string
+	options      []nri.Option
+	runtime      *nri.Adaptation
+	pods         map[string]*api.PodSandbox
+	ctrs         map[string]*api.Container
+	restrictions *api.Restrictions
 
 	updateFn nri.UpdateFn
 }
@@ -151,6 +152,7 @@ func (m *mockRuntime) Start(dir string) error {
 			nri.WithPluginPath(filepath.Join(dir, "opt", "nri", "plugins")),
 			nri.WithPluginConfigPath(filepath.Join(dir, "etc", "nri", "conf.d")),
 			nri.WithSocketPath(filepath.Join(dir, "nri.sock")),
+			nri.WithRestrictions(m.restrictions),
 		}
 		err error
 	)
