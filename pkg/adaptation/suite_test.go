@@ -782,8 +782,10 @@ func (q *EventQ) Wait(w *Event, deadline <-chan time.Time) (*Event, error) {
 	}
 	q.c = make(chan *Event, 16)
 	defer func() {
+		q.Lock()
 		c := q.c
 		q.c = nil
+		q.Unlock()
 		close(c)
 	}()
 
