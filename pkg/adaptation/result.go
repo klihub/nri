@@ -745,6 +745,9 @@ func (r *result) adjustNamespaces(adjustment []*LinuxNamespace, plugin string) e
 	if adjustment == nil {
 		return nil
 	}
+
+	r.initAdjustNamespaces()
+
 	create, id := r.request.create, r.request.create.Container.Id
 
 	if err := r.owners.claimNamespaces(id, plugin); err != nil {
@@ -832,6 +835,10 @@ func (r *result) initAdjustCgroupsPath() {
 }
 
 func (r *result) initAdjustOomScoreAdj() {
+	r.initAdjustLinux()
+}
+
+func (r *result) initAdjustNamespaces() {
 	r.initAdjustLinux()
 }
 
