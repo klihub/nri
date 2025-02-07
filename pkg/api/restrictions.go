@@ -19,9 +19,10 @@ package api
 import fmt "fmt"
 
 var (
-	RestrictionError     = fmt.Errorf("restriction violation")
-	OciHooksRestricted   = fmt.Errorf("%w: OCI hook adjustment is not allowed", RestrictionError)
-	NamespacesRestricted = fmt.Errorf("%w: namespace adjustment is not allowed", RestrictionError)
+	RestrictionError        = fmt.Errorf("restriction violation")
+	OciHooksRestricted      = fmt.Errorf("%w: OCI hook adjustment is not allowed", RestrictionError)
+	NamespacesRestricted    = fmt.Errorf("%w: namespace adjustment is not allowed", RestrictionError)
+	SeccompPolicyRestricted = fmt.Errorf("%w: seccpomp adjustment is not allowed", RestrictionError)
 )
 
 func (r *Restrictions) CheckAdjustment(a *ContainerAdjustment) error {
@@ -32,6 +33,9 @@ func (r *Restrictions) CheckAdjustment(a *ContainerAdjustment) error {
 		return err
 	}
 	if err := r.checkNamespaces(a); err != nil {
+		return err
+	}
+	if err := r.checkSeccompPolicy(a); err != nil {
 		return err
 	}
 	return nil
@@ -68,10 +72,22 @@ func (r *Restrictions) checkNamespaces(a *ContainerAdjustment) error {
 	return NamespacesRestricted
 }
 
+func (r *Restrictions) checkSeccompPolicy(a *ContainerAdjustment) error {
+	if !r.SeccompPolicy || a.Linux == nil || a.Linux.SeccompPolicy == nil {
+		return nil
+	}
+
+	return SeccompPolicyRestricted
+}
+
 func (r *Restrictions) AllowOciHooks() bool {
 	return r == nil || !r.OciHooks
 }
 
 func (r *Restrictions) AllowNamespaces() bool {
 	return r == nil || !r.Namespaces
+}
+
+func (r *Restrictions) AllowSeccompPolicy() bool {
+	return r == nil || !r.SeccompPolicy
 }

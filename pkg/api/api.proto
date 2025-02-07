@@ -133,6 +133,8 @@ message Restrictions {
     bool oci_hooks = 1;
     // If set to true, adjustment of namespaces is disabled.
     bool namespaces = 2;
+    // If set to true, adjustment of seccomp policy is disabled.
+    bool seccomp_policy = 3;
 }
 
 message ConfigureRequest {
