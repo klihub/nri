@@ -23,6 +23,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 	"unsafe"
 
@@ -543,6 +544,14 @@ var _ = Describe("Plugin container creation adjustments", func() {
 					},
 				},
 			)
+
+		case "seccomppolicy":
+			a.SetLinuxSeccompPolicy(
+				&api.LinuxSeccomp{
+					DefaultAction: "SCMP_ACT_ERRNO",
+					DefaultErrno:  api.UInt32(syscall.EPERM),
+				},
+			)
 		}
 
 		return a, nil, nil
@@ -773,6 +782,16 @@ var _ = Describe("Plugin container creation adjustments", func() {
 					},
 				},
 			),
+			Entry("adjust seccomp policy", "seccomppolicy",
+				&api.ContainerAdjustment{
+					Linux: &api.LinuxContainerAdjustment{
+						SeccompPolicy: &api.LinuxSeccomp{
+							DefaultAction: "SCMP_ACT_ERRNO",
+							DefaultErrno:  api.UInt32(syscall.EPERM),
+						},
+					},
+				},
+			),
 		)
 	})
 
@@ -893,6 +912,7 @@ var _ = Describe("Plugin container creation adjustments", func() {
 			),
 			Entry("adjust resources", "resources/classes", false, true, nil),
 			Entry("adjust namespaces", "namespaces", false, true, nil),
+			Entry("adjust seccomp policy", "seccomppolicy", false, true, nil),
 		)
 	})
 
