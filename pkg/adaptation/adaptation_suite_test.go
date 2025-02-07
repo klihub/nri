@@ -901,7 +901,8 @@ var _ = Describe("Plugin container creation adjustments", func() {
 			s.Prepare(
 				&mockRuntime{
 					restrictions: &api.Restrictions{
-						OciHooks: true,
+						OciHooks:   true,
+						Namespaces: true,
 					},
 				},
 				&mockPlugin{idx: "10", name: "foo"},
@@ -963,6 +964,7 @@ var _ = Describe("Plugin container creation adjustments", func() {
 			),
 
 			Entry("adjust hooks", "hooks", true, nil),
+			Entry("adjust namespaces", "namespaces", true, nil),
 		)
 	})
 })

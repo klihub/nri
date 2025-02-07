@@ -131,6 +131,8 @@ message LogRequest {
 message Restrictions {
     // If set to true, adjustment of OCI hooks is disabled.
     bool oci_hooks = 1;
+    // If set to true, adjustment of namespaces is disabled.
+    bool namespaces = 2;
 }
 
 message ConfigureRequest {
