@@ -276,6 +276,12 @@ func (a *ContainerAdjustment) SetLinuxNamespaces(value []*LinuxNamespace) {
 	a.Linux.Namespaces = value
 }
 
+// SetLinuxSeccompPolicy records setting the seccomp policy for a container.
+func (a *ContainerAdjustment) SetLinuxSeccompPolicy(value *LinuxSeccomp) {
+	a.initLinux()
+	a.Linux.SeccompPolicy = value
+}
+
 //
 // Initializing a container adjustment and container update.
 //
