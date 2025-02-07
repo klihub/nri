@@ -270,6 +270,12 @@ func (a *ContainerAdjustment) SetLinuxOomScoreAdj(value *int) {
 	a.Linux.OomScoreAdj = Int(value) // using Int(value) from ./options.go to optionally allocate a pointer to normalized copy of value
 }
 
+// SetLinuxNamespace records setting the namespaces for a container.
+func (a *ContainerAdjustment) SetLinuxNamespaces(value []*LinuxNamespace) {
+	a.initLinux()
+	a.Linux.Namespaces = value
+}
+
 //
 // Initializing a container adjustment and container update.
 //
