@@ -769,6 +769,8 @@ func (r *result) adjustSeccompPolicy(adjustment *LinuxSeccomp, plugin string) er
 	}
 	create, id := r.request.create, r.request.create.Container.Id
 
+	r.initAdjustSeccompPolicy()
+
 	if err := r.owners.claimSeccompPolicy(id, plugin); err != nil {
 		return err
 	}
@@ -858,6 +860,10 @@ func (r *result) initAdjustOomScoreAdj() {
 }
 
 func (r *result) initAdjustNamespaces() {
+	r.initAdjustLinux()
+}
+
+func (r *result) initAdjustSeccompPolicy() {
 	r.initAdjustLinux()
 }
 
