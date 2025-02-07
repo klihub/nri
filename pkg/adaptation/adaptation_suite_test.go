@@ -533,6 +533,16 @@ var _ = Describe("Plugin container creation adjustments", func() {
 
 		case "cgroupspath":
 			a.SetLinuxCgroupsPath("/" + plugin)
+
+		case "namespaces":
+			a.SetLinuxNamespaces(
+				[]*api.LinuxNamespace{
+					{
+						Type: "pid",
+						Path: "/proc/1234/ns/pid",
+					},
+				},
+			)
 		}
 
 		return a, nil, nil
@@ -751,6 +761,18 @@ var _ = Describe("Plugin container creation adjustments", func() {
 					},
 				},
 			),
+			Entry("adjust namespaces", "namespaces",
+				&api.ContainerAdjustment{
+					Linux: &api.LinuxContainerAdjustment{
+						Namespaces: []*api.LinuxNamespace{
+							{
+								Type: "pid",
+								Path: "/proc/1234/ns/pid",
+							},
+						},
+					},
+				},
+			),
 		)
 	})
 
@@ -870,6 +892,7 @@ var _ = Describe("Plugin container creation adjustments", func() {
 				},
 			),
 			Entry("adjust resources", "resources/classes", false, true, nil),
+			Entry("adjust namespaces", "namespaces", false, true, nil),
 		)
 	})
 
