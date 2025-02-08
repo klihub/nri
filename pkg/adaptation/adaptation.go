@@ -208,6 +208,25 @@ func (r *Adaptation) RunPodSandbox(ctx context.Context, evt *StateChangeEvent) e
 	return r.StateChange(ctx, evt)
 }
 
+// UpdatePodSandbox relays the corresponding CRI request to plugins.
+func (r *Adaptation) UpdatePodSandbox(ctx context.Context, req *UpdatePodSandboxRequest) (*UpdatePodSandboxResponse, error) {
+	evt := &StateChangeEvent{
+		Pod:   req.Pod,
+		Event: Event_UPDATE_POD_SANDBOX,
+	}
+	err := r.StateChange(ctx, evt)
+	if err != nil {
+		return nil, err
+	}
+	return &UpdatePodSandboxResponse{}, nil
+}
+
+// PostUpdatePodSandbox relays the corresponding CRI event to plugins.
+func (r *Adaptation) PostUpdatePodSandbox(ctx context.Context, evt *StateChangeEvent) error {
+	evt.Event = Event_POST_UPDATE_POD_SANDBOX
+	return r.StateChange(ctx, evt)
+}
+
 // StopPodSandbox relays the corresponding CRI event to plugins.
 func (r *Adaptation) StopPodSandbox(ctx context.Context, evt *StateChangeEvent) error {
 	evt.Event = Event_STOP_POD_SANDBOX
