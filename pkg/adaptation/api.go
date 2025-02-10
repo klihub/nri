@@ -47,8 +47,11 @@ type (
 	StateChangeEvent            = api.StateChangeEvent
 	StateChangeResponse         = api.StateChangeResponse
 	RunPodSandboxRequest        = api.RunPodSandboxRequest
+	RunPodSandboxResponse       = api.RunPodSandboxResponse
 	StopPodSandboxRequest       = api.StopPodSandboxRequest
+	StopPodSandboxResponse      = api.StopPodSandboxResponse
 	RemovePodSandboxRequest     = api.RemovePodSandboxRequest
+	RemovePodSandboxResponse    = api.RemovePodSandboxResponse
 	StartContainerRequest       = api.StartContainerRequest
 	StartContainerResponse      = api.StartContainerResponse
 	RemoveContainerRequest      = api.RemoveContainerRequest

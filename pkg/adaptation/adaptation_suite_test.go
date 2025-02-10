@@ -582,7 +582,8 @@ var _ = Describe("Plugin container creation adjustments", func() {
 				s.Startup()
 
 				podReq := &api.RunPodSandboxRequest{Pod: pod}
-				Expect(runtime.RunPodSandbox(ctx, podReq)).To(Succeed())
+				_, err := runtime.RunPodSandbox(ctx, podReq)
+				Expect(err).To(BeNil())
 				ctrReq := &api.CreateContainerRequest{
 					Pod:       pod,
 					Container: ctr,
@@ -792,7 +793,8 @@ var _ = Describe("Plugin container creation adjustments", func() {
 				s.Startup()
 
 				podReq := &api.RunPodSandboxRequest{Pod: pod}
-				Expect(runtime.RunPodSandbox(ctx, podReq)).To(Succeed())
+				_, err := runtime.RunPodSandbox(ctx, podReq)
+				Expect(err).To(BeNil())
 				ctrReq := &api.CreateContainerRequest{
 					Pod:       pod,
 					Container: ctr,
@@ -983,16 +985,18 @@ var _ = Describe("Plugin container updates during creation", func() {
 				s.Startup()
 
 				podReq := &api.RunPodSandboxRequest{Pod: pod0}
-				Expect(runtime.RunPodSandbox(ctx, podReq)).To(Succeed())
+				_, err := runtime.RunPodSandbox(ctx, podReq)
+				Expect(err).To(BeNil())
 				ctrReq := &api.CreateContainerRequest{
 					Pod:       pod0,
 					Container: ctr0,
 				}
-				_, err := runtime.CreateContainer(ctx, ctrReq)
+				_, err = runtime.CreateContainer(ctx, ctrReq)
 				Expect(err).To(BeNil())
 
 				podReq = &api.RunPodSandboxRequest{Pod: pod1}
-				Expect(runtime.RunPodSandbox(ctx, podReq)).To(Succeed())
+				_, err = runtime.RunPodSandbox(ctx, podReq)
+				Expect(err).To(BeNil())
 				ctrReq = &api.CreateContainerRequest{
 					Pod:       pod1,
 					Container: ctr1,
@@ -1137,16 +1141,18 @@ var _ = Describe("Plugin container updates during creation", func() {
 				s.Startup()
 
 				podReq := &api.RunPodSandboxRequest{Pod: pod0}
-				Expect(runtime.RunPodSandbox(ctx, podReq)).To(Succeed())
+				_, err := runtime.RunPodSandbox(ctx, podReq)
+				Expect(err).To(BeNil())
 				ctrReq := &api.CreateContainerRequest{
 					Pod:       pod0,
 					Container: ctr0,
 				}
-				_, err := runtime.CreateContainer(ctx, ctrReq)
+				_, err = runtime.CreateContainer(ctx, ctrReq)
 				Expect(err).To(BeNil())
 
 				podReq = &api.RunPodSandboxRequest{Pod: pod1}
-				Expect(runtime.RunPodSandbox(ctx, podReq)).To(Succeed())
+				_, err = runtime.RunPodSandbox(ctx, podReq)
+				Expect(err).To(BeNil())
 				ctrReq = &api.CreateContainerRequest{
 					Pod:       pod1,
 					Container: ctr1,
@@ -1341,12 +1347,13 @@ var _ = Describe("Solicited container updates by plugins", func() {
 				s.Startup()
 
 				podReq := &api.RunPodSandboxRequest{Pod: pod0}
-				Expect(runtime.RunPodSandbox(ctx, podReq)).To(Succeed())
+				_, err := runtime.RunPodSandbox(ctx, podReq)
+				Expect(err).To(BeNil())
 				ctrReq := &api.CreateContainerRequest{
 					Pod:       pod0,
 					Container: ctr0,
 				}
-				_, err := runtime.CreateContainer(ctx, ctrReq)
+				_, err = runtime.CreateContainer(ctx, ctrReq)
 				Expect(err).To(BeNil())
 
 				updReq := &api.UpdateContainerRequest{
@@ -1580,12 +1587,13 @@ var _ = Describe("Solicited container updates by plugins", func() {
 				s.Startup()
 
 				podReq := &api.RunPodSandboxRequest{Pod: pod0}
-				Expect(runtime.RunPodSandbox(ctx, podReq)).To(Succeed())
+				_, err := runtime.RunPodSandbox(ctx, podReq)
+				Expect(err).To(BeNil())
 				ctrReq := &api.CreateContainerRequest{
 					Pod:       pod0,
 					Container: ctr0,
 				}
-				_, err := runtime.CreateContainer(ctx, ctrReq)
+				_, err = runtime.CreateContainer(ctx, ctrReq)
 				Expect(err).To(BeNil())
 
 				updReq := &api.UpdateContainerRequest{

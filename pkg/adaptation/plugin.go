@@ -562,6 +562,75 @@ func recalcObjsPerSyncMsg(pods, ctrs int, err error) (int, int, error) {
 	return pods, ctrs, nil
 }
 
+// Relay RunPodSandbox event to plugin.
+func (p *plugin) runPodSandbox(ctx context.Context, req *RunPodSandboxRequest) (*RunPodSandboxResponse, error) {
+	if !p.events.IsSet(Event_RUN_POD_SANDBOX) {
+		return nil, nil
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, getPluginRequestTimeout())
+	defer cancel()
+
+	rpl, err := p.impl.RunPodSandbox(ctx, req)
+	if err != nil {
+		if isFatalError(err) {
+			log.Errorf(ctx, "closing plugin %s, failed to handle RunPodSandbox request: %v",
+				p.name(), err)
+			p.close()
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	return rpl, err
+}
+
+// Relay StopPodSandbox event to plugin.
+func (p *plugin) stopPodSandbox(ctx context.Context, req *StopPodSandboxRequest) (*StopPodSandboxResponse, error) {
+	if !p.events.IsSet(Event_STOP_POD_SANDBOX) {
+		return nil, nil
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, getPluginRequestTimeout())
+	defer cancel()
+
+	rpl, err := p.impl.StopPodSandbox(ctx, req)
+	if err != nil {
+		if isFatalError(err) {
+			log.Errorf(ctx, "closing plugin %s, failed to handle StopPodSandbox request: %v",
+				p.name(), err)
+			p.close()
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	return rpl, err
+}
+
+// Relay RemovePodSandbox event to plugin.
+func (p *plugin) removePodSandbox(ctx context.Context, req *RemovePodSandboxRequest) (*RemovePodSandboxResponse, error) {
+	if !p.events.IsSet(Event_REMOVE_POD_SANDBOX) {
+		return nil, nil
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, getPluginRequestTimeout())
+	defer cancel()
+
+	rpl, err := p.impl.RemovePodSandbox(ctx, req)
+	if err != nil {
+		if isFatalError(err) {
+			log.Errorf(ctx, "closing plugin %s, failed to handle RemovePodSandbox request: %v",
+				p.name(), err)
+			p.close()
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	return rpl, err
+}
+
 // Relay CreateContainer request to plugin.
 func (p *plugin) createContainer(ctx context.Context, req *CreateContainerRequest) (*CreateContainerResponse, error) {
 	if !p.events.IsSet(Event_CREATE_CONTAINER) {
@@ -583,6 +652,75 @@ func (p *plugin) createContainer(ctx context.Context, req *CreateContainerReques
 	}
 
 	return rpl, nil
+}
+
+// Relay PostCreateContainer event to plugin.
+func (p *plugin) postCreateContainer(ctx context.Context, req *PostCreateContainerRequest) (*PostCreateContainerResponse, error) {
+	if !p.events.IsSet(Event_POST_CREATE_CONTAINER) {
+		return nil, nil
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, getPluginRequestTimeout())
+	defer cancel()
+
+	rpl, err := p.impl.PostCreateContainer(ctx, req)
+	if err != nil {
+		if isFatalError(err) {
+			log.Errorf(ctx, "closing plugin %s, failed to handle PostCreateContainer request: %v",
+				p.name(), err)
+			p.close()
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	return rpl, err
+}
+
+// Relay StartContainer event to plugin.
+func (p *plugin) startContainer(ctx context.Context, req *StartContainerRequest) (*StartContainerResponse, error) {
+	if !p.events.IsSet(Event_START_CONTAINER) {
+		return nil, nil
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, getPluginRequestTimeout())
+	defer cancel()
+
+	rpl, err := p.impl.StartContainer(ctx, req)
+	if err != nil {
+		if isFatalError(err) {
+			log.Errorf(ctx, "closing plugin %s, failed to handle StartContainer request: %v",
+				p.name(), err)
+			p.close()
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	return rpl, err
+}
+
+// Relay PostStartContainer event to plugin.
+func (p *plugin) postStartContainer(ctx context.Context, req *PostStartContainerRequest) (*PostStartContainerResponse, error) {
+	if !p.events.IsSet(Event_POST_START_CONTAINER) {
+		return nil, nil
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, getPluginRequestTimeout())
+	defer cancel()
+
+	rpl, err := p.impl.PostStartContainer(ctx, req)
+	if err != nil {
+		if isFatalError(err) {
+			log.Errorf(ctx, "closing plugin %s, failed to handle PostStartContainer request: %v",
+				p.name(), err)
+			p.close()
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	return rpl, err
 }
 
 // Relay UpdateContainer request to plugin.
@@ -608,6 +746,29 @@ func (p *plugin) updateContainer(ctx context.Context, req *UpdateContainerReques
 	return rpl, nil
 }
 
+// Relay PostUpdateContainer request to plugin.
+func (p *plugin) postUpdateContainer(ctx context.Context, req *PostUpdateContainerRequest) (*PostUpdateContainerResponse, error) {
+	if !p.events.IsSet(Event_POST_UPDATE_CONTAINER) {
+		return nil, nil
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, getPluginRequestTimeout())
+	defer cancel()
+
+	rpl, err := p.impl.PostUpdateContainer(ctx, req)
+	if err != nil {
+		if isFatalError(err) {
+			log.Errorf(ctx, "closing plugin %s, failed to handle PostUpdateContainer request: %v",
+				p.name(), err)
+			p.close()
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	return rpl, err
+}
+
 // Relay StopContainer request to the plugin.
 func (p *plugin) stopContainer(ctx context.Context, req *StopContainerRequest) (rpl *StopContainerResponse, err error) {
 	if !p.events.IsSet(Event_STOP_CONTAINER) {
@@ -629,6 +790,29 @@ func (p *plugin) stopContainer(ctx context.Context, req *StopContainerRequest) (
 	}
 
 	return rpl, nil
+}
+
+// Relay RemoveContainer request to plugin.
+func (p *plugin) removeContainer(ctx context.Context, req *RemoveContainerRequest) (*RemoveContainerResponse, error) {
+	if !p.events.IsSet(Event_REMOVE_CONTAINER) {
+		return nil, nil
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, getPluginRequestTimeout())
+	defer cancel()
+
+	rpl, err := p.impl.RemoveContainer(ctx, req)
+	if err != nil {
+		if isFatalError(err) {
+			log.Errorf(ctx, "closing plugin %s, failed to handle RemoveContainer request: %v",
+				p.name(), err)
+			p.close()
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	return rpl, err
 }
 
 // Relay other pod or container state change events to the plugin.
@@ -663,6 +847,8 @@ func isFatalError(err error) bool {
 	case errors.Is(err, ttrpc.ErrProtocol):
 		return true
 	case errors.Is(err, context.DeadlineExceeded):
+		return true
+	case status.Code(err) == codes.Unimplemented:
 		return true
 	}
 	return false

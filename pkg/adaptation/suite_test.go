@@ -216,10 +216,22 @@ func (m *mockRuntime) synchronize(ctx context.Context, cb nri.SyncCB) error {
 	return err
 }
 
-func (m *mockRuntime) RunPodSandbox(ctx context.Context, evt *api.StateChangeEvent) error {
+func (m *mockRuntime) RunPodSandbox(ctx context.Context, req *api.RunPodSandboxRequest) (*api.RunPodSandboxResponse, error) {
 	b := m.runtime.BlockPluginSync()
 	defer b.Unblock()
-	return m.runtime.RunPodSandbox(ctx, evt)
+	return m.runtime.RunPodSandbox(ctx, req)
+}
+
+func (m *mockRuntime) StopPodSandbox(ctx context.Context, req *api.StopPodSandboxRequest) (*api.StopPodSandboxResponse, error) {
+	b := m.runtime.BlockPluginSync()
+	defer b.Unblock()
+	return m.runtime.StopPodSandbox(ctx, req)
+}
+
+func (m *mockRuntime) RemovePodSandbox(ctx context.Context, req *api.RemovePodSandboxRequest) (*api.RemovePodSandboxResponse, error) {
+	b := m.runtime.BlockPluginSync()
+	defer b.Unblock()
+	return m.runtime.RemovePodSandbox(ctx, req)
 }
 
 func (m *mockRuntime) CreateContainer(ctx context.Context, req *api.CreateContainerRequest) (*api.CreateContainerResponse, error) {
@@ -228,14 +240,50 @@ func (m *mockRuntime) CreateContainer(ctx context.Context, req *api.CreateContai
 	return m.runtime.CreateContainer(ctx, req)
 }
 
+func (m *mockRuntime) PostCreateContainer(ctx context.Context, req *api.PostCreateContainerRequest) (*api.PostCreateContainerResponse, error) {
+	b := m.runtime.BlockPluginSync()
+	defer b.Unblock()
+	return m.runtime.PostCreateContainer(ctx, req)
+}
+
+func (m *mockRuntime) StartContainer(ctx context.Context, req *api.StartContainerRequest) (*api.StartContainerResponse, error) {
+	b := m.runtime.BlockPluginSync()
+	defer b.Unblock()
+	return m.runtime.StartContainer(ctx, req)
+}
+
+func (m *mockRuntime) PostStartContainer(ctx context.Context, req *api.PostStartContainerRequest) (*api.PostStartContainerResponse, error) {
+	b := m.runtime.BlockPluginSync()
+	defer b.Unblock()
+	return m.runtime.PostStartContainer(ctx, req)
+}
+
 func (m *mockRuntime) UpdateContainer(ctx context.Context, req *api.UpdateContainerRequest) (*api.UpdateContainerResponse, error) {
 	b := m.runtime.BlockPluginSync()
 	defer b.Unblock()
 	return m.runtime.UpdateContainer(ctx, req)
 }
 
+func (m *mockRuntime) PostUpdateContainer(ctx context.Context, req *api.PostUpdateContainerRequest) (*api.PostUpdateContainerResponse, error) {
+	b := m.runtime.BlockPluginSync()
+	defer b.Unblock()
+	return m.runtime.PostUpdateContainer(ctx, req)
+}
+
+func (m *mockRuntime) StopContainer(ctx context.Context, req *api.StopContainerRequest) (*api.StopContainerResponse, error) {
+	b := m.runtime.BlockPluginSync()
+	defer b.Unblock()
+	return m.runtime.StopContainer(ctx, req)
+}
+
+func (m *mockRuntime) RemoveContainer(ctx context.Context, req *api.RemoveContainerRequest) (*api.RemoveContainerResponse, error) {
+	b := m.runtime.BlockPluginSync()
+	defer b.Unblock()
+	return m.runtime.RemoveContainer(ctx, req)
+}
+
 func (m *mockRuntime) startStopPodAndContainer(ctx context.Context, pod *api.PodSandbox, ctr *api.Container) error {
-	err := m.RunPodSandbox(ctx, &api.StateChangeEvent{
+	_, err := m.RunPodSandbox(ctx, &api.RunPodSandboxRequest{
 		Pod: pod,
 	})
 	if err != nil {
@@ -250,7 +298,7 @@ func (m *mockRuntime) startStopPodAndContainer(ctx context.Context, pod *api.Pod
 		return err
 	}
 
-	err = m.runtime.PostCreateContainer(ctx, &api.StateChangeEvent{
+	_, err = m.PostCreateContainer(ctx, &api.PostCreateContainerRequest{
 		Pod:       pod,
 		Container: ctr,
 	})
@@ -258,7 +306,7 @@ func (m *mockRuntime) startStopPodAndContainer(ctx context.Context, pod *api.Pod
 		return err
 	}
 
-	err = m.runtime.StartContainer(ctx, &api.StateChangeEvent{
+	_, err = m.StartContainer(ctx, &api.StartContainerRequest{
 		Pod:       pod,
 		Container: ctr,
 	})
@@ -266,7 +314,7 @@ func (m *mockRuntime) startStopPodAndContainer(ctx context.Context, pod *api.Pod
 		return err
 	}
 
-	err = m.runtime.PostStartContainer(ctx, &api.StateChangeEvent{
+	_, err = m.PostStartContainer(ctx, &api.PostStartContainerRequest{
 		Pod:       pod,
 		Container: ctr,
 	})
@@ -283,7 +331,7 @@ func (m *mockRuntime) startStopPodAndContainer(ctx context.Context, pod *api.Pod
 		return err
 	}
 
-	err = m.runtime.PostUpdateContainer(ctx, &api.StateChangeEvent{
+	_, err = m.PostUpdateContainer(ctx, &api.PostUpdateContainerRequest{
 		Pod:       pod,
 		Container: ctr,
 	})
@@ -291,7 +339,7 @@ func (m *mockRuntime) startStopPodAndContainer(ctx context.Context, pod *api.Pod
 		return err
 	}
 
-	_, err = m.runtime.StopContainer(ctx, &api.StopContainerRequest{
+	_, err = m.StopContainer(ctx, &api.StopContainerRequest{
 		Pod:       pod,
 		Container: ctr,
 	})
@@ -299,7 +347,7 @@ func (m *mockRuntime) startStopPodAndContainer(ctx context.Context, pod *api.Pod
 		return err
 	}
 
-	err = m.runtime.RemoveContainer(ctx, &api.StateChangeEvent{
+	_, err = m.RemoveContainer(ctx, &api.RemoveContainerRequest{
 		Pod:       pod,
 		Container: ctr,
 	})
@@ -307,14 +355,14 @@ func (m *mockRuntime) startStopPodAndContainer(ctx context.Context, pod *api.Pod
 		return err
 	}
 
-	err = m.runtime.StopPodSandbox(ctx, &api.StateChangeEvent{
+	_, err = m.StopPodSandbox(ctx, &api.StopPodSandboxRequest{
 		Pod: pod,
 	})
 	if err != nil {
 		return err
 	}
 
-	err = m.runtime.RemovePodSandbox(ctx, &api.StateChangeEvent{
+	_, err = m.RemovePodSandbox(ctx, &api.RemovePodSandboxRequest{
 		Pod: pod,
 	})
 	if err != nil {
