@@ -114,6 +114,78 @@ func _plugin_shutdown(ptr, size uint32) uint64 {
 	return (uint64(ptr) << uint64(32)) | uint64(size)
 }
 
+//export plugin_run_pod_sandbox
+func _plugin_run_pod_sandbox(ptr, size uint32) uint64 {
+	b := wasm.PtrToByte(ptr, size)
+	req := new(RunPodSandboxRequest)
+	if err := req.UnmarshalVT(b); err != nil {
+		return 0
+	}
+	response, err := plugin.RunPodSandbox(context.Background(), req)
+	if err != nil {
+		ptr, size = wasm.ByteToPtr([]byte(err.Error()))
+		return (uint64(ptr) << uint64(32)) | uint64(size) |
+			// Indicate that this is the error string by setting the 32-th bit, assuming that
+			// no data exceeds 31-bit size (2 GiB).
+			(1 << 31)
+	}
+
+	b, err = response.MarshalVT()
+	if err != nil {
+		return 0
+	}
+	ptr, size = wasm.ByteToPtr(b)
+	return (uint64(ptr) << uint64(32)) | uint64(size)
+}
+
+//export plugin_stop_pod_sandbox
+func _plugin_stop_pod_sandbox(ptr, size uint32) uint64 {
+	b := wasm.PtrToByte(ptr, size)
+	req := new(StopPodSandboxRequest)
+	if err := req.UnmarshalVT(b); err != nil {
+		return 0
+	}
+	response, err := plugin.StopPodSandbox(context.Background(), req)
+	if err != nil {
+		ptr, size = wasm.ByteToPtr([]byte(err.Error()))
+		return (uint64(ptr) << uint64(32)) | uint64(size) |
+			// Indicate that this is the error string by setting the 32-th bit, assuming that
+			// no data exceeds 31-bit size (2 GiB).
+			(1 << 31)
+	}
+
+	b, err = response.MarshalVT()
+	if err != nil {
+		return 0
+	}
+	ptr, size = wasm.ByteToPtr(b)
+	return (uint64(ptr) << uint64(32)) | uint64(size)
+}
+
+//export plugin_remove_pod_sandbox
+func _plugin_remove_pod_sandbox(ptr, size uint32) uint64 {
+	b := wasm.PtrToByte(ptr, size)
+	req := new(RemovePodSandboxRequest)
+	if err := req.UnmarshalVT(b); err != nil {
+		return 0
+	}
+	response, err := plugin.RemovePodSandbox(context.Background(), req)
+	if err != nil {
+		ptr, size = wasm.ByteToPtr([]byte(err.Error()))
+		return (uint64(ptr) << uint64(32)) | uint64(size) |
+			// Indicate that this is the error string by setting the 32-th bit, assuming that
+			// no data exceeds 31-bit size (2 GiB).
+			(1 << 31)
+	}
+
+	b, err = response.MarshalVT()
+	if err != nil {
+		return 0
+	}
+	ptr, size = wasm.ByteToPtr(b)
+	return (uint64(ptr) << uint64(32)) | uint64(size)
+}
+
 //export plugin_create_container
 func _plugin_create_container(ptr, size uint32) uint64 {
 	b := wasm.PtrToByte(ptr, size)
@@ -122,6 +194,78 @@ func _plugin_create_container(ptr, size uint32) uint64 {
 		return 0
 	}
 	response, err := plugin.CreateContainer(context.Background(), req)
+	if err != nil {
+		ptr, size = wasm.ByteToPtr([]byte(err.Error()))
+		return (uint64(ptr) << uint64(32)) | uint64(size) |
+			// Indicate that this is the error string by setting the 32-th bit, assuming that
+			// no data exceeds 31-bit size (2 GiB).
+			(1 << 31)
+	}
+
+	b, err = response.MarshalVT()
+	if err != nil {
+		return 0
+	}
+	ptr, size = wasm.ByteToPtr(b)
+	return (uint64(ptr) << uint64(32)) | uint64(size)
+}
+
+//export plugin_post_create_container
+func _plugin_post_create_container(ptr, size uint32) uint64 {
+	b := wasm.PtrToByte(ptr, size)
+	req := new(PostCreateContainerRequest)
+	if err := req.UnmarshalVT(b); err != nil {
+		return 0
+	}
+	response, err := plugin.PostCreateContainer(context.Background(), req)
+	if err != nil {
+		ptr, size = wasm.ByteToPtr([]byte(err.Error()))
+		return (uint64(ptr) << uint64(32)) | uint64(size) |
+			// Indicate that this is the error string by setting the 32-th bit, assuming that
+			// no data exceeds 31-bit size (2 GiB).
+			(1 << 31)
+	}
+
+	b, err = response.MarshalVT()
+	if err != nil {
+		return 0
+	}
+	ptr, size = wasm.ByteToPtr(b)
+	return (uint64(ptr) << uint64(32)) | uint64(size)
+}
+
+//export plugin_start_container
+func _plugin_start_container(ptr, size uint32) uint64 {
+	b := wasm.PtrToByte(ptr, size)
+	req := new(StartContainerRequest)
+	if err := req.UnmarshalVT(b); err != nil {
+		return 0
+	}
+	response, err := plugin.StartContainer(context.Background(), req)
+	if err != nil {
+		ptr, size = wasm.ByteToPtr([]byte(err.Error()))
+		return (uint64(ptr) << uint64(32)) | uint64(size) |
+			// Indicate that this is the error string by setting the 32-th bit, assuming that
+			// no data exceeds 31-bit size (2 GiB).
+			(1 << 31)
+	}
+
+	b, err = response.MarshalVT()
+	if err != nil {
+		return 0
+	}
+	ptr, size = wasm.ByteToPtr(b)
+	return (uint64(ptr) << uint64(32)) | uint64(size)
+}
+
+//export plugin_post_start_container
+func _plugin_post_start_container(ptr, size uint32) uint64 {
+	b := wasm.PtrToByte(ptr, size)
+	req := new(PostStartContainerRequest)
+	if err := req.UnmarshalVT(b); err != nil {
+		return 0
+	}
+	response, err := plugin.PostStartContainer(context.Background(), req)
 	if err != nil {
 		ptr, size = wasm.ByteToPtr([]byte(err.Error()))
 		return (uint64(ptr) << uint64(32)) | uint64(size) |
@@ -162,6 +306,30 @@ func _plugin_update_container(ptr, size uint32) uint64 {
 	return (uint64(ptr) << uint64(32)) | uint64(size)
 }
 
+//export plugin_post_update_container
+func _plugin_post_update_container(ptr, size uint32) uint64 {
+	b := wasm.PtrToByte(ptr, size)
+	req := new(PostUpdateContainerRequest)
+	if err := req.UnmarshalVT(b); err != nil {
+		return 0
+	}
+	response, err := plugin.PostUpdateContainer(context.Background(), req)
+	if err != nil {
+		ptr, size = wasm.ByteToPtr([]byte(err.Error()))
+		return (uint64(ptr) << uint64(32)) | uint64(size) |
+			// Indicate that this is the error string by setting the 32-th bit, assuming that
+			// no data exceeds 31-bit size (2 GiB).
+			(1 << 31)
+	}
+
+	b, err = response.MarshalVT()
+	if err != nil {
+		return 0
+	}
+	ptr, size = wasm.ByteToPtr(b)
+	return (uint64(ptr) << uint64(32)) | uint64(size)
+}
+
 //export plugin_stop_container
 func _plugin_stop_container(ptr, size uint32) uint64 {
 	b := wasm.PtrToByte(ptr, size)
@@ -170,6 +338,30 @@ func _plugin_stop_container(ptr, size uint32) uint64 {
 		return 0
 	}
 	response, err := plugin.StopContainer(context.Background(), req)
+	if err != nil {
+		ptr, size = wasm.ByteToPtr([]byte(err.Error()))
+		return (uint64(ptr) << uint64(32)) | uint64(size) |
+			// Indicate that this is the error string by setting the 32-th bit, assuming that
+			// no data exceeds 31-bit size (2 GiB).
+			(1 << 31)
+	}
+
+	b, err = response.MarshalVT()
+	if err != nil {
+		return 0
+	}
+	ptr, size = wasm.ByteToPtr(b)
+	return (uint64(ptr) << uint64(32)) | uint64(size)
+}
+
+//export plugin_remove_container
+func _plugin_remove_container(ptr, size uint32) uint64 {
+	b := wasm.PtrToByte(ptr, size)
+	req := new(RemoveContainerRequest)
+	if err := req.UnmarshalVT(b); err != nil {
+		return 0
+	}
+	response, err := plugin.RemoveContainer(context.Background(), req)
 	if err != nil {
 		ptr, size = wasm.ByteToPtr([]byte(err.Error()))
 		return (uint64(ptr) << uint64(32)) | uint64(size) |
