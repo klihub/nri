@@ -322,8 +322,8 @@ var _ = Describe("Pod and container requests and events", func() {
 			},
 			Entry("with RunPodSandbox", "RunPodSandbox"),
 			// TODO: Figure out why these are broken + write other tests.
-			// Entry("with UpdatePodSandbox", "UpdatePodSandbox"),
-			// Entry("with PostUpdatePodSandbox", "PostUpdatePodSandbox"),
+			Entry("with UpdatePodSandbox", "UpdatePodSandbox"),
+			Entry("with PostUpdatePodSandbox", "PostUpdatePodSandbox"),
 			Entry("with StopPodSandbox", "StopPodSandbox"),
 			Entry("with RemovePodSandbox", "RemovePodSandbox"),
 
