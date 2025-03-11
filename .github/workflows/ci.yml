@@ -27,7 +27,6 @@ jobs:
           fetch-depth: 25
 
       - uses: ./src/github.com/containerd/nri/.github/actions/install-go
-
       - uses: containerd/project-checks@v1.2.2
         with:
           working-directory: src/github.com/containerd/nri
@@ -40,11 +39,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/install-go
-
-      # needed for wasm plugins
-      - uses: acifani/setup-tinygo@v2
-        with:
-          tinygo-version: "0.34.0"
 
       - name: Set env
         shell: bash
@@ -74,7 +68,7 @@ jobs:
 
     strategy:
       matrix:
-        go-version: ["1.23.9", "1.24.3"]
+        go: [1.24.x]
         os: [ubuntu-22.04]
 
     steps:
@@ -99,7 +93,7 @@ jobs:
 
     strategy:
       matrix:
-        go-version: ["1.23.9", "1.24.3"]
+        go: [1.24.x]
 
     steps:
       - uses: actions/checkout@v4
