@@ -11082,7 +11082,7 @@ func (m *LinuxIOPriority) UnmarshalVT(dAtA []byte) error {
 				}
 				b := dAtA[iNdEx]
 				iNdEx++
-				m.Class |= IOPrioClass(b&0x7F) << shift
+				m.Class |= IOPRIO_CLASS(b&0x7F) << shift
 				if b < 0x80 {
 					break
 				}

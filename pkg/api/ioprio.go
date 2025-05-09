@@ -20,6 +20,8 @@ import (
 	rspec "github.com/opencontainers/runtime-spec/specs-go"
 )
 
+type IOPrioClass = IOPRIO_CLASS
+
 // FromOCILinuxIOPriority returns a LinuxIOPriority corresponding to the
 // OCI LinuxIOPriority.
 func FromOCILinuxIOPriority(o *rspec.LinuxIOPriority) *LinuxIOPriority {
@@ -50,14 +52,14 @@ func (ioprio *LinuxIOPriority) ToOCI() *rspec.LinuxIOPriority {
 // FromOCIIOPrioClass returns the IOPrioClass corresponding the the given
 // OCI IOPriorityClass.
 func FromOCIIOPriorityClass(o rspec.IOPriorityClass) IOPrioClass {
-	return IOPrioClass(IOPrioClass_value[string(o)])
+	return IOPrioClass(IOPRIO_CLASS_value[string(o)])
 }
 
 // ToOCI returns the OCI IOPriorityClass corresponding to the given
 // IOPrioClass.
 func (c IOPrioClass) ToOCI() rspec.IOPriorityClass {
-	if c == IOPrioClass_IOPRIO_CLASS_NONE {
+	if c == IOPRIO_CLASS_NONE {
 		return rspec.IOPriorityClass("")
 	}
-	return rspec.IOPriorityClass(IOPrioClass_name[int32(c)])
+	return rspec.IOPriorityClass(IOPRIO_CLASS_name[int32(c)])
 }

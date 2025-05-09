@@ -431,16 +431,16 @@ message LinuxPids {
 
 message LinuxIOPriority {
   // Scheduling class of the IO priority.
-  IOPrioClass class = 1;
+  IOPRIO_CLASS class = 1;
   // The value of the IO priority.
   int32 priority = 2;
 }
 
-enum IOPrioClass {
-  IOPRIO_CLASS_NONE = 0;
-  IOPRIO_CLASS_RT = 1;
-  IOPRIO_CLASS_BE = 2;
-  IOPRIO_CLASS_IDLE = 3;
+enum IOPRIO_CLASS {
+  NONE = 0;
+  RT = 1;
+  BE = 2;
+  IDLE = 3;
 }
 
 // Requested adjustments to a container being created.

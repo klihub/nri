@@ -333,13 +333,13 @@ func (p *ioPrio) toNRI() *api.LinuxIOPriority {
 
 	switch p.Class {
 	case "IOPRIO_CLASS_NONE":
-		class = api.IOPrioClass_IOPRIO_CLASS_NONE
+		class = api.IOPRIO_CLASS_NONE
 	case "IOPRIO_CLASS_RT":
-		class = api.IOPrioClass_IOPRIO_CLASS_RT
+		class = api.IOPRIO_CLASS_RT
 	case "IOPRIO_CLASS_BE":
-		class = api.IOPrioClass_IOPRIO_CLASS_BE
+		class = api.IOPRIO_CLASS_BE
 	case "IOPRIO_CLASS_IDLE":
-		class = api.IOPrioClass_IOPRIO_CLASS_IDLE
+		class = api.IOPRIO_CLASS_IDLE
 	default:
 		log.Warnf("unknown I/O priority class %q, using IOPRIO_CLASS_BE", p.Class)
 		return nil
