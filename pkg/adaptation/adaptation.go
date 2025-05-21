@@ -29,6 +29,7 @@ import (
 
 	"github.com/containerd/nri/pkg/adaptation/builtin"
 	"github.com/containerd/nri/pkg/api"
+	"github.com/containerd/nri/pkg/auth"
 	"github.com/containerd/nri/pkg/log"
 	validator "github.com/containerd/nri/plugins/default-validator/builtin"
 	"github.com/containerd/ttrpc"
@@ -70,6 +71,7 @@ type Adaptation struct {
 	clientOpts  []ttrpc.ClientOpts
 	serverOpts  []ttrpc.ServerOpt
 	listener    net.Listener
+	identities  *auth.Config
 	plugins     []*plugin
 	validators  []*plugin
 	builtin     []*builtin.BuiltinPlugin
@@ -144,6 +146,17 @@ func WithDefaultValidator(cfg *validator.DefaultValidatorConfig) Option {
 	}
 }
 
+// WithPluginIdentities sets up plugin authentication keys for known identities.
+func WithPluginIdentities(cfg *auth.Config) Option {
+	return func(r *Adaptation) error {
+		if err := cfg.Validate(); err != nil {
+			return err
+		}
+		r.identities = cfg
+		return nil
+	}
+}
+
 // New creates a new NRI Runtime.
 func New(name, version string, syncFn SyncFn, updateFn UpdateFn, opts ...Option) (*Adaptation, error) {
 	var err error
@@ -193,6 +206,13 @@ func New(name, version string, syncFn SyncFn, updateFn UpdateFn, opts ...Option)
 	}
 
 	log.Infof(noCtx, "runtime interface created")
+
+	log.Infof(noCtx, "plugin identities configured: %v", r.identities)
+	if r.identities != nil {
+		for _, id := range r.identities.Identities {
+			log.Infof(noCtx, "  %q with %d keys %v", id.Identity, len(id.Keys), id.Keys)
+		}
+	}
 
 	return r, nil
 }
