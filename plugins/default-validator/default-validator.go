@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/containerd/nri/pkg/api"
@@ -31,8 +32,9 @@ import (
 type DefaultValidatorConfig struct {
 	// Enable the default validator plugin.
 	Enable bool `yaml:"enable" toml:"enable"`
-	// RejectOCIHooks fails validation if any NRI plugin injects OCI hooks.
-	RejectOCIHooks bool `yaml:"rejectOCIHooks" toml:"reject_oci_hooks"`
+	*ValidatorConfig
+	// Overrides provide per-identity overridet to the default configuration.
+	Overrides map[string]*ValidatorConfig `yaml:"overrides" toml:"overrides"`
 	// RequiredPlugins list globally required plugins. These must be present
 	// or otherwise validation will fail.
 	// WARNING: This is a global setting and will affect all containers. In
@@ -48,23 +50,33 @@ type DefaultValidatorConfig struct {
 	TolerateMissingAnnotation string `yaml:"tolerateMissingPluginsAnnotation" toml:"tolerate_missing_plugins_annotation"`
 }
 
+// ValidatorConfig provides validation defaults or per identity overrides.
+type ValidatorConfig struct {
+	// RejectOCIHooks rejects OCI hook injection.
+	RejectOCIHooks *bool `yaml:"rejectOCIHooks" toml:"reject_oci_hooks"`
+}
+
+// DefaultValidator implements default validation.
 type DefaultValidator struct {
 	cfg DefaultValidatorConfig
 }
 
-var (
-	ErrValidation = errors.New("validation error")
-)
-
 const (
+	// RequiredPlugins is the annotation key for extra required plugins.
 	RequiredPlugins = api.RequiredPluginsAnnotation
 )
 
-// NewDefaultValidator creates a new instance of the default validator plugin.
+var (
+	// ErrValidation is returned if validation rejects an adjustment.
+	ErrValidation = errors.New("validation error")
+)
+
+// NewDefaultValidator creates a new instance of the validator.
 func NewDefaultValidator(cfg *DefaultValidatorConfig) *DefaultValidator {
 	return &DefaultValidator{cfg: *cfg}
 }
 
+// SetConfig sets new configuration for the validator.
 func (v *DefaultValidator) SetConfig(cfg *DefaultValidatorConfig) {
 	if cfg == nil {
 		return
@@ -72,42 +84,64 @@ func (v *DefaultValidator) SetConfig(cfg *DefaultValidatorConfig) {
 	v.cfg = *cfg
 }
 
+// ValidateContainerAdjustment validates a container adjustment.
 func (v *DefaultValidator) ValidateContainerAdjustment(ctx context.Context, req *api.ValidateContainerAdjustmentRequest) error {
-	log.Debugf(ctx, "Validating container adjustment of %s/%s/%s",
+	log.Debugf(ctx, "Validating adjustment of container %s/%s/%s",
 		req.GetPod().GetNamespace(), req.GetPod().GetName(), req.GetContainer().GetName())
 
-	if err := v.validateOCIHooks(req); err != nil {
-		log.Errorf(ctx, "rejecting adjusted container: %v", err)
+	plugins := req.GetPluginMap()
+
+	if err := v.validateOCIHooks(req, plugins); err != nil {
+		log.Errorf(ctx, "rejecting adjustment: %v", err)
 		return err
 	}
 
-	if err := v.validateRequiredPlugins(req); err != nil {
-		log.Errorf(ctx, "rejecting adjusted container: %v", err)
+	if err := v.validateRequiredPlugins(req, plugins); err != nil {
+		log.Errorf(ctx, "rejecting adjustment: %v", err)
 		return err
 	}
 
 	return nil
 }
 
-func (v *DefaultValidator) validateOCIHooks(req *api.ValidateContainerAdjustmentRequest) error {
-	if !v.cfg.RejectOCIHooks || req.Adjust == nil {
+func (v *DefaultValidator) validateOCIHooks(req *api.ValidateContainerAdjustmentRequest, plugins map[string]*api.PluginInstance) error {
+	if req.Adjust == nil {
 		return nil
 	}
 
-	if plugins, claimed := req.Owners.HooksOwner(req.Container.Id); claimed {
-		what := "plugin"
-		if strings.Contains(plugins, ",") {
-			what = "plugins"
-		}
-
-		return fmt.Errorf("%w: %s %q attempted restricted hook injection",
-			ErrValidation, what, plugins)
+	owners, claimed := req.Owners.HooksOwner(req.Container.Id)
+	if !claimed {
+		return nil
 	}
 
-	return nil
+	defaults := v.cfg.ValidatorConfig
+	rejected := []string{}
+
+	for _, p := range strings.Split(owners, ",") {
+		if instance, ok := plugins[p]; ok {
+			cfg := v.cfg.GetConfig(instance.GetIdentity())
+			if cfg.RejectOCIHookInjection(defaults) {
+				rejected = append(rejected, p)
+			}
+		}
+	}
+
+	if len(rejected) == 0 {
+		return nil
+	}
+
+	offender := ""
+
+	if len(rejected) == 1 {
+		offender = fmt.Sprintf("plugin %q", rejected[0])
+	} else {
+		offender = fmt.Sprintf("plugins %q", strings.Join(rejected, ","))
+	}
+
+	return fmt.Errorf("%w: %s attempted restricted OCI hook injection", ErrValidation, offender)
 }
 
-func (v *DefaultValidator) validateRequiredPlugins(req *api.ValidateContainerAdjustmentRequest) error {
+func (v *DefaultValidator) validateRequiredPlugins(req *api.ValidateContainerAdjustmentRequest, plugins map[string]*api.PluginInstance) error {
 	var (
 		container = req.GetContainer().GetName()
 		required  = slices.Clone(v.cfg.RequiredPlugins)
@@ -116,8 +150,8 @@ func (v *DefaultValidator) validateRequiredPlugins(req *api.ValidateContainerAdj
 	if tolerateMissing := v.cfg.TolerateMissingAnnotation; tolerateMissing != "" {
 		value, ok := req.GetPod().GetEffectiveAnnotation(tolerateMissing, container)
 		if ok {
-			tolerate := false
-			if err := yaml.Unmarshal([]byte(value), &tolerate); err != nil {
+			tolerate, err := strconv.ParseBool(value)
+			if err != nil {
 				return fmt.Errorf("invalid %s annotation %q: %w", tolerateMissing, value, err)
 			}
 			if tolerate {
@@ -126,8 +160,7 @@ func (v *DefaultValidator) validateRequiredPlugins(req *api.ValidateContainerAdj
 		}
 	}
 
-	value, ok := req.GetPod().GetEffectiveAnnotation(RequiredPlugins, container)
-	if ok {
+	if value, ok := req.GetPod().GetEffectiveAnnotation(RequiredPlugins, container); ok {
 		var annotated []string
 		if err := yaml.Unmarshal([]byte(value), &annotated); err != nil {
 			return fmt.Errorf("invalid %s annotation %q: %w", RequiredPlugins, value, err)
@@ -139,18 +172,45 @@ func (v *DefaultValidator) validateRequiredPlugins(req *api.ValidateContainerAdj
 		return nil
 	}
 
-	present := map[string]struct{}{}
-	for _, p := range req.Plugins {
-		if p != nil {
-			present[p.Name] = struct{}{}
-		}
-	}
+	absent := []string{}
 
 	for _, r := range required {
-		if _, ok := present[r]; !ok {
-			return fmt.Errorf("%w: required plugin %q not present", ErrValidation, r)
+		if _, ok := plugins[r]; !ok {
+			absent = append(absent, r)
 		}
 	}
 
-	return nil
+	if len(absent) == 0 {
+		return nil
+	}
+
+	missing := ""
+
+	if len(absent) == 1 {
+		missing = fmt.Sprintf("required plugin %q", absent[0])
+	} else {
+		missing = fmt.Sprintf("required plugins %q", strings.Join(absent, ","))
+	}
+
+	return fmt.Errorf("%w: %s not present", ErrValidation, missing)
+}
+
+// GetConfig returns overrides for the named identity if it exists in the
+// configuration.
+func (cfg *DefaultValidatorConfig) GetConfig(id string) *ValidatorConfig {
+	if cfg == nil || cfg.Overrides == nil {
+		return nil
+	}
+	return cfg.Overrides[id]
+}
+
+// RejectOCIHookInjection check whether OCI hook injection is rejected,
+// falling back to a default configuration if cfg is nil or omits hook
+// injection configuration.
+func (cfg *ValidatorConfig) RejectOCIHookInjection(defaults *ValidatorConfig) bool {
+	if cfg != nil && cfg.RejectOCIHooks != nil {
+		return *cfg.RejectOCIHooks
+	}
+
+	return defaults != nil && defaults.RejectOCIHookInjection(nil)
 }
