@@ -306,7 +306,7 @@ func (r *Adaptation) CreateContainer(ctx context.Context, req *CreateContainerRe
 
 	for _, plugin := range r.plugins {
 		if validate != nil {
-			validate.AddPlugin(plugin.base, plugin.idx)
+			validate.AddPlugin(plugin.base, plugin.idx, plugin.id.GetIdentity())
 		}
 		rpl, err := plugin.createContainer(ctx, req)
 		if err != nil {

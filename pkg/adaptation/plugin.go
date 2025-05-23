@@ -59,6 +59,13 @@ type identity struct {
 	id   *auth.Identity
 }
 
+func (id *identity) GetIdentity() *auth.Identity {
+	if id == nil {
+		return nil
+	}
+	return id.id
+}
+
 type plugin struct {
 	sync.Mutex
 	idx    string
@@ -460,7 +467,7 @@ func (p *plugin) RequestChallenge(ctx context.Context, req *auth.RequestChalleng
 	p.id.peer = peer
 	p.id.id = id
 
-	log.Infof(ctx, "key has identity %q...", id.Identity)
+	log.Infof(ctx, "key has identity %q...", id.GetIdentity())
 
 	priv, pub, err := auth.GenerateKeyPair()
 	if err != nil {
@@ -504,8 +511,8 @@ func (p *plugin) VerifyChallenge(ctx context.Context, req *auth.VerifyChallengeR
 	}
 
 	return &auth.VerifyChallengeResponse{
-		Identity: p.id.id.Identity,
-		Tags:     p.id.id.Tags,
+		Identity: p.id.GetIdentity().GetIdentity(),
+		Tags:     p.id.GetIdentity().GetTags(),
 	}, nil
 }
 
