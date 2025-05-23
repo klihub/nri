@@ -18,12 +18,20 @@ package api
 
 import (
 	"fmt"
+
+	"github.com/containerd/nri/pkg/auth"
 )
 
-func (v *ValidateContainerAdjustmentRequest) AddPlugin(name, index string) {
+type (
+	Identity = auth.Identity
+)
+
+func (v *ValidateContainerAdjustmentRequest) AddPlugin(name, index string, id *Identity) {
 	v.Plugins = append(v.Plugins, &PluginInstance{
-		Name:  name,
-		Index: index,
+		Name:     name,
+		Index:    index,
+		Identity: id.GetIdentity(),
+		Tags:     id.GetTags(),
 	})
 }
 
@@ -47,4 +55,18 @@ func (v *ValidateContainerAdjustmentResponse) ValidationResult(plugin string) er
 	}
 
 	return fmt.Errorf("validator %q rejected container adjustment, reason: %s", plugin, reason)
+}
+
+func (v *ValidateContainerAdjustmentRequest) GetPluginMap() map[string]*PluginInstance {
+	if v == nil {
+		return nil
+	}
+
+	plugins := make(map[string]*PluginInstance)
+	for _, p := range v.Plugins {
+		plugins[p.Name] = &PluginInstance{Name: p.Name}
+		plugins[p.Index+"-"+p.Name] = p
+	}
+
+	return plugins
 }
