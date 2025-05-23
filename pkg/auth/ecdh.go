@@ -37,6 +37,7 @@ var (
 	ErrAuthFailed = errors.New("authentication failed")
 )
 
+// GenerateKeyPair generates a private/public key pair for ECDH.
 func GenerateKeyPair() (*PrivateKey, *PublicKey, error) {
 	privK, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
@@ -53,6 +54,7 @@ func GenerateKeyPair() (*PrivateKey, *PublicKey, error) {
 	return priv, pub, nil
 }
 
+// PrivateKeys is an ECDH private key.
 type PrivateKey struct {
 	*ecdh.PrivateKey
 	bytes     []byte
@@ -60,6 +62,7 @@ type PrivateKey struct {
 	challenge []byte
 }
 
+// DecodePrivateKey returns a new private key for the encoded data.
 func DecodePrivateKey(bytes []byte) (*PrivateKey, error) {
 	k := &PrivateKey{}
 	if err := k.Decode(bytes); err != nil {
@@ -68,6 +71,7 @@ func DecodePrivateKey(bytes []byte) (*PrivateKey, error) {
 	return k, nil
 }
 
+// Clear clears all data from the key.
 func (k *PrivateKey) Clear() {
 	if k == nil {
 		return
@@ -86,6 +90,7 @@ func (k *PrivateKey) Clear() {
 	}
 }
 
+// Encode encodes the private key.
 func (k *PrivateKey) Encode() []byte {
 	bytes := make([]byte, base64.StdEncoding.EncodedLen(len(k.Bytes())))
 	base64.StdEncoding.Encode(bytes, k.Bytes())
@@ -94,6 +99,7 @@ func (k *PrivateKey) Encode() []byte {
 	return k.bytes
 }
 
+// Decode decodes the private key.
 func (k *PrivateKey) Decode(bytes []byte) error {
 	data := make([]byte, base64.StdEncoding.DecodedLen(len(bytes)))
 	n, err := base64.StdEncoding.Decode(data, bytes)
@@ -111,6 +117,7 @@ func (k *PrivateKey) Decode(bytes []byte) error {
 	return nil
 }
 
+// SharedSecret performs an ECDH exchange and returns the shared secret.
 func (k *PrivateKey) SharedSecret(peer *PublicKey) ([]byte, error) {
 	if len(k.secret) != 0 {
 		return slices.Clone(k.secret), nil
@@ -130,6 +137,7 @@ func (k *PrivateKey) SharedSecret(peer *PublicKey) ([]byte, error) {
 	return k.secret, nil
 }
 
+// Seal encrypts the given cleartext the the given peer.
 func (k *PrivateKey) Seal(peer *PublicKey, clear []byte) ([]byte, error) {
 	key, err := k.SharedSecret(peer)
 	if err != nil {
@@ -149,6 +157,7 @@ func (k *PrivateKey) Seal(peer *PublicKey, clear []byte) ([]byte, error) {
 	return aead.Seal(nonce, nonce, clear, nil), nil
 }
 
+// Open decrypts the ciphertext from the given peer.
 func (k *PrivateKey) Open(peer *PublicKey, cipher []byte) ([]byte, error) {
 	key, err := k.SharedSecret(peer)
 	if err != nil {
@@ -175,6 +184,7 @@ func (k *PrivateKey) Open(peer *PublicKey, cipher []byte) ([]byte, error) {
 	return clear, nil
 }
 
+// GenerateChallenge generates an encrypted challenge for the peer.
 func (k *PrivateKey) GenerateChallenge(peer *PublicKey) ([]byte, error) {
 	k.challenge = make([]byte, 32)
 
@@ -186,6 +196,7 @@ func (k *PrivateKey) GenerateChallenge(peer *PublicKey) ([]byte, error) {
 	return k.Seal(peer, k.challenge)
 }
 
+// GenerateResponse generates a response for the given challenge.
 func (k *PrivateKey) GenerateResponse(peer *PublicKey, cipher []byte) ([]byte, error) {
 	challenge, err := k.Open(peer, cipher)
 	if err != nil {
@@ -197,6 +208,7 @@ func (k *PrivateKey) GenerateResponse(peer *PublicKey, cipher []byte) ([]byte, e
 	return k.Seal(peer, response[:])
 }
 
+// VerifyResponse verifies the given challenge response.
 func (k *PrivateKey) VerifyResponse(peer *PublicKey, cipher []byte) error {
 	response, err := k.Open(peer, cipher)
 	if err != nil {
@@ -211,12 +223,14 @@ func (k *PrivateKey) VerifyResponse(peer *PublicKey, cipher []byte) error {
 	return nil
 }
 
+// PublicKey is an ECDH public key.
 type PublicKey struct {
 	*ecdh.PublicKey
 	bytes  []byte
 	secret []byte
 }
 
+// DecodePublicKey returns a new public key for the encoded data.
 func DecodePublicKey(bytes []byte) (*PublicKey, error) {
 	k := &PublicKey{}
 	if err := k.Decode(bytes); err != nil {
@@ -225,6 +239,7 @@ func DecodePublicKey(bytes []byte) (*PublicKey, error) {
 	return k, nil
 }
 
+// Clear clears all data from the key.
 func (k *PublicKey) Clear() {
 	if k == nil {
 		return
@@ -240,6 +255,7 @@ func (k *PublicKey) Clear() {
 	}
 }
 
+// Encode encodes the public key.
 func (k *PublicKey) Encode() []byte {
 	bytes := make([]byte, base64.StdEncoding.EncodedLen(len(k.Bytes())))
 	base64.StdEncoding.Encode(bytes, k.Bytes())
@@ -248,6 +264,7 @@ func (k *PublicKey) Encode() []byte {
 	return k.bytes
 }
 
+// Decode decodes the public key.
 func (k *PublicKey) Decode(bytes []byte) error {
 	data := make([]byte, base64.StdEncoding.DecodedLen(len(bytes)))
 	n, err := base64.StdEncoding.Decode(data, bytes)
