@@ -34,9 +34,11 @@ type DefaultValidatorConfig struct {
 	// Enable the default validator plugin.
 	Enable bool `yaml:"enable" toml:"enable"`
 	// RejectOCIHooks fails validation if any plugin injects OCI hooks.
-	RejectOCIHooks bool `yaml:"rejectOCIHooks" toml:"reject_oci_hooks"`
+	RejectOCIHooks                    bool `yaml:"rejectOCIHooks" toml:"reject_oci_hooks"`
+	RejectRuntimeDefaultSeccompPolicy bool `yaml:"rejectRuntimeDefaultSeccompPolicy" toml:"reject_runtime_default_seccomp_policy"`
+	RejectUnconfinedSeccompPolicy     bool `yaml:"rejectUnconfinedSeccompPolicy" toml:"reject_unconfined_seccomp_policy"`
+	RejectCustomSeccompPolicy         bool `yaml:"rejectCustomSeccompPolicy" toml:"reject_custom_seccomp_policy"`
 	// RejectSeccompPolicy fails validation if any plugin modifies seccomp policy.
-	RejectSeccompPolicy bool `yaml:"rejectSeccompPolicy" toml:"reject_seccomp_policy"`
 	// RequiredPlugins list globally required plugins. These must be present
 	// or otherwise validation will fail.
 	// WARNING: This is a global setting and will affect all containers. In
@@ -133,17 +135,33 @@ func (v *DefaultValidator) validateSeccompPolicy(req *api.ValidateContainerAdjus
 		return nil
 	}
 
-	if !v.cfg.RejectSeccompPolicy {
-		return nil
-	}
-
 	owner, claimed := req.Owners.SeccompPolicyOwner(req.Container.Id)
 	if !claimed {
 		return nil
 	}
 
-	return fmt.Errorf("%w: plugin %s attempted restricted seccomp policy adjustment",
-		ErrValidation, owner)
+	profile := req.Container.GetLinux().GetSeccompProfile()
+	switch {
+	case profile == nil || profile.GetProfileType() == api.SecurityProfile_UNCONFINED:
+		if v.cfg.RejectUnconfinedSeccompPolicy {
+			return fmt.Errorf("%w: plugin %s attempted restricted "+
+				" unconfined seccomp policy adjustment", ErrValidation, owner)
+		}
+
+	case profile.GetProfileType() == api.SecurityProfile_RUNTIME_DEFAULT:
+		if v.cfg.RejectRuntimeDefaultSeccompPolicy {
+			return fmt.Errorf("%w: plugin %s attempted restricted "+
+				"runtime default seccomp policy adjustment", ErrValidation, owner)
+		}
+
+	case profile.GetProfileType() == api.SecurityProfile_LOCALHOST:
+		if v.cfg.RejectCustomSeccompPolicy {
+			return fmt.Errorf("%w: plugin %s attempted restricted "+
+				" custom seccomp policy adjustment", ErrValidation, owner)
+		}
+	}
+
+	return nil
 }
 
 func (v *DefaultValidator) validateRequiredPlugins(req *api.ValidateContainerAdjustmentRequest) error {
