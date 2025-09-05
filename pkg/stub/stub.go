@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	stdnet "net"
 	"os"
 	"path/filepath"
@@ -28,6 +29,9 @@ import (
 	"time"
 
 	"github.com/containerd/nri/pkg/api"
+	"github.com/containerd/nri/pkg/auth"
+	"github.com/containerd/nri/pkg/auth/crypto"
+	"github.com/containerd/nri/pkg/auth/crypto/ecdh"
 	nrilog "github.com/containerd/nri/pkg/log"
 	"github.com/containerd/nri/pkg/net"
 	"github.com/containerd/nri/pkg/net/multiplex"
@@ -178,6 +182,11 @@ type Stub interface {
 	// This is the default timeout if the plugin has not been started or
 	// the timeout received in the Configure request otherwise.
 	RequestTimeout() time.Duration
+
+	// GetRole returns the role the plugin was authenticated to, if any.
+	GetRole() string
+	// GetTags returns any tags associated with the plugin's role, if any.
+	GetTags() map[string]string
 }
 
 const (
@@ -197,6 +206,9 @@ var (
 	// ErrNoService indicates that the stub has no runtime service/connection,
 	// for instance by UpdateContainers on a stub which has not been started.
 	ErrNoService = errors.New("stub: no service/connection")
+
+	// ErrAuth indicates failure to authentication with the runtime.
+	ErrAuth = errors.New("stub: failed to authenticate")
 )
 
 // EventMask holds a mask of events for plugin subscription.
@@ -268,6 +280,22 @@ func WithTTRPCOptions(clientOpts []ttrpc.ClientOpts, serverOpts []ttrpc.ServerOp
 	}
 }
 
+// WithAuthentication sets authentication keys for the plugin. The stub will
+// use these keys to authenticate itself with the runtime before registration.
+func WithAuthentication(fetchKeys AuthKeyFetcher) Option {
+	return func(s *stub) error {
+		s.fetchKeys = fetchKeys
+		return nil
+	}
+}
+
+// AuthKeyFetcher is the interface the plugin uses to acquire keys for
+// authenticating itself with the runtime.
+type AuthKeyFetcher interface {
+	FetchKeys() (crypto.PrivateKey, crypto.PublicKey, error)
+	ClearKeys()
+}
+
 // stub implements Stub.
 type stub struct {
 	sync.Mutex
@@ -286,6 +314,9 @@ type stub struct {
 	rpcl       stdnet.Listener
 	rpcs       *ttrpc.Server
 	rpcc       *ttrpc.Client
+	fetchKeys  AuthKeyFetcher
+	role       string
+	tags       map[string]string
 	runtime    api.RuntimeService
 	started    bool
 	doneC      chan struct{}
@@ -337,11 +368,17 @@ func New(p interface{}, opts ...Option) (Stub, error) {
 		}
 	}
 
+	if stub.fetchKeys == nil {
+		if file := os.Getenv(api.PluginAuthFileEnvVar); file != "" {
+			stub.fetchKeys = auth.NewFileFetcher(file)
+		}
+	}
+
 	if err := stub.setupHandlers(); err != nil {
 		return nil, err
 	}
 
-	if err := stub.ensureIdentity(); err != nil {
+	if err := stub.ensureNameAndIndex(); err != nil {
 		return nil, err
 	}
 
@@ -430,6 +467,11 @@ func (stub *stub) Start(ctx context.Context) (retErr error) {
 	stub.rpcc = rpcc
 
 	stub.runtime = api.NewRuntimeClient(rpcc)
+
+	if err = stub.authenticate(ctx); err != nil {
+		stub.close()
+		return err
+	}
 
 	if err = stub.register(ctx); err != nil {
 		stub.close()
@@ -530,6 +572,14 @@ func (stub *stub) RequestTimeout() time.Duration {
 	return stub.requestTimeout
 }
 
+func (stub *stub) GetRole() string {
+	return stub.role
+}
+
+func (stub *stub) GetTags() map[string]string {
+	return maps.Clone(stub.tags)
+}
+
 // Connect the plugin to NRI.
 func (stub *stub) connect() error {
 	if stub.conn != nil {
@@ -562,6 +612,123 @@ func (stub *stub) connect() error {
 	stub.conn = conn
 
 	return nil
+}
+
+// Authenticate the plugin with NRI, if we have been set up with keys.
+func (stub *stub) authenticate(ctx context.Context) error {
+	if stub.fetchKeys == nil {
+		log.Infof(ctx, "No authentication keys set...")
+		return nil
+	}
+
+	private, public, err := stub.fetchKeys.FetchKeys()
+	if err != nil {
+		return fmt.Errorf("failed to fetch keys: %w", err)
+	}
+	defer stub.fetchKeys.ClearKeys()
+
+	algo, err := ecdh.NewWithKeyPair(private, public)
+	if err != nil {
+		return fmt.Errorf("failed to set up authentication: %w", err)
+	}
+
+	client := auth.NewAuthenticationClient(stub.rpcc)
+	ctx, cancel := context.WithTimeout(ctx, stub.requestTimeout)
+	defer cancel()
+
+	rpl, err := client.RequestChallenge(ctx,
+		&auth.RequestChallengeRequest{
+			PublicKey: algo.PublicKey(),
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("failed to authenticate: %w", err)
+	}
+
+	response, err := algo.Response(rpl.Challenge, crypto.PublicKey(rpl.PublicKey))
+	if err != nil {
+		return fmt.Errorf("failed to authenticate: %w", err)
+	}
+
+	result, err := client.VerifyChallenge(ctx,
+		&auth.VerifyChallengeRequest{
+			Response: response,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("failed to authenticate: %w", err)
+	}
+
+	log.Infof(ctx, "Authenticated with role %s (tags: %v)...",
+		result.Role, result.Tags)
+
+	stub.role = result.Role
+	stub.tags = result.Tags
+
+	return nil
+
+	/*
+	   	if stub.fetchKeys == nil {
+	   		log.Infof(ctx, "No authentication keys set...")
+	   		return nil
+	   	}
+
+	   log.Infof(ctx, "Authenticating with runtime...")
+
+	   private, public, err := stub.fetchKeys.FetchKeys()
+
+	   	if err != nil {
+	   		return fmt.Errorf("failed to fetch keys: %w", err)
+	   	}
+
+	   defer private.Clear()
+
+	   client := auth.NewAuthenticationClient(stub.rpcc)
+	   ctx, cancel := context.WithTimeout(ctx, stub.requestTimeout)
+	   defer cancel()
+
+	   rpl, err := client.RequestChallenge(ctx,
+
+	   	&auth.RequestChallengeRequest{
+	   		PublicKey: public.Encode(),
+	   	},
+
+	   )
+
+	   	if err != nil {
+	   		return fmt.Errorf("failed to authenticate: %w", err)
+	   	}
+
+	   peer, err := auth.DecodePublicKey(rpl.PublicKey)
+
+	   	if err != nil {
+	   		return fmt.Errorf("failed to authenticate: %w", err)
+	   	}
+
+	   response, err := private.GenerateResponse(peer, rpl.Challenge)
+
+	   	if err != nil {
+	   		return fmt.Errorf("failed to authenticate: %w", err)
+	   	}
+
+	   result, err := client.VerifyChallenge(ctx,
+
+	   	&auth.VerifyChallengeRequest{
+	   		Response: response,
+	   	},
+
+	   )
+
+	   	if err != nil {
+	   		return fmt.Errorf("failed to authenticate: %w", err)
+	   	}
+
+	   log.Infof(ctx, "Authenticated with role %s (tags: %v)...",
+
+	   	result.Role, result.Tags)
+
+	   return nil
+	*/
 }
 
 // Register the plugin with NRI.
@@ -829,8 +996,8 @@ func (stub *stub) ValidateContainerAdjustment(ctx context.Context, req *api.Vali
 	return &api.ValidateContainerAdjustmentResponse{}, nil
 }
 
-// ensureIdentity sets plugin index and name from the binary if those are unset.
-func (stub *stub) ensureIdentity() error {
+// ensureNameAndIndex sets plugin index and name from the binary if those are unset.
+func (stub *stub) ensureNameAndIndex() error {
 	if stub.idx != "" && stub.name != "" {
 		return nil
 	}

@@ -26,13 +26,15 @@ import (
 )
 
 type (
-	// DefaultValidatorConfig is an alias for DefaultValidatorConfig from main package.
-	DefaultValidatorConfig = validator.DefaultValidatorConfig
+	// Config is an alias for Config from main package.
+	Config = validator.Config
+	// DefaultConfig is an alias for DefaultValidatorConfig from main package.
+	DefaultConfig = validator.DefaultConfig
 )
 
 // GetDefaultValidator returns a configured instance of the default validator.
 // If default validation is disabled nil is returned.
-func GetDefaultValidator(cfg *DefaultValidatorConfig) *builtin.BuiltinPlugin {
+func GetDefaultValidator(cfg *DefaultConfig) *builtin.BuiltinPlugin {
 	if cfg == nil || !cfg.Enable {
 		log.Infof(context.TODO(), "built-in NRI default validator is disabled")
 		return nil
