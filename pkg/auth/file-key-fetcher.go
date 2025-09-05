@@ -18,8 +18,10 @@ package auth
 
 import (
 	"bytes"
-	fmt "fmt"
+	"fmt"
 	"os"
+
+	"github.com/containerd/nri/pkg/auth/crypto"
 )
 
 // FileFetcher fetches authentication keys from a file.
@@ -44,23 +46,12 @@ func (f *FileFetcher) ClearKeys() {
 }
 
 // FetchKeys fetches the private key and public keys (line 1 and 2) from a file.
-func (f *FileFetcher) FetchKeys() (*PrivateKey, *PublicKey, error) {
+func (f *FileFetcher) FetchKeys() (crypto.PrivateKey, crypto.PublicKey, error) {
 	if err := f.read(); err != nil {
 		return nil, nil, err
 	}
 
-	priv, err := DecodePrivateKey(f.data[0])
-	if err != nil {
-		return nil, nil, err
-	}
-
-	pub, err := DecodePublicKey(f.data[1])
-	if err != nil {
-		f.ClearKeys()
-		return nil, nil, err
-	}
-
-	return priv, pub, nil
+	return crypto.PrivateKey(f.data[0]), crypto.PublicKey(f.data[1]), nil
 }
 
 func (f *FileFetcher) read() error {
@@ -77,4 +68,32 @@ func (f *FileFetcher) read() error {
 	}
 
 	return nil
+}
+
+// InMemoryKeyFetcher returns keys from memory.
+type InMemoryKeyFetcher struct {
+	priv []byte
+	pub  []byte
+}
+
+// NewInMemoryKeyFetcher returns an AuthKeyFetcher for the given keys.
+func NewInMemoryKeyFetcher(priv, pub []byte) *InMemoryKeyFetcher {
+	return &InMemoryKeyFetcher{priv: priv, pub: pub}
+}
+
+// FetchKeys returns the private and public keys from memory.
+func (f *InMemoryKeyFetcher) FetchKeys() (crypto.PrivateKey, crypto.PublicKey, error) {
+	return crypto.PrivateKey(f.priv), crypto.PublicKey(f.pub), nil
+}
+
+// ClearKeys clears the keys from memory.
+func (f *InMemoryKeyFetcher) ClearKeys() {
+	for i := range f.priv {
+		f.priv[i] = 0
+	}
+	for i := range f.pub {
+		f.pub[i] = 0
+	}
+	f.priv = nil
+	f.pub = nil
 }

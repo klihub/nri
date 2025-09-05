@@ -36,7 +36,9 @@ import (
 
 	nri "github.com/containerd/nri/pkg/adaptation"
 	"github.com/containerd/nri/pkg/api"
+	"github.com/containerd/nri/pkg/auth"
 	"github.com/containerd/nri/pkg/plugin"
+	"github.com/containerd/nri/pkg/stub"
 	validator "github.com/containerd/nri/plugins/default-validator/builtin"
 	rspec "github.com/opencontainers/runtime-spec/specs-go"
 )
@@ -3163,6 +3165,88 @@ var _ = Describe("Plugin configuration request", func() {
 			Expect(s.plugins[0].stub.RegistrationTimeout()).To(Equal(registerTimeout))
 			Expect(s.plugins[0].stub.RequestTimeout()).To(Equal(requestTimeout))
 		})
+	})
+})
+
+var _ = Describe("Plugin authentication", func() {
+	type Keys struct {
+		private []byte
+		public  []byte
+	}
+
+	var (
+		key0 = &Keys{
+			private: []byte("TkCE8UGWdLKjXzrUzc6AI6pFuma39+wL4d1P/gyqI0A="),
+			public:  []byte("OlqYOu+/5pP9S+6XpeiC3ryr/iKEkZiTdo9VmMohbFY="),
+		}
+		key1 = &Keys{
+			private: []byte("26zy0XoZOAGW5y1HwzR3dxbCr/K2pZaZvQO+8VQUgWs="),
+			public:  []byte("PG+8RDcmJ+bznMdR0RpDjJHju+DTFnmkiv9e71yndnk="),
+		}
+		s = &Suite{}
+	)
+
+	AfterEach(func() {
+		s.Cleanup()
+	})
+
+	BeforeEach(func() {
+		runtimeOptions := []nri.Option{
+			nri.WithAuthConfig(&nri.AuthConfig{
+				Roles: []*auth.Role{
+					{
+						Role: "role0",
+						Keys: []string{
+							string(key0.public),
+						},
+					},
+					{
+						Role: "role1",
+						Keys: []string{
+							string(key1.public),
+						},
+					},
+				},
+			}),
+		}
+
+		s.Prepare(
+			&mockRuntime{
+				options: runtimeOptions,
+			},
+			/*&mockPlugin{
+				idx:  "01",
+				name: "bar",
+				options: []stub.Option{
+					stub.WithAuthentication(
+						auth.NewInMemoryKeyFetcher(
+							key1.private,
+							key1.public,
+						),
+					),
+				},
+			},*/
+		)
+	})
+
+	It("should succeed with the correct key", func() {
+		s.Startup()
+		s.StartPlugins(
+			&mockPlugin{
+				idx:  "00",
+				name: "foo",
+				options: []stub.Option{
+					stub.WithAuthentication(
+						auth.NewInMemoryKeyFetcher(
+							key0.private,
+							key0.public,
+						),
+					),
+				},
+			},
+		)
+		s.WaitForPluginsToSync(s.plugin("00-foo"))
+		Expect(s.plugin("00-foo").stub.GetRole()).To(Equal("role0"))
 	})
 })
 

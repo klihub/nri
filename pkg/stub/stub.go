@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	stdnet "net"
 	"os"
 	"path/filepath"
@@ -29,6 +30,8 @@ import (
 
 	"github.com/containerd/nri/pkg/api"
 	"github.com/containerd/nri/pkg/auth"
+	"github.com/containerd/nri/pkg/auth/crypto"
+	"github.com/containerd/nri/pkg/auth/crypto/ecdh"
 	nrilog "github.com/containerd/nri/pkg/log"
 	"github.com/containerd/nri/pkg/net"
 	"github.com/containerd/nri/pkg/net/multiplex"
@@ -179,6 +182,11 @@ type Stub interface {
 	// This is the default timeout if the plugin has not been started or
 	// the timeout received in the Configure request otherwise.
 	RequestTimeout() time.Duration
+
+	// GetRole returns the role the plugin was authenticated to, if any.
+	GetRole() string
+	// GetTags returns any tags associated with the plugin's role, if any.
+	GetTags() map[string]string
 }
 
 const (
@@ -284,7 +292,7 @@ func WithAuthentication(fetchKeys AuthKeyFetcher) Option {
 // AuthKeyFetcher is the interface the plugin uses to acquire keys for
 // authenticating itself with the runtime.
 type AuthKeyFetcher interface {
-	FetchKeys() (*auth.PrivateKey, *auth.PublicKey, error)
+	FetchKeys() (crypto.PrivateKey, crypto.PublicKey, error)
 	ClearKeys()
 }
 
@@ -307,6 +315,8 @@ type stub struct {
 	rpcs       *ttrpc.Server
 	rpcc       *ttrpc.Client
 	fetchKeys  AuthKeyFetcher
+	role       string
+	tags       map[string]string
 	runtime    api.RuntimeService
 	started    bool
 	doneC      chan struct{}
@@ -562,6 +572,14 @@ func (stub *stub) RequestTimeout() time.Duration {
 	return stub.requestTimeout
 }
 
+func (stub *stub) GetRole() string {
+	return stub.role
+}
+
+func (stub *stub) GetTags() map[string]string {
+	return maps.Clone(stub.tags)
+}
+
 // Connect the plugin to NRI.
 func (stub *stub) connect() error {
 	if stub.conn != nil {
@@ -603,13 +621,16 @@ func (stub *stub) authenticate(ctx context.Context) error {
 		return nil
 	}
 
-	log.Infof(ctx, "Authenticating with runtime...")
-
 	private, public, err := stub.fetchKeys.FetchKeys()
 	if err != nil {
 		return fmt.Errorf("failed to fetch keys: %w", err)
 	}
-	defer private.Clear()
+	defer stub.fetchKeys.ClearKeys()
+
+	algo, err := ecdh.NewWithKeyPair(private, public)
+	if err != nil {
+		return fmt.Errorf("failed to set up authentication: %w", err)
+	}
 
 	client := auth.NewAuthenticationClient(stub.rpcc)
 	ctx, cancel := context.WithTimeout(ctx, stub.requestTimeout)
@@ -617,19 +638,14 @@ func (stub *stub) authenticate(ctx context.Context) error {
 
 	rpl, err := client.RequestChallenge(ctx,
 		&auth.RequestChallengeRequest{
-			PublicKey: public.Encode(),
+			PublicKey: algo.PublicKey(),
 		},
 	)
 	if err != nil {
 		return fmt.Errorf("failed to authenticate: %w", err)
 	}
 
-	peer, err := auth.DecodePublicKey(rpl.PublicKey)
-	if err != nil {
-		return fmt.Errorf("failed to authenticate: %w", err)
-	}
-
-	response, err := private.GenerateResponse(peer, rpl.Challenge)
+	response, err := algo.Response(rpl.Challenge, crypto.PublicKey(rpl.PublicKey))
 	if err != nil {
 		return fmt.Errorf("failed to authenticate: %w", err)
 	}
@@ -646,7 +662,73 @@ func (stub *stub) authenticate(ctx context.Context) error {
 	log.Infof(ctx, "Authenticated with role %s (tags: %v)...",
 		result.Role, result.Tags)
 
+	stub.role = result.Role
+	stub.tags = result.Tags
+
 	return nil
+
+	/*
+	   	if stub.fetchKeys == nil {
+	   		log.Infof(ctx, "No authentication keys set...")
+	   		return nil
+	   	}
+
+	   log.Infof(ctx, "Authenticating with runtime...")
+
+	   private, public, err := stub.fetchKeys.FetchKeys()
+
+	   	if err != nil {
+	   		return fmt.Errorf("failed to fetch keys: %w", err)
+	   	}
+
+	   defer private.Clear()
+
+	   client := auth.NewAuthenticationClient(stub.rpcc)
+	   ctx, cancel := context.WithTimeout(ctx, stub.requestTimeout)
+	   defer cancel()
+
+	   rpl, err := client.RequestChallenge(ctx,
+
+	   	&auth.RequestChallengeRequest{
+	   		PublicKey: public.Encode(),
+	   	},
+
+	   )
+
+	   	if err != nil {
+	   		return fmt.Errorf("failed to authenticate: %w", err)
+	   	}
+
+	   peer, err := auth.DecodePublicKey(rpl.PublicKey)
+
+	   	if err != nil {
+	   		return fmt.Errorf("failed to authenticate: %w", err)
+	   	}
+
+	   response, err := private.GenerateResponse(peer, rpl.Challenge)
+
+	   	if err != nil {
+	   		return fmt.Errorf("failed to authenticate: %w", err)
+	   	}
+
+	   result, err := client.VerifyChallenge(ctx,
+
+	   	&auth.VerifyChallengeRequest{
+	   		Response: response,
+	   	},
+
+	   )
+
+	   	if err != nil {
+	   		return fmt.Errorf("failed to authenticate: %w", err)
+	   	}
+
+	   log.Infof(ctx, "Authenticated with role %s (tags: %v)...",
+
+	   	result.Role, result.Tags)
+
+	   return nil
+	*/
 }
 
 // Register the plugin with NRI.

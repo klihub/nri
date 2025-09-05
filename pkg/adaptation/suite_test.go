@@ -365,8 +365,10 @@ func (m *mockRuntime) update(ctx context.Context, updates []*nri.ContainerUpdate
 }
 
 type mockPlugin struct {
-	name string
-	idx  string
+	name    string
+	idx     string
+	options []stub.Option
+
 	stub stub.Stub
 	mask stub.EventMask
 
@@ -455,12 +457,17 @@ func (m *mockPlugin) Init(dir string) error {
 
 	m.Log("Init()...")
 
-	m.stub, err = stub.New(m,
-		stub.WithPluginName(m.name),
-		stub.WithPluginIdx(m.idx),
-		stub.WithSocketPath(filepath.Join(dir, "nri.sock")),
-		stub.WithOnClose(m.onClose),
+	options := append(
+		[]stub.Option{
+			stub.WithPluginName(m.name),
+			stub.WithPluginIdx(m.idx),
+			stub.WithSocketPath(filepath.Join(dir, "nri.sock")),
+			stub.WithOnClose(m.onClose),
+		},
+		m.options...,
 	)
+
+	m.stub, err = stub.New(m, options...)
 	if err != nil {
 		m.q.Add(PluginCreationError)
 		return err

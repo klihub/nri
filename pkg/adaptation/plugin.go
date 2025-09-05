@@ -31,6 +31,8 @@ import (
 	"github.com/containerd/nri/pkg/adaptation/builtin"
 	"github.com/containerd/nri/pkg/api"
 	"github.com/containerd/nri/pkg/auth"
+	"github.com/containerd/nri/pkg/auth/crypto"
+	"github.com/containerd/nri/pkg/auth/crypto/ecdh"
 	"github.com/containerd/nri/pkg/log"
 	"github.com/containerd/nri/pkg/net"
 	"github.com/containerd/nri/pkg/net/multiplex"
@@ -57,6 +59,7 @@ type role struct {
 	priv *auth.PrivateKey
 	pub  *auth.PublicKey
 	role *auth.Role
+	algo *ecdh.Algorithm
 }
 
 func (r *role) GetRole() *auth.Role {
@@ -471,24 +474,17 @@ func (p *plugin) RequestChallenge(ctx context.Context, req *auth.RequestChalleng
 		return nil, err
 	}
 
-	p.role.peer = peer
 	p.role.role = role
 
-	log.Infof(ctx, "key has assigned role %q...", role.GetRole())
-
-	priv, pub, err := auth.GenerateKeyPair()
+	algo, err := ecdh.NewWithTmpKeyPair()
 	if err != nil {
-		log.Errorf(ctx, "rejecting client, key pair generation failed: %v", err)
+		log.Errorf(ctx, "rejecting client, failed to set up authentication: %v", err)
 		p.close()
 		return nil, err
 	}
 
-	p.role.priv = priv
-	p.role.pub = pub
-
-	log.Infof(ctx, "challenging client...")
-
-	challenge, err := priv.GenerateChallenge(peer)
+	p.role.algo = algo
+	chal, key, err := p.role.algo.Challenge([]byte("XXtmpXXX"), crypto.PublicKey(peer.Encode()))
 	if err != nil {
 		log.Errorf(ctx, "rejecting client, challenge generation failed: %v", err)
 		p.close()
@@ -496,22 +492,67 @@ func (p *plugin) RequestChallenge(ctx context.Context, req *auth.RequestChalleng
 	}
 
 	return &auth.RequestChallengeResponse{
-		PublicKey: pub.Encode(),
-		Challenge: challenge,
+		PublicKey: []byte(key),
+		Challenge: chal,
 	}, nil
+
+	/*
+		if p.role != nil {
+			log.Errorf(ctx, "rejecting client, multiple authentication requests")
+			p.close()
+			return nil, fmt.Errorf("multiple authentication requests")
+		}
+
+		log.Infof(ctx, "authenticating client with key %q...", string(req.PublicKey))
+		p.role = &role{}
+
+		role, peer, err := p.r.auth.GetRoleByKey(req.PublicKey)
+		if err != nil {
+			log.Errorf(ctx, "rejecting client with unknown key")
+			p.close()
+			return nil, err
+		}
+
+		p.role.peer = peer
+		p.role.role = role
+
+		log.Infof(ctx, "key has assigned role %q...", role.GetRole())
+
+		priv, pub, err := auth.GenerateKeyPair()
+		if err != nil {
+			log.Errorf(ctx, "rejecting client, key pair generation failed: %v", err)
+			p.close()
+			return nil, err
+		}
+
+		p.role.priv = priv
+		p.role.pub = pub
+
+		log.Infof(ctx, "challenging client...")
+
+		challenge, err := priv.GenerateChallenge(peer)
+		if err != nil {
+			log.Errorf(ctx, "rejecting client, challenge generation failed: %v", err)
+			p.close()
+			return nil, err
+		}
+
+		return &auth.RequestChallengeResponse{
+			PublicKey: pub.Encode(),
+			Challenge: challenge,
+		}, nil
+	*/
 }
 
 // Verify challenge response from authenticating plugin.
 func (p *plugin) VerifyChallenge(ctx context.Context, req *auth.VerifyChallengeRequest) (*auth.VerifyChallengeResponse, error) {
-	if p.role == nil || p.role.peer == nil || p.role.priv == nil {
+	if p.role == nil || p.role.algo == nil {
 		log.Errorf(ctx, "rejecting client, response to nonexistent challenge")
 		p.close()
 		return nil, fmt.Errorf("response to nonexistent challenge")
 	}
 
-	defer p.role.priv.Clear()
-
-	if err := p.role.priv.VerifyResponse(p.role.peer, req.Response); err != nil {
+	if err := p.role.algo.Verify(req.Response); err != nil {
 		log.Errorf(ctx, "rejecting client, failed challenge response")
 		p.close()
 		return nil, err
@@ -521,6 +562,27 @@ func (p *plugin) VerifyChallenge(ctx context.Context, req *auth.VerifyChallengeR
 		Role: p.role.GetRole().GetRole(),
 		Tags: p.role.GetRole().GetTags(),
 	}, nil
+
+	/*
+	   	if p.role == nil || p.role.peer == nil || p.role.priv == nil {
+	   		log.Errorf(ctx, "rejecting client, response to nonexistent challenge")
+	   		p.close()
+	   		return nil, fmt.Errorf("response to nonexistent challenge")
+	   	}
+
+	   defer p.role.priv.Clear()
+
+	   	if err := p.role.priv.VerifyResponse(p.role.peer, req.Response); err != nil {
+	   		log.Errorf(ctx, "rejecting client, failed challenge response")
+	   		p.close()
+	   		return nil, err
+	   	}
+
+	   	return &auth.VerifyChallengeResponse{
+	   		Role: p.role.GetRole().GetRole(),
+	   		Tags: p.role.GetRole().GetTags(),
+	   	}, nil
+	*/
 }
 
 // RegisterPlugin handles the plugin's registration request.
