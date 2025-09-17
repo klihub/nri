@@ -468,6 +468,24 @@ var _ = Describe("Plugin container creation adjustments", func() {
 		case "remove mount":
 			a.RemoveMount("/remove/test/destination")
 
+		case "inject mount with mappings":
+			a.AddMount(&api.Mount{
+				Source:      "/dev/" + plugin,
+				Destination: "/mnt/test",
+				UidMappings: []*api.LinuxIDMapping{
+					{
+						ContainerId: 1000,
+						HostId:      2000,
+						Size:        1,
+					},
+					{
+						ContainerId: 2000,
+						HostId:      3000,
+						Size:        5,
+					},
+				},
+			})
+
 		case "environment":
 			if overwrite {
 				a.RemoveEnv("key")
@@ -673,6 +691,28 @@ var _ = Describe("Plugin container creation adjustments", func() {
 					Mounts: []*api.Mount{
 						{
 							Destination: api.MarkForRemoval("/remove/test/destination"),
+						},
+					},
+				},
+			),
+			Entry("inject mount with mappings", "inject mount with mappings",
+				&api.ContainerAdjustment{
+					Mounts: []*api.Mount{
+						{
+							Source:      "/dev/00-test",
+							Destination: "/mnt/test",
+							UidMappings: []*api.LinuxIDMapping{
+								{
+									ContainerId: 1000,
+									HostId:      2000,
+									Size:        1,
+								},
+								{
+									ContainerId: 2000,
+									HostId:      3000,
+									Size:        5,
+								},
+							},
 						},
 					},
 				},
