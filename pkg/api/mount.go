@@ -36,6 +36,8 @@ func FromOCIMounts(o []rspec.Mount) []*Mount {
 			Type:        m.Type,
 			Source:      m.Source,
 			Options:     DupStringSlice(m.Options),
+			UidMappings: FromOCILinuxIDMappings(m.UIDMappings),
+			GidMappings: FromOCILinuxIDMappings(m.GIDMappings),
 		})
 	}
 	return mounts
@@ -47,6 +49,8 @@ func (m *Mount) ToOCI(propagationQuery *string) rspec.Mount {
 		Destination: m.Destination,
 		Type:        m.Type,
 		Source:      m.Source,
+		UIDMappings: ToOCILinuxIDMappings(m.UidMappings),
+		GIDMappings: ToOCILinuxIDMappings(m.GidMappings),
 	}
 	for _, opt := range m.Options {
 		o.Options = append(o.Options, opt)
@@ -54,6 +58,43 @@ func (m *Mount) ToOCI(propagationQuery *string) rspec.Mount {
 			*propagationQuery = opt
 		}
 	}
+	return o
+}
+
+// FromOCILinuxIDMappings returns LinuxIDMappings for OCI mappings.
+func FromOCILinuxIDMappings(o []rspec.LinuxIDMapping) []*LinuxIDMapping {
+	if o == nil {
+		return nil
+	}
+
+	m := make([]*LinuxIDMapping, 0, len(o))
+	for _, l := range o {
+		m = append(m, &LinuxIDMapping{
+			ContainerId: l.ContainerID,
+			HostId:      l.HostID,
+			Size:        l.Size,
+		})
+	}
+
+	return m
+
+}
+
+// ToOCILinuxIDMappings returns OCI LinuxIDMappings for mappings.
+func ToOCILinuxIDMappings(m []*LinuxIDMapping) []rspec.LinuxIDMapping {
+	if m == nil {
+		return nil
+	}
+
+	o := make([]rspec.LinuxIDMapping, 0, len(m))
+	for _, l := range m {
+		o = append(o, rspec.LinuxIDMapping{
+			ContainerID: l.ContainerId,
+			HostID:      l.HostId,
+			Size:        l.Size,
+		})
+	}
+
 	return o
 }
 
