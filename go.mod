@@ -21,6 +21,7 @@ require (
 )
 
 require (
+	github.com/brianvoe/gofakeit/v7 v7.7.3 // indirect
 	github.com/containerd/log v0.1.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/go-logr/logr v1.4.2 // indirect
