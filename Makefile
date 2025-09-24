@@ -71,6 +71,8 @@ allclean: clean clean-cache
 
 test: test-gopkgs
 
+generate: generate-golang
+
 FORCE:
 
 #
@@ -184,6 +186,17 @@ validate-repo-no-changes:
 	if [ -f "$$ttrpc" ]; then \
 	    sed -i '1s;^;//go:build !wasip1\n\n;' $$ttrpc; \
 	fi
+
+#
+# golang generation targets
+#
+
+generate-golang: pkg/api/api-v1alpha1.go pkg/api/api-v1alpha1-wasm.go
+
+pkg/api/api-v1alpha1.go pkg/api/api-v1alpha1-wasm.go: pkg/api/v1alpha1/api.proto pkg/api/doc.go
+	$(Q)echo "Regenerating $@..."; \
+	rm -f pkg/api/api-v1alpha*.go; \
+	$(GO_CMD) generate ./pkg/api
 
 #
 # targets for installing dependencies
