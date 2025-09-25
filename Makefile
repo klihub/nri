@@ -57,6 +57,10 @@ ifneq ($(V),1)
   Q := @
 endif
 
+ifeq ($(FORCE),1)
+  FORCED := FORCE
+endif
+
 #
 # top-level targets
 #
@@ -77,7 +81,7 @@ FORCE:
 # build targets
 #
 
-build-proto: $(PROTO_GOFILES)
+build-proto: $(PROTO_GOFILES) $(FORCED)
 
 .PHONY: build-proto-dockerized
 build-proto-dockerized:
@@ -177,7 +181,7 @@ validate-repo-no-changes:
 # proto generation targets
 #
 
-%.pb.go: %.proto
+%.pb.go: %.proto $(FORCED)
 	$(Q)echo "Generating $@..."; \
 	$(PROTO_COMPILE) $<
 	sed -i '1s;^;//go:build !wasip1\n\n;' pkg/api/api_ttrpc.pb.go

@@ -28,7 +28,7 @@ RUN --mount=type=cache,target=/go/pkg/mod/ \
 
 RUN --mount=type=cache,target=/go/pkg/mod/ \
     --mount=src=.,target=.,rw=true \
-    make build-proto && \
+    make FORCE=1 build-proto && \
     tar czf /artifacts.tgz ${ARTIFACTS}
 
 FROM scratch AS final
