@@ -40,7 +40,7 @@ PROTO_OPTIONS = --proto_path=. $(PROTO_INCLUDE) \
     --go_opt=paths=source_relative --go_out=. \
     --go-ttrpc_opt=paths=source_relative --go-ttrpc_out=. \
     --go-plugin_opt=paths=source_relative,disable_pb_gen=true --go-plugin_out=.
-PROTO_COMPILE = PATH=$(TOOLS_PATH)/bin protoc $(PROTO_OPTIONS)
+PROTO_COMPILE = PATH="$(TOOLS_PATH)/bin:$$PATH" protoc $(PROTO_OPTIONS)
 
 PLUGINS := \
 	$(BIN_PATH)/logger \
