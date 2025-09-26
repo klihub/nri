@@ -130,6 +130,13 @@ func (p *plugin) differ(apifunc string, pod *api.PodSandbox, container *api.Cont
 		p.saveValue(pod, container)
 	} else {
 		element := indices[indices[p.idx].prevIndex].prevValues.Front()
+		if element == nil {
+			// This might happen during startup when all indices of the plugin
+			// are not yet started (they are startedasynchronously in
+			// parallel).
+			log.Debugf("[%d] %s: skipping nil element, plugin startup not yet finished", p.idx, apifunc)
+			return
+		}
 		initialValue := element.Value.(*changedValue)
 
 		indices[indices[p.idx].prevIndex].prevValues.Remove(element)
@@ -250,8 +257,8 @@ func (p *plugin) RemoveContainer(_ context.Context, pod *api.PodSandbox, contain
 }
 
 func (p *plugin) onClose() {
-	log.Infof("stopped")
-	os.Exit(0)
+	log.Infof("Connection to the runtime lost, exiting...")
+	os.Exit(1)
 }
 
 // Dump one or more objects, with an optional global prefix and per-object tags.
@@ -332,7 +339,7 @@ func (p *plugin) printYamlDiff(apifunc string, obj string, origValue interface{}
 	}
 }
 
-func startPlugin(wg *sync.WaitGroup, pluginName string, pluginIdx int) {
+func startPlugin(wg *sync.WaitGroup, pluginIdx int) {
 	var (
 		opts []stub.Option
 		err  error
@@ -342,9 +349,6 @@ func startPlugin(wg *sync.WaitGroup, pluginName string, pluginIdx int) {
 
 	idxStr := fmt.Sprintf("%02d", pluginIdx)
 
-	if pluginName != "" {
-		opts = append(opts, stub.WithPluginName(pluginName))
-	}
 	if idxStr != "" {
 		opts = append(opts, stub.WithPluginIdx(idxStr))
 	}
@@ -427,7 +431,7 @@ func main() {
 
 		wg.Add(1)
 
-		go startPlugin(wg, "Differ", idx)
+		go startPlugin(wg, idx)
 	}
 
 	entry := indices[prevIndex]

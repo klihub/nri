@@ -19,6 +19,7 @@ package multiplex_test
 import (
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 
@@ -102,7 +103,6 @@ var _ = Describe("Emulated Connection Setup, Open", func() {
 		Expect(err).To(BeNil())
 		Expect(string(buf)).To(Equal(msg))
 	})
-
 })
 
 var _ = Describe("Emulated Connection Setup, Close", func() {
@@ -339,6 +339,52 @@ var _ = Describe("Transmitting data", func() {
 			sendAndReceive(lConn, pConn, msgCnt)
 		})
 	})
+
+	When("an oversized message is sent", func() {
+		It("it is transmitted in multiple chunks", func() {
+			var (
+				connCnt        = 1
+				maxPayloadSize = 10 + 4<<20
+				overflowFactor = 3
+			)
+
+			lMux, pMux, err = connectMuxes()
+			Expect(err).To(BeNil())
+			Expect(lMux).ToNot(BeNil())
+			Expect(pMux).ToNot(BeNil())
+
+			lConn, pConn, err := openMuxes(lMux, pMux, connCnt)
+			Expect(err).To(BeNil())
+			Expect(len(lConn)).To(Equal(connCnt))
+			Expect(len(pConn)).To(Equal(connCnt))
+
+			msg := strings.Repeat("a", overflowFactor*maxPayloadSize)
+			cnt, err := lConn[0].Write([]byte(msg))
+			Expect(err).To(BeNil())
+			Expect(cnt).To(Equal(len([]byte(msg))))
+
+			rcv := make([]byte, overflowFactor*maxPayloadSize)
+			size := 0
+			for i := 0; size < len([]byte(msg)) && i < overflowFactor; i++ {
+				cnt, err := pConn[0].Read(rcv[size:])
+				Expect(err).To(BeNil())
+				Expect(cnt).To(Equal(maxPayloadSize))
+				size += cnt
+			}
+			Expect(rcv).To(Equal([]byte(msg)))
+
+			msg = strings.Repeat("b", 200)
+			cnt, err = lConn[0].Write([]byte(msg))
+			Expect(err).To(BeNil())
+			Expect(cnt).To(Equal(len([]byte(msg))))
+
+			rcv = make([]byte, len([]byte(msg)))
+			cnt, err = pConn[0].Read(rcv)
+			Expect(err).To(BeNil())
+			Expect(cnt).To(Equal(len([]byte(msg))))
+			Expect(rcv).To(Equal([]byte(msg)))
+		})
+	})
 })
 
 /*
@@ -519,7 +565,7 @@ func sendAndReceive(lConn, pConn []net.Conn, msgCount int) {
 		return messages
 	}
 
-	// mesage receiver and collector
+	// message receiver and collector
 	read := func(conn net.Conn) []string {
 		var (
 			msg  = make([]byte, maxMsg)
@@ -565,7 +611,7 @@ func sendAndReceive(lConn, pConn []net.Conn, msgCount int) {
 		wg.Add(2)
 	}
 
-	// trigger senders/recevers and wait for them to finish
+	// trigger senders/receivers and wait for them to finish
 	close(start)
 	wg.Wait()
 }

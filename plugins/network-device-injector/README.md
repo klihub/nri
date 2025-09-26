@@ -21,7 +21,8 @@ and any modification can impact the existing system networking.
 
 ### Network Device Annotations
 
-Network devices are annotated using the `netdevices.nri.containerd.io` annotation key prefix.
+Network devices are annotated using the `netdevices.noderesource.dev` annotation key prefix.
+For compatibility with older versions of this plugin, the `netdevices.nri.containerd.io` annotation key prefix is also accepted.
 Network devices are defined at the Pod level, since are part of the network namespace.
 
 The annotation syntax for network device injection is
@@ -45,6 +46,30 @@ the rest of the parameters are optional.
 
 The plugin only injects interfaces on the Pod network namespace for which the containers are attached when created,
 for more advanced networking configuration like routing, traffic redirection or dynamic address configuration new plugins can be created.
+
+## Deployment
+
+The NRI repository contains minimal kustomize overlays for this plugin at
+[contrib/kustomize/network-device-injector](../../contrib/kustomize/network-device-injector).
+
+Deploy the latest release with:
+
+```bash
+kubectl apply -k https://github.com/containerd/nri/contrib/kustomize/network-device-injector
+```
+
+Deploy a specific release with:
+
+```bash
+RELEASE_TAG=v0.10.0
+kubectl apply -k "github.com/containerd/nri/contrib/kustomize/network-device-injector?ref=${RELEASE_TAG}"
+```
+
+Deploy the latest development build from tip of the main branch with:
+
+```bash
+kubectl apply -k https://github.com/containerd/nri/contrib/kustomize/network-device-injector/unstable
+```
 
 ## Testing
 

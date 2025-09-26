@@ -61,7 +61,8 @@ func (p *plugin) Configure(_ context.Context, config, runtime, version string) (
 }
 
 func (p *plugin) Synchronize(_ context.Context, pods []*api.PodSandbox, containers []*api.Container) ([]*api.ContainerUpdate, error) {
-	log.Info("Synchronizing state with the runtime...")
+	log.Infof("Synchronized state with the runtime (%d pods, %d containers)...",
+		len(pods), len(containers))
 	return nil, nil
 }
 
@@ -91,7 +92,7 @@ func (p *plugin) CreateContainer(_ context.Context, pod *api.PodSandbox, ctr *ap
 	// This is the container creation request handler. Because the container
 	// has not been created yet, this is the lifecycle event which allows you
 	// the largest set of changes to the container's configuration, including
-	// some of the later immautable parameters. Take a look at the adjustment
+	// some of the later immutable parameters. Take a look at the adjustment
 	// functions in pkg/api/adjustment.go to see the available controls.
 	//
 	// In addition to reconfiguring the container being created, you are also
@@ -161,7 +162,7 @@ func (p *plugin) RemoveContainer(_ context.Context, pod *api.PodSandbox, ctr *ap
 
 func (p *plugin) onClose() {
 	log.Infof("Connection to the runtime lost, exiting...")
-	os.Exit(0)
+	os.Exit(1)
 }
 
 func main() {

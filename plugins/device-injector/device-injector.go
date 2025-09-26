@@ -31,10 +31,22 @@ import (
 )
 
 const (
-	// Prefix of the key used for device annotations.
-	deviceKey = "devices.nri.io"
-	// Prefix of the key used for mount annotations.
-	mountKey = "mounts.nri.io"
+	// deviceKey is the prefix of the key used for device annotations.
+	deviceKey = "devices.noderesource.dev"
+	// Deprecated: Prefix of the key used for device annotations.
+	oldDeviceKey = "devices.nri.io"
+	// mountKey is the prefix of the key used for mount annotations.
+	mountKey = "mounts.noderesource.dev"
+	// Deprecated: Prefix of the key used for mount annotations.
+	oldMountKey = "mounts.nri.io"
+	// cdiDeviceKey is the prefix of the key used for CDI device annotations.
+	cdiDeviceKey = "cdi-devices.noderesource.dev"
+	// Deprecated: Prefix of the key used for CDI device annotations.
+	oldCDIDeviceKey = "cdi-devices.nri.io"
+	// Prefix of the key used for I/O priority adjustment.
+	ioPrioKey = "io-priority.noderesource.dev"
+	// Deprecated: Prefix of the key used for I/O priority adjustment.
+	oldIoPrioKey = "io-priority.nri.io"
 )
 
 var (
@@ -61,135 +73,234 @@ type mount struct {
 	Options     []string `json:"options"`
 }
 
+// an I/O priority adjustment
+type ioPrio struct {
+	Class    string `json:"class"`
+	Priority int32  `json:"priority"`
+}
+
 // our injector plugin
 type plugin struct {
 	stub stub.Stub
 }
 
 // CreateContainer handles container creation requests.
-func (p *plugin) CreateContainer(_ context.Context, pod *api.PodSandbox, container *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
-	var (
-		ctrName string
-		devices []device
-		mounts  []mount
-		err     error
-	)
-
-	ctrName = containerName(pod, container)
-
+func (p *plugin) CreateContainer(_ context.Context, pod *api.PodSandbox, ctr *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
 	if verbose {
-		dump("CreateContainer", "pod", pod, "container", container)
+		dump("CreateContainer", "pod", pod, "container", ctr)
 	}
 
 	adjust := &api.ContainerAdjustment{}
 
-	// inject devices to container
-	devices, err = parseDevices(container.Name, pod.Annotations)
-	if err != nil {
+	if err := injectDevices(pod, ctr, adjust); err != nil {
 		return nil, nil, err
 	}
 
-	if len(devices) == 0 {
-		log.Infof("%s: no devices annotated...", ctrName)
-	} else {
-		if verbose {
-			dump(ctrName, "annotated devices", devices)
-		}
-
-		for _, d := range devices {
-			adjust.AddDevice(d.toNRI())
-			if !verbose {
-				log.Infof("%s: injected device %q...", ctrName, d.Path)
-			}
-		}
-	}
-
-	// inject mounts to container
-	mounts, err = parseMounts(container.Name, pod.Annotations)
-	if err != nil {
+	if err := injectCDIDevices(pod, ctr, adjust); err != nil {
 		return nil, nil, err
 	}
 
-	if len(mounts) == 0 {
-		log.Infof("%s: no mounts annotated...", ctrName)
-	} else {
-		if verbose {
-			dump(ctrName, "annotated mounts", mounts)
-		}
+	if err := injectMounts(pod, ctr, adjust); err != nil {
+		return nil, nil, err
+	}
 
-		for _, m := range mounts {
-			adjust.AddMount(m.toNRI())
-			if !verbose {
-				log.Infof("%s: injected mount %q -> %q...", ctrName, m.Source, m.Destination)
-			}
-		}
+	if err := setIOPriority(pod, ctr, adjust); err != nil {
+		return nil, nil, err
 	}
 
 	if verbose {
-		dump(ctrName, "ContainerAdjustment", adjust)
+		dump(containerName(pod, ctr), "ContainerAdjustment", adjust)
 	}
 
 	return adjust, nil, nil
 }
 
-func parseDevices(ctr string, annotations map[string]string) ([]device, error) {
-	var (
-		key        string
-		annotation []byte
-		devices    []device
-	)
+func injectDevices(pod *api.PodSandbox, ctr *api.Container, a *api.ContainerAdjustment) error {
+	devices, err := parseDevices(ctr.Name, pod.Annotations)
+	if err != nil {
+		return err
+	}
 
-	// look up effective device annotation and unmarshal devices
-	for _, key = range []string{
-		deviceKey + "/container." + ctr,
-		deviceKey + "/pod",
-		deviceKey,
-	} {
-		if value, ok := annotations[key]; ok {
-			annotation = []byte(value)
-			break
+	if len(devices) == 0 {
+		log.Debugf("%s: no devices annotated...", containerName(pod, ctr))
+		return nil
+	}
+
+	if verbose {
+		dump(containerName(pod, ctr), "annotated devices", devices)
+	}
+
+	for _, d := range devices {
+		a.AddDevice(d.toNRI())
+		if !verbose {
+			log.Infof("%s: injected device %q...", containerName(pod, ctr), d.Path)
 		}
 	}
 
-	if annotation == nil {
+	return nil
+}
+
+func parseDevices(ctr string, annotations map[string]string) ([]device, error) {
+	var (
+		devices []device
+	)
+
+	annotation := getAnnotation(annotations, deviceKey, oldDeviceKey, ctr)
+	if len(annotation) == 0 {
 		return nil, nil
 	}
 
 	if err := yaml.Unmarshal(annotation, &devices); err != nil {
-		return nil, fmt.Errorf("invalid device annotation %q: %w", key, err)
+		return nil, fmt.Errorf("invalid device annotation %q: %w", string(annotation), err)
 	}
 
 	return devices, nil
 }
 
-func parseMounts(ctr string, annotations map[string]string) ([]mount, error) {
-	var (
-		key        string
-		annotation []byte
-		mounts     []mount
-	)
+func injectCDIDevices(pod *api.PodSandbox, ctr *api.Container, a *api.ContainerAdjustment) error {
+	devices, err := parseCDIDevices(ctr.Name, pod.Annotations)
+	if err != nil {
+		return err
+	}
 
-	// look up effective device annotation and unmarshal devices
-	for _, key = range []string{
-		mountKey + "/container." + ctr,
-		mountKey + "/pod",
-		mountKey,
-	} {
-		if value, ok := annotations[key]; ok {
-			annotation = []byte(value)
-			break
+	if len(devices) == 0 {
+		log.Debugf("%s: no CDI devices annotated...", containerName(pod, ctr))
+		return nil
+	}
+
+	if verbose {
+		dump(containerName(pod, ctr), "annotated CDI devices", devices)
+	}
+
+	for _, name := range devices {
+		a.AddCDIDevice(
+			&api.CDIDevice{
+				Name: name,
+			},
+		)
+		if !verbose {
+			log.Infof("%s: injected CDI device %q...", containerName(pod, ctr), name)
 		}
 	}
 
-	if annotation == nil {
+	return nil
+}
+
+func parseCDIDevices(ctr string, annotations map[string]string) ([]string, error) {
+	var (
+		cdiDevices []string
+	)
+
+	annotation := getAnnotation(annotations, cdiDeviceKey, oldCDIDeviceKey, ctr)
+	if len(annotation) == 0 {
+		return nil, nil
+	}
+
+	if err := yaml.Unmarshal(annotation, &cdiDevices); err != nil {
+		return nil, fmt.Errorf("invalid CDI device annotation %q: %w", string(annotation), err)
+	}
+
+	return cdiDevices, nil
+}
+
+func injectMounts(pod *api.PodSandbox, ctr *api.Container, a *api.ContainerAdjustment) error {
+	mounts, err := parseMounts(ctr.Name, pod.Annotations)
+	if err != nil {
+		return err
+	}
+
+	if len(mounts) == 0 {
+		log.Debugf("%s: no mounts annotated...", containerName(pod, ctr))
+		return nil
+	}
+
+	if verbose {
+		dump(containerName(pod, ctr), "annotated mounts", mounts)
+	}
+
+	for _, m := range mounts {
+		a.AddMount(m.toNRI())
+		if !verbose {
+			log.Infof("%s: injected mount %q -> %q...", containerName(pod, ctr),
+				m.Source, m.Destination)
+		}
+	}
+
+	return nil
+}
+
+func parseMounts(ctr string, annotations map[string]string) ([]mount, error) {
+	var (
+		mounts []mount
+	)
+
+	annotation := getAnnotation(annotations, mountKey, oldMountKey, ctr)
+	if len(annotation) == 0 {
 		return nil, nil
 	}
 
 	if err := yaml.Unmarshal(annotation, &mounts); err != nil {
-		return nil, fmt.Errorf("invalid mount annotation %q: %w", key, err)
+		return nil, fmt.Errorf("invalid mount annotation %q: %w", string(annotation), err)
 	}
 
 	return mounts, nil
+}
+
+func setIOPriority(pod *api.PodSandbox, ctr *api.Container, a *api.ContainerAdjustment) error {
+	priority, err := parseIOPriority(ctr.Name, pod.Annotations)
+	if err != nil {
+		return err
+	}
+
+	if priority == nil {
+		log.Debugf("%s: no I/O priority annotated...", containerName(pod, ctr))
+		return nil
+	}
+
+	if verbose {
+		dump(containerName(pod, ctr), "annotated I/O priority", priority)
+	}
+
+	a.SetLinuxIOPriority(priority.toNRI())
+	if !verbose {
+		log.Infof("%s: injected I/O priority %+v...", containerName(pod, ctr), priority)
+	}
+
+	return nil
+}
+
+func parseIOPriority(ctr string, annotations map[string]string) (*ioPrio, error) {
+	var (
+		priority = &ioPrio{}
+	)
+
+	annotation := getAnnotation(annotations, ioPrioKey, oldIoPrioKey, ctr)
+	if annotation == nil {
+		return nil, nil
+	}
+
+	if err := yaml.Unmarshal(annotation, priority); err != nil {
+		return nil, fmt.Errorf("invalid I/O priority annotation %q: %w", string(annotation), err)
+	}
+
+	return priority, nil
+}
+
+func getAnnotation(annotations map[string]string, mainKey, oldKey, ctr string) []byte {
+	for _, key := range []string{
+		mainKey + "/container." + ctr,
+		oldKey + "/container." + ctr,
+		mainKey + "/pod",
+		oldKey + "/pod",
+		mainKey,
+		oldKey,
+	} {
+		if value, ok := annotations[key]; ok {
+			return []byte(value)
+		}
+	}
+
+	return nil
 }
 
 // Convert a device to the NRI API representation.
@@ -221,6 +332,41 @@ func (m *mount) toNRI() *api.Mount {
 		Options:     m.Options,
 	}
 	return apiMnt
+}
+
+// Convert ioPrio to NRI API representation.
+func (p *ioPrio) toNRI() *api.LinuxIOPriority {
+	if p == nil {
+		return nil
+	}
+
+	var class api.IOPrioClass
+
+	switch p.Class {
+	case "IOPRIO_CLASS_NONE":
+		class = api.IOPrioClass_IOPRIO_CLASS_NONE
+	case "IOPRIO_CLASS_RT":
+		class = api.IOPrioClass_IOPRIO_CLASS_RT
+	case "IOPRIO_CLASS_BE":
+		class = api.IOPrioClass_IOPRIO_CLASS_BE
+	case "IOPRIO_CLASS_IDLE":
+		class = api.IOPrioClass_IOPRIO_CLASS_IDLE
+	default:
+		log.Warnf("unknown I/O priority class %q, using IOPRIO_CLASS_BE", p.Class)
+		return nil
+	}
+
+	return &api.LinuxIOPriority{
+		Class:    class,
+		Priority: p.Priority,
+	}
+}
+
+func (p *ioPrio) String() string {
+	if p == nil {
+		return "<no I/O priority>"
+	}
+	return fmt.Sprintf("<I/O priority class %s:%d>", p.Class, p.Priority)
 }
 
 // Construct a container name for log messages.
@@ -267,10 +413,9 @@ func dump(args ...interface{}) {
 
 func main() {
 	var (
-		pluginName string
-		pluginIdx  string
-		opts       []stub.Option
-		err        error
+		pluginIdx string
+		opts      []stub.Option
+		err       error
 	)
 
 	log = logrus.StandardLogger()
@@ -278,14 +423,10 @@ func main() {
 		PadLevelText: true,
 	})
 
-	flag.StringVar(&pluginName, "name", "", "plugin name to register to NRI")
 	flag.StringVar(&pluginIdx, "idx", "", "plugin index to register to NRI")
 	flag.BoolVar(&verbose, "verbose", false, "enable (more) verbose logging")
 	flag.Parse()
 
-	if pluginName != "" {
-		opts = append(opts, stub.WithPluginName(pluginName))
-	}
 	if pluginIdx != "" {
 		opts = append(opts, stub.WithPluginIdx(pluginIdx))
 	}

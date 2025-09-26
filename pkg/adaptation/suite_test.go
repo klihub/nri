@@ -43,14 +43,17 @@ func TestRuntime(t *testing.T) {
 }
 
 const (
-	startupTimeout = 2 * time.Second
+	startupTimeout        = 2 * time.Second
+	defaultRuntimeName    = "default-runtime-name"
+	defaultRuntimeVersion = "0.1.2"
 )
 
 // A test suite consist of a runtime and a set of plugins.
 type Suite struct {
 	dir     string        // directory to create for test
 	runtime *mockRuntime  // runtime instance for test
-	plugins []*mockPlugin // plugin intances for test
+	plugins []*mockPlugin // plugin instances for test
+	byName  map[string]*mockPlugin
 }
 
 // SuiteOption can be applied to a suite.
@@ -70,9 +73,20 @@ func (s *Suite) Prepare(runtime *mockRuntime, plugins ...*mockPlugin) string {
 
 	Expect(os.MkdirAll(etc, 0o755)).To(Succeed())
 
+	if runtime.name == "" {
+		runtime.name = defaultRuntimeName
+	}
+	if runtime.version == "" {
+		runtime.version = defaultRuntimeVersion
+	}
+
 	s.dir = dir
 	s.runtime = runtime
 	s.plugins = plugins
+
+	if s.byName == nil {
+		s.byName = make(map[string]*mockPlugin)
+	}
 
 	return dir
 }
@@ -84,9 +98,11 @@ func (s *Suite) Dir() string {
 
 // Startup starts up the test suite.
 func (s *Suite) Startup() {
+	plugins := s.plugins
+	s.plugins = nil
 	s.StartRuntime()
-	s.StartPlugins()
-	s.WaitForPluginsToSync()
+	s.StartPlugins(plugins...)
+	s.WaitForPluginsToSync(plugins...)
 }
 
 // StartRuntime starts the suite runtime.
@@ -95,16 +111,18 @@ func (s *Suite) StartRuntime() {
 }
 
 // StartPlugins starts the suite plugins.
-func (s *Suite) StartPlugins() {
-	for _, plugin := range s.plugins {
+func (s *Suite) StartPlugins(plugins ...*mockPlugin) {
+	for _, plugin := range plugins {
+		s.plugins = append(s.plugins, plugin)
+		s.byName[plugin.FullName()] = plugin
 		Expect(plugin.Start(s.dir)).To(Succeed())
 	}
 }
 
-// WaitForPluginsToSync waits for the suite plugins to get synchronized.
-func (s *Suite) WaitForPluginsToSync() {
+// WaitForPluginsToSync waits for the given plugins to get synchronized.
+func (s *Suite) WaitForPluginsToSync(plugins ...*mockPlugin) {
 	timeout := time.After(startupTimeout)
-	for _, plugin := range s.plugins {
+	for _, plugin := range plugins {
 		Expect(plugin.Wait(PluginSynchronized, timeout)).To(Succeed())
 	}
 }
@@ -119,6 +137,11 @@ func (s *Suite) Cleanup() {
 	Expect(os.RemoveAll(s.dir)).To(Succeed())
 }
 
+// Plugin returns a plugin started by StartPlugins by full plugin name.
+func (s *Suite) plugin(fullName string) *mockPlugin {
+	return s.byName[fullName]
+}
+
 // ------------------------------------
 
 func Log(format string, args ...interface{}) {
@@ -126,6 +149,8 @@ func Log(format string, args ...interface{}) {
 }
 
 type mockRuntime struct {
+	name    string
+	version string
 	options []nri.Option
 	runtime *nri.Adaptation
 	pods    map[string]*api.PodSandbox
@@ -149,7 +174,7 @@ func (m *mockRuntime) Start(dir string) error {
 	}
 
 	options = append(options, m.options...)
-	m.runtime, err = nri.New("mockRuntime", "0.0.1", m.synchronize, m.update, options...)
+	m.runtime, err = nri.New(m.name, m.version, m.synchronize, m.update, options...)
 	if err != nil {
 		return err
 	}
@@ -205,15 +230,55 @@ func (m *mockRuntime) synchronize(ctx context.Context, cb nri.SyncCB) error {
 	return err
 }
 
+func (m *mockRuntime) RunPodSandbox(ctx context.Context, evt *api.StateChangeEvent) error {
+	b := m.runtime.BlockPluginSync()
+	defer b.Unblock()
+	return m.runtime.RunPodSandbox(ctx, evt)
+}
+
+func (m *mockRuntime) UpdatePodSandbox(ctx context.Context, req *api.UpdatePodSandboxRequest) (*api.UpdatePodSandboxResponse, error) {
+	b := m.runtime.BlockPluginSync()
+	defer b.Unblock()
+	return m.runtime.UpdatePodSandbox(ctx, req)
+}
+
+func (m *mockRuntime) CreateContainer(ctx context.Context, req *api.CreateContainerRequest) (*api.CreateContainerResponse, error) {
+	b := m.runtime.BlockPluginSync()
+	defer b.Unblock()
+	return m.runtime.CreateContainer(ctx, req)
+}
+
+func (m *mockRuntime) UpdateContainer(ctx context.Context, req *api.UpdateContainerRequest) (*api.UpdateContainerResponse, error) {
+	b := m.runtime.BlockPluginSync()
+	defer b.Unblock()
+	return m.runtime.UpdateContainer(ctx, req)
+}
+
 func (m *mockRuntime) startStopPodAndContainer(ctx context.Context, pod *api.PodSandbox, ctr *api.Container) error {
-	err := m.runtime.RunPodSandbox(ctx, &api.StateChangeEvent{
+	err := m.RunPodSandbox(ctx, &api.StateChangeEvent{
 		Pod: pod,
 	})
 	if err != nil {
 		return err
 	}
 
-	_, err = m.runtime.CreateContainer(ctx, &api.CreateContainerRequest{
+	_, err = m.UpdatePodSandbox(ctx, &api.UpdatePodSandboxRequest{
+		Pod:                    pod,
+		OverheadLinuxResources: &api.LinuxResources{},
+		LinuxResources:         &api.LinuxResources{},
+	})
+	if err != nil {
+		return err
+	}
+
+	err = m.runtime.PostUpdatePodSandbox(ctx, &api.StateChangeEvent{
+		Pod: pod,
+	})
+	if err != nil {
+		return err
+	}
+
+	_, err = m.CreateContainer(ctx, &api.CreateContainerRequest{
 		Pod:       pod,
 		Container: ctr,
 	})
@@ -245,7 +310,7 @@ func (m *mockRuntime) startStopPodAndContainer(ctx context.Context, pod *api.Pod
 		return err
 	}
 
-	_, err = m.runtime.UpdateContainer(ctx, &api.UpdateContainerRequest{
+	_, err = m.UpdateContainer(ctx, &api.UpdateContainerRequest{
 		Pod:            pod,
 		Container:      ctr,
 		LinuxResources: &api.LinuxResources{},
@@ -305,29 +370,37 @@ type mockPlugin struct {
 	stub stub.Stub
 	mask stub.EventMask
 
+	runtime string
+	version string
+
 	q    *EventQ
 	pods map[string]*api.PodSandbox
 	ctrs map[string]*api.Container
 
-	runPodSandbox       func(*mockPlugin, *api.PodSandbox, *api.Container) error
-	stopPodSandbox      func(*mockPlugin, *api.PodSandbox, *api.Container) error
-	removePodSandbox    func(*mockPlugin, *api.PodSandbox, *api.Container) error
-	createContainer     func(*mockPlugin, *api.PodSandbox, *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error)
-	postCreateContainer func(*mockPlugin, *api.PodSandbox, *api.Container) error
-	startContainer      func(*mockPlugin, *api.PodSandbox, *api.Container) error
-	postStartContainer  func(*mockPlugin, *api.PodSandbox, *api.Container) error
-	updateContainer     func(*mockPlugin, *api.PodSandbox, *api.Container, *api.LinuxResources) ([]*api.ContainerUpdate, error)
-	postUpdateContainer func(*mockPlugin, *api.PodSandbox, *api.Container) error
-	stopContainer       func(*mockPlugin, *api.PodSandbox, *api.Container) ([]*api.ContainerUpdate, error)
-	removeContainer     func(*mockPlugin, *api.PodSandbox, *api.Container) error
+	runPodSandbox        func(*mockPlugin, *api.PodSandbox, *api.Container) error
+	updatePodSandbox     func(*mockPlugin, *api.PodSandbox, *api.LinuxResources, *api.LinuxResources) error
+	postUpdatePodSandbox func(*mockPlugin, *api.PodSandbox, *api.Container) error
+	stopPodSandbox       func(*mockPlugin, *api.PodSandbox, *api.Container) error
+	removePodSandbox     func(*mockPlugin, *api.PodSandbox, *api.Container) error
+	createContainer      func(*mockPlugin, *api.PodSandbox, *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error)
+	postCreateContainer  func(*mockPlugin, *api.PodSandbox, *api.Container) error
+	startContainer       func(*mockPlugin, *api.PodSandbox, *api.Container) error
+	postStartContainer   func(*mockPlugin, *api.PodSandbox, *api.Container) error
+	updateContainer      func(*mockPlugin, *api.PodSandbox, *api.Container, *api.LinuxResources) ([]*api.ContainerUpdate, error)
+	postUpdateContainer  func(*mockPlugin, *api.PodSandbox, *api.Container) error
+	stopContainer        func(*mockPlugin, *api.PodSandbox, *api.Container) ([]*api.ContainerUpdate, error)
+	removeContainer      func(*mockPlugin, *api.PodSandbox, *api.Container) error
+	validateAdjustment   func(*mockPlugin, *api.ValidateContainerAdjustmentRequest) error
 }
 
 var (
 	_ = stub.ConfigureInterface(&mockPlugin{})
 	_ = stub.SynchronizeInterface(&mockPlugin{})
 	_ = stub.RunPodInterface(&mockPlugin{})
+	_ = stub.UpdatePodInterface(&mockPlugin{})
 	_ = stub.StopPodInterface(&mockPlugin{})
 	_ = stub.RemovePodInterface(&mockPlugin{})
+	_ = stub.PostUpdatePodInterface(&mockPlugin{})
 	_ = stub.CreateContainerInterface(&mockPlugin{})
 	_ = stub.StartContainerInterface(&mockPlugin{})
 	_ = stub.UpdateContainerInterface(&mockPlugin{})
@@ -377,9 +450,6 @@ func (m *mockPlugin) Init(dir string) error {
 	if m.idx == "" {
 		m.idx = "00"
 	}
-	if m.mask == 0 {
-		m.mask = api.ValidEvents
-	}
 
 	m.q = &EventQ{}
 
@@ -401,6 +471,12 @@ func (m *mockPlugin) Init(dir string) error {
 
 	if m.runPodSandbox == nil {
 		m.runPodSandbox = nopEvent
+	}
+	if m.updatePodSandbox == nil {
+		m.updatePodSandbox = nopUpdatePodSandbox
+	}
+	if m.postUpdatePodSandbox == nil {
+		m.postUpdatePodSandbox = nopEvent
 	}
 	if m.stopPodSandbox == nil {
 		m.stopPodSandbox = nopEvent
@@ -459,6 +535,18 @@ func (m *mockPlugin) Stop() {
 	m.q.Add(PluginStopped)
 }
 
+func (m *mockPlugin) FullName() string {
+	return m.idx + "-" + m.name
+}
+
+func (m *mockPlugin) RuntimeName() string {
+	return m.runtime
+}
+
+func (m *mockPlugin) RuntimeVersion() string {
+	return m.version
+}
+
 func (m *mockPlugin) onClose() {
 	if m.stub != nil {
 		m.stub.Stop()
@@ -470,10 +558,18 @@ func (m *mockPlugin) onClose() {
 	}
 }
 
-func (m *mockPlugin) Configure(_ context.Context, _, _, _ string) (stub.EventMask, error) {
+func (m *mockPlugin) Configure(_ context.Context, _, runtime, version string) (stub.EventMask, error) {
 	m.q.Add(PluginConfigured)
 
-	return m.mask, nil
+	m.runtime = runtime
+	m.version = version
+
+	events := m.mask
+	if m.validateAdjustment == nil {
+		events.Clear(api.Event_VALIDATE_CONTAINER_ADJUSTMENT)
+	}
+
+	return events, nil
 }
 
 func (m *mockPlugin) Synchronize(_ context.Context, pods []*api.PodSandbox, ctrs []*api.Container) ([]*api.ContainerUpdate, error) {
@@ -497,6 +593,20 @@ func (m *mockPlugin) RunPodSandbox(_ context.Context, pod *api.PodSandbox) error
 	m.pods[pod.Id] = pod
 	err := m.runPodSandbox(m, pod, nil)
 	m.q.Add(PodSandboxEvent(pod, RunPodSandbox))
+	return err
+}
+
+func (m *mockPlugin) UpdatePodSandbox(_ context.Context, pod *api.PodSandbox, overhead *api.LinuxResources, res *api.LinuxResources) error {
+	m.pods[pod.Id] = pod
+	m.q.Add(PodSandboxEvent(pod, UpdatePodSandbox))
+
+	return m.updatePodSandbox(m, pod, overhead, res)
+}
+
+func (m *mockPlugin) PostUpdatePodSandbox(_ context.Context, pod *api.PodSandbox) error {
+	m.pods[pod.Id] = pod
+	err := m.postUpdatePodSandbox(m, pod, nil)
+	m.q.Add(PodSandboxEvent(pod, PostUpdatePodSandbox))
 	return err
 }
 
@@ -577,7 +687,19 @@ func (m *mockPlugin) RemoveContainer(_ context.Context, pod *api.PodSandbox, ctr
 	return m.removeContainer(m, pod, ctr)
 }
 
+func (m *mockPlugin) ValidateContainerAdjustment(_ context.Context, req *api.ValidateContainerAdjustmentRequest) error {
+	if m.validateAdjustment != nil {
+		m.q.Add(ContainerEvent(req.Container, ValidateContainerAdjustment))
+		return m.validateAdjustment(m, req)
+	}
+	return nil
+}
+
 func nopEvent(*mockPlugin, *api.PodSandbox, *api.Container) error {
+	return nil
+}
+
+func nopUpdatePodSandbox(*mockPlugin, *api.PodSandbox, *api.LinuxResources, *api.LinuxResources) error {
 	return nil
 }
 
@@ -605,17 +727,21 @@ const (
 	Disconnected = "closed"
 	Stopped      = "stopped"
 
-	RunPodSandbox       = "RunPodSandbox"
-	StopPodSandbox      = "StopPodSandbox"
-	RemovePodSandbox    = "RemovePodSandbox"
-	CreateContainer     = "CreateContainer"
-	StartContainer      = "StartContainer"
-	UpdateContainer     = "UpdateContainer"
-	StopContainer       = "StopContainer"
-	RemoveContainer     = "RemoveContainer"
-	PostCreateContainer = "PostCreateContainer"
-	PostStartContainer  = "PostStartContainer"
-	PostUpdateContainer = "PostUpdateContainer"
+	RunPodSandbox        = "RunPodSandbox"
+	UpdatePodSandbox     = "UpdatePodSandbox"
+	StopPodSandbox       = "StopPodSandbox"
+	RemovePodSandbox     = "RemovePodSandbox"
+	PostUpdatePodSandbox = "PostUpdatePodSandbox"
+	CreateContainer      = "CreateContainer"
+	StartContainer       = "StartContainer"
+	UpdateContainer      = "UpdateContainer"
+	StopContainer        = "StopContainer"
+	RemoveContainer      = "RemoveContainer"
+	PostCreateContainer  = "PostCreateContainer"
+	PostStartContainer   = "PostStartContainer"
+	PostUpdateContainer  = "PostUpdateContainer"
+
+	ValidateContainerAdjustment = "ValidateContainerAdjustment"
 
 	Error   = "Error"
 	Timeout = ""

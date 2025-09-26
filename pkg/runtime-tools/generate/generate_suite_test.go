@@ -69,6 +69,28 @@ var _ = Describe("Adjustment", func() {
 		})
 	})
 
+	When("has args", func() {
+		It("adjusts Spec correctly", func() {
+			var (
+				spec   = makeSpec()
+				adjust = &api.ContainerAdjustment{
+					Args: []string{
+						"arg0",
+						"arg1",
+						"arg2",
+					},
+				}
+			)
+
+			rg := &rgen.Generator{Config: spec}
+			xg := xgen.SpecGenerator(rg)
+
+			Expect(xg).ToNot(BeNil())
+			Expect(xg.Adjust(adjust)).To(Succeed())
+			Expect(spec).To(Equal(makeSpec(withArgs("arg0", "arg1", "arg2"))))
+		})
+	})
+
 	When("has rlimits", func() {
 		It("adjusts Spec correctly", func() {
 			var (
@@ -112,6 +134,69 @@ var _ = Describe("Adjustment", func() {
 			Expect(xg).ToNot(BeNil())
 			Expect(xg.Adjust(adjust)).To(Succeed())
 			Expect(spec).To(Equal(makeSpec(withMemoryLimit(11111), withMemorySwap(11111))))
+		})
+	})
+
+	When("has oom score adj", func() {
+		It("adjusts Spec correctly", func() {
+			var (
+				oomScoreAdj = 123
+				spec        = makeSpec()
+				adjust      = &api.ContainerAdjustment{
+					Linux: &api.LinuxContainerAdjustment{
+						OomScoreAdj: &api.OptionalInt{
+							Value: int64(oomScoreAdj),
+						},
+					},
+				}
+			)
+
+			rg := &rgen.Generator{Config: spec}
+			xg := xgen.SpecGenerator(rg)
+
+			Expect(xg).ToNot(BeNil())
+			Expect(xg.Adjust(adjust)).To(Succeed())
+			Expect(spec).To(Equal(makeSpec(withOomScoreAdj(&oomScoreAdj))))
+		})
+	})
+
+	When("unset oom score adj", func() {
+		It("adjusts Spec correctly", func() {
+			var (
+				spec   = makeSpec()
+				adjust = &api.ContainerAdjustment{
+					Linux: &api.LinuxContainerAdjustment{
+						OomScoreAdj: nil,
+					},
+				}
+			)
+
+			rg := &rgen.Generator{Config: spec}
+			xg := xgen.SpecGenerator(rg)
+
+			Expect(xg).ToNot(BeNil())
+			Expect(xg.Adjust(adjust)).To(Succeed())
+			Expect(spec).To(Equal(makeSpec(withOomScoreAdj(nil))))
+		})
+	})
+
+	When("existing oom score adj", func() {
+		It("does not adjust Spec", func() {
+			var (
+				spec         = makeSpec()
+				expectedSpec = makeSpec()
+				adjust       = &api.ContainerAdjustment{}
+			)
+			oomScoreAdj := 123
+			spec.Process.OOMScoreAdj = &oomScoreAdj
+			expectedSpec.Process.OOMScoreAdj = &oomScoreAdj
+
+			rg := &rgen.Generator{Config: spec}
+			xg := xgen.SpecGenerator(rg)
+
+			Expect(xg).ToNot(BeNil())
+			Expect(xg.Adjust(adjust)).To(Succeed())
+			Expect(spec).To(Equal(expectedSpec))
 		})
 	})
 
@@ -235,6 +320,30 @@ var _ = Describe("Adjustment", func() {
 		})
 	})
 
+	When("has pids limit", func() {
+		It("adjusts Spec correctly", func() {
+			var (
+				spec   = makeSpec()
+				adjust = &api.ContainerAdjustment{
+					Linux: &api.LinuxContainerAdjustment{
+						Resources: &api.LinuxResources{
+							Pids: &api.LinuxPids{
+								Limit: 123,
+							},
+						},
+					},
+				}
+			)
+
+			rg := &rgen.Generator{Config: spec}
+			xg := xgen.SpecGenerator(rg)
+
+			Expect(xg).ToNot(BeNil())
+			Expect(xg.Adjust(adjust)).To(Succeed())
+			Expect(spec).To(Equal(makeSpec(withPidsLimit(123))))
+		})
+	})
+
 	When("has mounts", func() {
 		It("it sorts the Spec mount slice", func() {
 			var (
@@ -288,9 +397,50 @@ var _ = Describe("Adjustment", func() {
 			)))
 		})
 	})
+
+	When("has a seccomp policy adjustment", func() {
+		It("adjusts Spec correctly", func() {
+			var (
+				spec    = makeSpec()
+				seccomp = rspec.LinuxSeccomp{
+					DefaultAction: rspec.ActAllow,
+					ListenerPath:  "/run/meshuggah-rocks.sock",
+					Architectures: []rspec.Arch{},
+					Flags:         []rspec.LinuxSeccompFlag{},
+					Syscalls: []rspec.LinuxSyscall{{
+						Names:  []string{"sched_getaffinity"},
+						Action: rspec.ActNotify,
+						Args:   []rspec.LinuxSeccompArg{},
+					}},
+				}
+				adjust = &api.ContainerAdjustment{
+					Linux: &api.LinuxContainerAdjustment{
+						SeccompPolicy: api.FromOCILinuxSeccomp(&seccomp),
+					},
+				}
+			)
+
+			rg := &rgen.Generator{Config: spec}
+			xg := xgen.SpecGenerator(rg)
+
+			Expect(xg).ToNot(BeNil())
+			Expect(xg.Adjust(adjust)).To(Succeed())
+			Expect(*spec.Linux.Seccomp).To(Equal(seccomp))
+		})
+	})
+
 })
 
 type specOption func(*rspec.Spec)
+
+func withArgs(args ...string) specOption {
+	return func(spec *rspec.Spec) {
+		if spec.Process == nil {
+			spec.Process = &rspec.Process{}
+		}
+		spec.Process.Args = args
+	}
+}
 
 func withMemoryLimit(v int64) specOption {
 	return func(spec *rspec.Spec) {
@@ -319,6 +469,15 @@ func withMemorySwap(v int64) specOption {
 			spec.Linux.Resources.Memory = &rspec.LinuxMemory{}
 		}
 		spec.Linux.Resources.Memory.Swap = &v
+	}
+}
+
+func withOomScoreAdj(v *int) specOption {
+	return func(spec *rspec.Spec) {
+		if spec.Process == nil {
+			spec.Process = &rspec.Process{}
+		}
+		spec.Process.OOMScoreAdj = v
 	}
 }
 
@@ -397,6 +556,20 @@ func withCPUSetMems(v string) specOption {
 	}
 }
 
+func withPidsLimit(v int64) specOption {
+	return func(spec *rspec.Spec) {
+		if spec.Linux == nil {
+			spec.Linux = &rspec.Linux{}
+		}
+		if spec.Linux.Resources == nil {
+			spec.Linux.Resources = &rspec.LinuxResources{}
+		}
+		spec.Linux.Resources.Pids = &rspec.LinuxPids{
+			Limit: v,
+		}
+	}
+}
+
 func withMounts(mounts []rspec.Mount) specOption {
 	return func(spec *rspec.Spec) {
 		spec.Mounts = append(spec.Mounts, mounts...)
@@ -430,6 +603,9 @@ func makeSpec(options ...specOption) *rspec.Spec {
 					Period: Uint64(54321),
 					Cpus:   "0-111",
 					Mems:   "0-4",
+				},
+				Pids: &rspec.LinuxPids{
+					Limit: 1,
 				},
 			},
 		},

@@ -36,7 +36,8 @@ import (
 
 const (
 	// Prefix of the key used for network device annotations.
-	netdeviceKey = "netdevices.nri.containerd.io"
+	netdeviceKey    = "netdevice.noderesource.dev"
+	oldNetdeviceKey = "netdevices.nri.containerd.io" // Deprecated
 )
 
 var (
@@ -194,7 +195,9 @@ func parseNetdevices(annotations map[string]string) ([]netdevice, error) {
 	// look up effective device annotation and unmarshal devices
 	for _, key = range []string{
 		netdeviceKey + "/pod",
+		oldNetdeviceKey + "/pod",
 		netdeviceKey,
+		oldNetdeviceKey,
 	} {
 		if value, ok := annotations[key]; ok {
 			annotation = []byte(value)
@@ -270,10 +273,9 @@ func dump(args ...interface{}) {
 
 func main() {
 	var (
-		pluginName string
-		pluginIdx  string
-		opts       []stub.Option
-		err        error
+		pluginIdx string
+		opts      []stub.Option
+		err       error
 	)
 
 	log = logrus.StandardLogger()
@@ -281,14 +283,10 @@ func main() {
 		PadLevelText: true,
 	})
 
-	flag.StringVar(&pluginName, "name", "", "plugin name to register to NRI")
 	flag.StringVar(&pluginIdx, "idx", "", "plugin index to register to NRI")
 	flag.BoolVar(&verbose, "verbose", false, "enable (more) verbose logging")
 	flag.Parse()
 
-	if pluginName != "" {
-		opts = append(opts, stub.WithPluginName(pluginName))
-	}
 	if pluginIdx != "" {
 		opts = append(opts, stub.WithPluginIdx(pluginIdx))
 	}

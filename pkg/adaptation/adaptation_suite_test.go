@@ -18,19 +18,27 @@ package adaptation_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
-	"sigs.k8s.io/yaml"
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/testing/protocmp"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	nri "github.com/containerd/nri/pkg/adaptation"
 	"github.com/containerd/nri/pkg/api"
+	"github.com/containerd/nri/pkg/plugin"
+	validator "github.com/containerd/nri/plugins/default-validator/builtin"
+	rspec "github.com/opencontainers/runtime-spec/specs-go"
 )
 
 var _ = Describe("Configuration", func() {
@@ -221,14 +229,14 @@ var _ = Describe("Plugin connection", func() {
 			),
 		)
 
-		runtime.pods = strip(runtime.pods, map[string]*api.PodSandbox{}).(map[string]*api.PodSandbox)
-		runtime.ctrs = strip(runtime.ctrs, map[string]*api.Container{}).(map[string]*api.Container)
-		plugin.pods = strip(plugin.pods, map[string]*api.PodSandbox{}).(map[string]*api.PodSandbox)
-		plugin.ctrs = strip(plugin.ctrs, map[string]*api.Container{}).(map[string]*api.Container)
-		Expect(plugin.pods["pod0"]).To(Equal(runtime.pods["pod0"]))
-		Expect(plugin.pods["pod1"]).To(Equal(runtime.pods["pod1"]))
-		Expect(plugin.ctrs["ctr0"]).To(Equal(runtime.ctrs["ctr0"]))
-		Expect(plugin.ctrs["ctr1"]).To(Equal(runtime.ctrs["ctr1"]))
+		Expect(protoEqual(plugin.pods["pod0"], runtime.pods["pod0"])).Should(BeTrue(),
+			protoDiff(plugin.pods["pod0"], runtime.pods["pod0"]))
+		Expect(protoEqual(plugin.pods["pod1"], runtime.pods["pod1"])).Should(BeTrue(),
+			protoDiff(plugin.pods["pod1"], runtime.pods["pod1"]))
+		Expect(protoEqual(plugin.ctrs["ctr0"], runtime.ctrs["ctr0"])).Should(BeTrue(),
+			protoDiff(plugin.ctrs["ctr0"], runtime.ctrs["ctr0"]))
+		Expect(protoEqual(plugin.ctrs["ctr1"], runtime.ctrs["ctr1"])).Should(BeTrue(),
+			protoDiff(plugin.ctrs["ctr1"], runtime.ctrs["ctr1"]))
 	})
 })
 
@@ -321,6 +329,8 @@ var _ = Describe("Pod and container requests and events", func() {
 				}
 			},
 			Entry("with RunPodSandbox", "RunPodSandbox"),
+			Entry("with UpdatePodSandbox", "UpdatePodSandbox"),
+			Entry("with PostUpdatePodSandbox", "PostUpdatePodSandbox"),
 			Entry("with StopPodSandbox", "StopPodSandbox"),
 			Entry("with RemovePodSandbox", "RemovePodSandbox"),
 
@@ -343,7 +353,7 @@ var _ = Describe("Pod and container requests and events", func() {
 				"RemoveContainer",
 			),
 			Entry("with all pod and container requests and events",
-				"RunPodSandbox,StopPodSandbox,RemovePodSandbox",
+				"RunPodSandbox,UpdatePodSandbox,PostUpdatePodSandbox,StopPodSandbox,RemovePodSandbox",
 				"CreateContainer,PostCreateContainer",
 				"StartContainer,PostStartContainer",
 				"UpdateContainer,PostUpdateContainer",
@@ -419,7 +429,7 @@ var _ = Describe("Pod and container requests and events", func() {
 				"RemoveContainer",
 			),
 			Entry("with all pod and container requests and events",
-				"RunPodSandbox,StopPodSandbox,RemovePodSandbox",
+				"RunPodSandbox,UpdatePodSandbox,PostUpdatePodSandbox,StopPodSandbox,RemovePodSandbox",
 				"CreateContainer,PostCreateContainer",
 				"StartContainer,PostStartContainer",
 				"UpdateContainer,PostUpdateContainer",
@@ -435,7 +445,7 @@ var _ = Describe("Plugin container creation adjustments", func() {
 		s = &Suite{}
 	)
 
-	adjust := func(subject string, p *mockPlugin, _ *api.PodSandbox, _ *api.Container, overwrite bool) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
+	adjust := func(subject string, p *mockPlugin, _ *api.PodSandbox, c *api.Container, overwrite bool) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
 		plugin := p.idx + "-" + p.name
 		a := &api.ContainerAdjustment{}
 		switch subject {
@@ -455,11 +465,21 @@ var _ = Describe("Plugin container creation adjustments", func() {
 			}
 			a.AddMount(mnt)
 
+		case "remove mount":
+			a.RemoveMount("/remove/test/destination")
+
 		case "environment":
 			if overwrite {
 				a.RemoveEnv("key")
 			}
 			a.AddEnv("key", plugin)
+
+		case "arguments":
+			if !overwrite {
+				a.SetArgs([]string{"echo", "updated", "argument", "list"})
+			} else {
+				a.UpdateArgs(append(slices.Clone(c.Args), "twice..."))
+			}
 
 		case "hooks":
 			a.AddHooks(
@@ -485,8 +505,32 @@ var _ = Describe("Plugin container creation adjustments", func() {
 			}
 			a.AddDevice(dev)
 
+		case "namespace":
+			ns := &api.LinuxNamespace{
+				Type: "cgroup",
+			}
+			a.AddOrReplaceNamespace(ns)
+
 		case "rlimit":
 			a.AddRlimit("nofile", 456, 123)
+
+		case "CDI-device":
+			a.AddCDIDevice(
+				&api.CDIDevice{
+					Name: "vendor0.com/dev=dev0",
+				},
+			)
+
+		case "I/O priority":
+			a.SetLinuxIOPriority(&nri.LinuxIOPriority{
+				Class:    api.IOPrioClass_IOPRIO_CLASS_RT,
+				Priority: 5,
+			})
+
+		case "clear I/O priority":
+			a.SetLinuxIOPriority(&nri.LinuxIOPriority{
+				Class: api.IOPrioClass_IOPRIO_CLASS_NONE,
+			})
 
 		case "resources/cpu":
 			a.SetLinuxCPUShares(123)
@@ -521,6 +565,24 @@ var _ = Describe("Plugin container creation adjustments", func() {
 
 		case "cgroupspath":
 			a.SetLinuxCgroupsPath("/" + plugin)
+
+		case "seccomp":
+			a.SetLinuxSeccompPolicy(
+				func() *api.LinuxSeccomp {
+					seccomp := rspec.LinuxSeccomp{
+						DefaultAction: rspec.ActAllow,
+						ListenerPath:  "/run/meshuggah-rocks.sock",
+						Architectures: []rspec.Arch{},
+						Flags:         []rspec.LinuxSeccompFlag{},
+						Syscalls: []rspec.LinuxSyscall{{
+							Names:  []string{"sched_getaffinity"},
+							Action: rspec.ActNotify,
+							Args:   []rspec.LinuxSeccompArg{},
+						}},
+					}
+					return api.FromOCILinuxSeccomp(&seccomp)
+				}(),
+			)
 		}
 
 		return a, nil, nil
@@ -553,6 +615,19 @@ var _ = Describe("Plugin container creation adjustments", func() {
 						PodSandboxId: "pod0",
 						Name:         "ctr0",
 						State:        api.ContainerState_CONTAINER_CREATED, // XXX FIXME-kludge
+						Mounts: []*api.Mount{
+							{
+								Type:        "bind",
+								Source:      "/remove/test",
+								Destination: "/remove/test/destination",
+							},
+						},
+						Args: []string{
+							"echo",
+							"original",
+							"argument",
+							"list",
+						},
 					}
 				)
 
@@ -565,14 +640,15 @@ var _ = Describe("Plugin container creation adjustments", func() {
 				s.Startup()
 
 				podReq := &api.RunPodSandboxRequest{Pod: pod}
-				Expect(runtime.runtime.RunPodSandbox(ctx, podReq)).To(Succeed())
+				Expect(runtime.RunPodSandbox(ctx, podReq)).To(Succeed())
 				ctrReq := &api.CreateContainerRequest{
 					Pod:       pod,
 					Container: ctr,
 				}
-				reply, err := runtime.runtime.CreateContainer(ctx, ctrReq)
+				reply, err := runtime.CreateContainer(ctx, ctrReq)
 				Expect(err).To(BeNil())
-				Expect(stripAdjustment(reply.Adjust)).Should(Equal(stripAdjustment(expected)))
+				Expect(protoEqual(reply.Adjust.Strip(), expected.Strip())).Should(BeTrue(),
+					protoDiff(reply.Adjust, expected))
 			},
 
 			Entry("adjust annotations", "annotation",
@@ -592,6 +668,15 @@ var _ = Describe("Plugin container creation adjustments", func() {
 					},
 				},
 			),
+			Entry("remove a mount", "remove mount",
+				&api.ContainerAdjustment{
+					Mounts: []*api.Mount{
+						{
+							Destination: api.MarkForRemoval("/remove/test/destination"),
+						},
+					},
+				},
+			),
 			Entry("adjust environment", "environment",
 				&api.ContainerAdjustment{
 					Env: []*api.KeyValue{
@@ -599,6 +684,16 @@ var _ = Describe("Plugin container creation adjustments", func() {
 							Key:   "key",
 							Value: "00-test",
 						},
+					},
+				},
+			),
+			Entry("adjust arguments", "arguments",
+				&api.ContainerAdjustment{
+					Args: []string{
+						"echo",
+						"updated",
+						"argument",
+						"list",
 					},
 				},
 			),
@@ -627,11 +722,50 @@ var _ = Describe("Plugin container creation adjustments", func() {
 					},
 				},
 			),
+			Entry("adjust namespace", "namespace",
+				&api.ContainerAdjustment{
+					Linux: &api.LinuxContainerAdjustment{
+						Namespaces: []*api.LinuxNamespace{
+							{
+								Type: "cgroup",
+							},
+						},
+					},
+				},
+			),
 			Entry("adjust rlimits", "rlimit",
 				&api.ContainerAdjustment{
 					Rlimits: []*api.POSIXRlimit{{Type: "nofile", Soft: 123, Hard: 456}},
 				},
 			),
+			Entry("adjust CDI Devices", "CDI-device",
+				&api.ContainerAdjustment{
+					CDIDevices: []*api.CDIDevice{
+						{
+							Name: "vendor0.com/dev=dev0",
+						},
+					},
+				},
+			),
+
+			Entry("adjust I/O priority", "I/O priority",
+				&api.ContainerAdjustment{
+					Linux: &api.LinuxContainerAdjustment{
+						IoPriority: &api.LinuxIOPriority{
+							Class:    api.IOPrioClass_IOPRIO_CLASS_RT,
+							Priority: 5,
+						},
+					},
+				},
+			),
+			Entry("clear I/O priority", "clear I/O priority",
+				&api.ContainerAdjustment{
+					Linux: &api.LinuxContainerAdjustment{
+						IoPriority: &api.LinuxIOPriority{},
+					},
+				},
+			),
+
 			Entry("adjust CPU resources", "resources/cpu",
 				&api.ContainerAdjustment{
 					Linux: &api.LinuxContainerAdjustment{
@@ -714,6 +848,26 @@ var _ = Describe("Plugin container creation adjustments", func() {
 					},
 				},
 			),
+			Entry("adjust seccomp policy", "seccomp",
+				&api.ContainerAdjustment{
+					Linux: &api.LinuxContainerAdjustment{
+						SeccompPolicy: func() *api.LinuxSeccomp {
+							seccomp := rspec.LinuxSeccomp{
+								DefaultAction: rspec.ActAllow,
+								ListenerPath:  "/run/meshuggah-rocks.sock",
+								Architectures: []rspec.Arch{},
+								Flags:         []rspec.LinuxSeccompFlag{},
+								Syscalls: []rspec.LinuxSyscall{{
+									Names:  []string{"sched_getaffinity"},
+									Action: rspec.ActNotify,
+									Args:   []rspec.LinuxSeccompArg{},
+								}},
+							}
+							return api.FromOCILinuxSeccomp(&seccomp)
+						}(),
+					},
+				},
+			),
 		)
 	})
 
@@ -744,6 +898,12 @@ var _ = Describe("Plugin container creation adjustments", func() {
 						PodSandboxId: "pod0",
 						Name:         "ctr0",
 						State:        api.ContainerState_CONTAINER_CREATED, // XXX FIXME-kludge
+						Args: []string{
+							"echo",
+							"original",
+							"argument",
+							"list",
+						},
 					}
 				)
 
@@ -757,18 +917,18 @@ var _ = Describe("Plugin container creation adjustments", func() {
 				s.Startup()
 
 				podReq := &api.RunPodSandboxRequest{Pod: pod}
-				Expect(runtime.runtime.RunPodSandbox(ctx, podReq)).To(Succeed())
+				Expect(runtime.RunPodSandbox(ctx, podReq)).To(Succeed())
 				ctrReq := &api.CreateContainerRequest{
 					Pod:       pod,
 					Container: ctr,
 				}
-				reply, err := runtime.runtime.CreateContainer(ctx, ctrReq)
+				reply, err := runtime.CreateContainer(ctx, ctrReq)
 				if shouldFail {
 					Expect(err).ToNot(BeNil())
 				} else {
 					Expect(err).To(BeNil())
-					reply.Adjust = strip(reply.Adjust, &api.ContainerAdjustment{}).(*api.ContainerAdjustment)
-					Expect(stripAdjustment(reply.Adjust)).Should(Equal(stripAdjustment(expected)))
+					Expect(protoEqual(reply.Adjust.Strip(), expected.Strip())).Should(BeTrue(),
+						protoDiff(reply.Adjust, expected))
 				}
 			},
 
@@ -803,6 +963,20 @@ var _ = Describe("Plugin container creation adjustments", func() {
 					},
 				},
 			),
+
+			Entry("adjust arguments (conflicts)", "arguments", false, true, nil),
+			Entry("adjust arguments", "arguments", true, false,
+				&api.ContainerAdjustment{
+					Args: []string{
+						"echo",
+						"updated",
+						"argument",
+						"list",
+						"twice...",
+					},
+				},
+			),
+
 			Entry("adjust hooks", "hooks", false, false,
 				&api.ContainerAdjustment{
 					Hooks: &api.Hooks{
@@ -833,7 +1007,1078 @@ var _ = Describe("Plugin container creation adjustments", func() {
 				},
 			),
 			Entry("adjust resources", "resources/classes", false, true, nil),
+			Entry("adjust I/O priority (conflicts)", "I/O priority", false, true, nil),
 		)
+	})
+
+	When("there are validating plugins", func() {
+		BeforeEach(func() {
+			s.Prepare(
+				&mockRuntime{},
+				&mockPlugin{idx: "00", name: "foo"},
+				&mockPlugin{idx: "00", name: "validator"},
+			)
+		})
+
+		DescribeTable("validation result should be honored",
+			func(subject string, shouldFail bool, expected *api.ContainerAdjustment) {
+				var (
+					runtime = s.runtime
+					plugins = s.plugins
+					ctx     = context.Background()
+
+					pod = &api.PodSandbox{
+						Id:        "pod0",
+						Name:      "pod0",
+						Uid:       "uid0",
+						Namespace: "default",
+					}
+					ctr = &api.Container{
+						Id:           "ctr0",
+						PodSandboxId: "pod0",
+						Name:         "ctr0",
+						State:        api.ContainerState_CONTAINER_CREATED, // XXX FIXME-kludge
+						Args: []string{
+							"echo",
+							"original",
+							"argument",
+							"list",
+						},
+					}
+
+					forbidden = "no-no"
+				)
+
+				create := func(p *mockPlugin, _ *api.PodSandbox, _ *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
+					plugin := p.idx + "-" + p.name
+					a := &api.ContainerAdjustment{}
+					switch subject {
+					case "annotation":
+						key := "key"
+						if shouldFail {
+							key = forbidden
+						}
+						a.AddAnnotation(key, plugin)
+					}
+
+					return a, nil, nil
+				}
+
+				validate := func(_ *mockPlugin, req *api.ValidateContainerAdjustmentRequest) error {
+					_, ok := req.Owners.AnnotationOwner(req.Container.Id, forbidden)
+					if ok {
+						return fmt.Errorf("forbidden annotation %q adjusted", forbidden)
+					}
+					return nil
+				}
+
+				plugins[0].createContainer = create
+				plugins[1].validateAdjustment = validate
+				s.Startup()
+
+				podReq := &api.RunPodSandboxRequest{Pod: pod}
+				Expect(runtime.RunPodSandbox(ctx, podReq)).To(Succeed())
+				ctrReq := &api.CreateContainerRequest{
+					Pod:       pod,
+					Container: ctr,
+				}
+				reply, err := runtime.CreateContainer(ctx, ctrReq)
+				if shouldFail {
+					Expect(err).ToNot(BeNil())
+				} else {
+					Expect(err).To(BeNil())
+					Expect(protoEqual(reply.Adjust.Strip(), expected.Strip())).Should(BeTrue(),
+						protoDiff(reply.Adjust, expected))
+				}
+			},
+
+			Entry("adjust allowed annotation", "annotation", false,
+				&api.ContainerAdjustment{
+					Annotations: map[string]string{
+						"key": "00-foo",
+					},
+				},
+			),
+
+			Entry("adjust forbidden annotation", "annotation", true, nil),
+		)
+	})
+
+	When("the default validator is enabled and OCI Hook injection is disabled", func() {
+		BeforeEach(func() {
+			s.Prepare(
+				&mockRuntime{
+					options: []nri.Option{
+						nri.WithDefaultValidator(
+							&validator.DefaultValidatorConfig{
+								Enable:                  true,
+								RejectOCIHookAdjustment: true,
+							},
+						),
+					},
+				},
+				&mockPlugin{idx: "00", name: "foo"},
+				&mockPlugin{idx: "10", name: "validator1"},
+				&mockPlugin{idx: "20", name: "validator2"},
+			)
+		})
+
+		It("should reject OCI Hook injection", func() {
+			var (
+				create = func(_ *mockPlugin, _ *api.PodSandbox, ctr *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
+					a := &api.ContainerAdjustment{}
+					if ctr.GetName() == "ctr1" {
+						a.AddHooks(
+							&api.Hooks{
+								Prestart: []*api.Hook{
+									{
+										Path: "/bin/sh",
+										Args: []string{"/bin/sh", "-c", "true"},
+									},
+								},
+							},
+						)
+					}
+
+					return a, nil, nil
+				}
+
+				validate = func(_ *mockPlugin, _ *api.ValidateContainerAdjustmentRequest) error {
+					return nil
+				}
+
+				runtime = s.runtime
+				plugins = s.plugins
+				ctx     = context.Background()
+
+				pod = &api.PodSandbox{
+					Id:        "pod0",
+					Name:      "pod0",
+					Uid:       "uid0",
+					Namespace: "default",
+				}
+				ctr0 = &api.Container{
+					Id:           "ctr0",
+					PodSandboxId: "pod0",
+					Name:         "ctr0",
+					State:        api.ContainerState_CONTAINER_CREATED,
+				}
+				ctr1 = &api.Container{
+					Id:           "ctr1",
+					PodSandboxId: "pod0",
+					Name:         "ctr1",
+					State:        api.ContainerState_CONTAINER_CREATED,
+				}
+			)
+
+			plugins[0].createContainer = create
+			plugins[1].validateAdjustment = validate
+			plugins[2].validateAdjustment = validate
+
+			s.Startup()
+			podReq := &api.RunPodSandboxRequest{Pod: pod}
+			Expect(runtime.RunPodSandbox(ctx, podReq)).To(Succeed())
+
+			ctrReq := &api.CreateContainerRequest{
+				Pod:       pod,
+				Container: ctr0,
+			}
+			reply, err := runtime.CreateContainer(ctx, ctrReq)
+			Expect(reply).ToNot(BeNil())
+			Expect(err).To(BeNil())
+
+			ctrReq = &api.CreateContainerRequest{
+				Pod:       pod,
+				Container: ctr1,
+			}
+			reply, err = runtime.CreateContainer(ctx, ctrReq)
+			Expect(err).ToNot(BeNil())
+			Expect(reply).To(BeNil())
+		})
+	})
+
+	When("default validator disallows runtime default seccomp policy adjustment", func() {
+		BeforeEach(func() {
+			s.Prepare(
+				&mockRuntime{
+					options: []nri.Option{
+						nri.WithDefaultValidator(
+							&validator.DefaultValidatorConfig{
+								Enable:                                true,
+								RejectRuntimeDefaultSeccompAdjustment: true,
+							},
+						),
+					},
+				},
+				&mockPlugin{idx: "00", name: "foo"},
+				&mockPlugin{idx: "10", name: "validator1"},
+				&mockPlugin{idx: "20", name: "validator2"},
+			)
+		})
+
+		It("should reject runtime default seccomp policy adjustment", func() {
+			var (
+				create = func(_ *mockPlugin, _ *api.PodSandbox, ctr *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
+					a := &api.ContainerAdjustment{}
+					if ctr.GetName() == "ctr1" {
+						a.SetLinuxSeccompPolicy(
+							func() *api.LinuxSeccomp {
+								seccomp := rspec.LinuxSeccomp{
+									DefaultAction: rspec.ActAllow,
+									ListenerPath:  "/run/meshuggah-rocks.sock",
+									Architectures: []rspec.Arch{},
+									Flags:         []rspec.LinuxSeccompFlag{},
+									Syscalls: []rspec.LinuxSyscall{{
+										Names:  []string{"sched_getaffinity"},
+										Action: rspec.ActNotify,
+										Args:   []rspec.LinuxSeccompArg{},
+									}},
+								}
+								return api.FromOCILinuxSeccomp(&seccomp)
+							}(),
+						)
+					}
+					return a, nil, nil
+				}
+
+				validate = func(_ *mockPlugin, _ *api.ValidateContainerAdjustmentRequest) error {
+					return nil
+				}
+
+				runtime = s.runtime
+				plugins = s.plugins
+				ctx     = context.Background()
+
+				pod = &api.PodSandbox{
+					Id:        "pod0",
+					Name:      "pod0",
+					Uid:       "uid0",
+					Namespace: "default",
+				}
+				ctr0 = &api.Container{
+					Id:           "ctr0",
+					PodSandboxId: "pod0",
+					Name:         "ctr0",
+					State:        api.ContainerState_CONTAINER_CREATED,
+				}
+				ctr1 = &api.Container{
+					Id:           "ctr1",
+					PodSandboxId: "pod0",
+					Name:         "ctr1",
+					State:        api.ContainerState_CONTAINER_CREATED,
+					Linux: &api.LinuxContainer{
+						SeccompProfile: &api.SecurityProfile{
+							ProfileType: api.SecurityProfile_RUNTIME_DEFAULT,
+						},
+					},
+				}
+			)
+
+			plugins[0].createContainer = create
+			plugins[1].validateAdjustment = validate
+			plugins[2].validateAdjustment = validate
+
+			s.Startup()
+			podReq := &api.RunPodSandboxRequest{Pod: pod}
+			Expect(runtime.RunPodSandbox(ctx, podReq)).To(Succeed())
+
+			ctrReq := &api.CreateContainerRequest{
+				Pod:       pod,
+				Container: ctr0,
+			}
+			reply, err := runtime.CreateContainer(ctx, ctrReq)
+			Expect(reply).ToNot(BeNil())
+			Expect(err).To(BeNil())
+
+			ctrReq = &api.CreateContainerRequest{
+				Pod:       pod,
+				Container: ctr1,
+			}
+			reply, err = runtime.CreateContainer(ctx, ctrReq)
+			Expect(err).ToNot(BeNil())
+			Expect(reply).To(BeNil())
+		})
+	})
+
+	When("default validator allows runtime default seccomp policy adjustment", func() {
+		BeforeEach(func() {
+			s.Prepare(
+				&mockRuntime{
+					options: []nri.Option{
+						nri.WithDefaultValidator(
+							&validator.DefaultValidatorConfig{
+								Enable:                                true,
+								RejectRuntimeDefaultSeccompAdjustment: false,
+							},
+						),
+					},
+				},
+				&mockPlugin{idx: "00", name: "foo"},
+				&mockPlugin{idx: "10", name: "validator1"},
+				&mockPlugin{idx: "20", name: "validator2"},
+			)
+		})
+
+		It("should not reject runtime default seccomp policy adjustment", func() {
+			var (
+				create = func(_ *mockPlugin, _ *api.PodSandbox, ctr *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
+					a := &api.ContainerAdjustment{}
+					if ctr.GetName() == "ctr1" {
+						a.SetLinuxSeccompPolicy(
+							func() *api.LinuxSeccomp {
+								seccomp := rspec.LinuxSeccomp{
+									DefaultAction: rspec.ActAllow,
+									ListenerPath:  "/run/meshuggah-rocks.sock",
+									Architectures: []rspec.Arch{},
+									Flags:         []rspec.LinuxSeccompFlag{},
+									Syscalls: []rspec.LinuxSyscall{{
+										Names:  []string{"sched_getaffinity"},
+										Action: rspec.ActNotify,
+										Args:   []rspec.LinuxSeccompArg{},
+									}},
+								}
+								return api.FromOCILinuxSeccomp(&seccomp)
+							}(),
+						)
+					}
+					return a, nil, nil
+				}
+
+				validate = func(_ *mockPlugin, _ *api.ValidateContainerAdjustmentRequest) error {
+					return nil
+				}
+
+				runtime = s.runtime
+				plugins = s.plugins
+				ctx     = context.Background()
+
+				pod = &api.PodSandbox{
+					Id:        "pod0",
+					Name:      "pod0",
+					Uid:       "uid0",
+					Namespace: "default",
+				}
+				ctr0 = &api.Container{
+					Id:           "ctr0",
+					PodSandboxId: "pod0",
+					Name:         "ctr0",
+					State:        api.ContainerState_CONTAINER_CREATED,
+				}
+				ctr1 = &api.Container{
+					Id:           "ctr1",
+					PodSandboxId: "pod0",
+					Name:         "ctr1",
+					State:        api.ContainerState_CONTAINER_CREATED,
+					Linux: &api.LinuxContainer{
+						SeccompProfile: &api.SecurityProfile{
+							ProfileType: api.SecurityProfile_RUNTIME_DEFAULT,
+						},
+					},
+				}
+			)
+
+			plugins[0].createContainer = create
+			plugins[1].validateAdjustment = validate
+			plugins[2].validateAdjustment = validate
+
+			s.Startup()
+			podReq := &api.RunPodSandboxRequest{Pod: pod}
+			Expect(runtime.RunPodSandbox(ctx, podReq)).To(Succeed())
+
+			ctrReq := &api.CreateContainerRequest{
+				Pod:       pod,
+				Container: ctr0,
+			}
+			reply, err := runtime.CreateContainer(ctx, ctrReq)
+			Expect(reply).ToNot(BeNil())
+			Expect(err).To(BeNil())
+
+			ctrReq = &api.CreateContainerRequest{
+				Pod:       pod,
+				Container: ctr1,
+			}
+			reply, err = runtime.CreateContainer(ctx, ctrReq)
+			Expect(reply).ToNot(BeNil())
+			Expect(err).To(BeNil())
+		})
+	})
+
+	When("default validator disallows custom seccomp policy adjustment", func() {
+		BeforeEach(func() {
+			s.Prepare(
+				&mockRuntime{
+					options: []nri.Option{
+						nri.WithDefaultValidator(
+							&validator.DefaultValidatorConfig{
+								Enable:                        true,
+								RejectCustomSeccompAdjustment: true,
+							},
+						),
+					},
+				},
+				&mockPlugin{idx: "00", name: "foo"},
+				&mockPlugin{idx: "10", name: "validator1"},
+				&mockPlugin{idx: "20", name: "validator2"},
+			)
+		})
+
+		It("should reject custom seccomp policy adjustment", func() {
+			var (
+				create = func(_ *mockPlugin, _ *api.PodSandbox, ctr *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
+					a := &api.ContainerAdjustment{}
+					if ctr.GetName() == "ctr1" {
+						a.SetLinuxSeccompPolicy(
+							func() *api.LinuxSeccomp {
+								seccomp := rspec.LinuxSeccomp{
+									DefaultAction: rspec.ActAllow,
+									ListenerPath:  "/run/meshuggah-rocks.sock",
+									Architectures: []rspec.Arch{},
+									Flags:         []rspec.LinuxSeccompFlag{},
+									Syscalls: []rspec.LinuxSyscall{{
+										Names:  []string{"sched_getaffinity"},
+										Action: rspec.ActNotify,
+										Args:   []rspec.LinuxSeccompArg{},
+									}},
+								}
+								return api.FromOCILinuxSeccomp(&seccomp)
+							}(),
+						)
+					}
+					return a, nil, nil
+				}
+
+				validate = func(_ *mockPlugin, _ *api.ValidateContainerAdjustmentRequest) error {
+					return nil
+				}
+
+				runtime = s.runtime
+				plugins = s.plugins
+				ctx     = context.Background()
+
+				pod = &api.PodSandbox{
+					Id:        "pod0",
+					Name:      "pod0",
+					Uid:       "uid0",
+					Namespace: "default",
+				}
+				ctr0 = &api.Container{
+					Id:           "ctr0",
+					PodSandboxId: "pod0",
+					Name:         "ctr0",
+					State:        api.ContainerState_CONTAINER_CREATED,
+				}
+				ctr1 = &api.Container{
+					Id:           "ctr1",
+					PodSandboxId: "pod0",
+					Name:         "ctr1",
+					State:        api.ContainerState_CONTAINER_CREATED,
+					Linux: &api.LinuxContainer{
+						SeccompProfile: &api.SecurityProfile{
+							ProfileType:  api.SecurityProfile_LOCALHOST,
+							LocalhostRef: "/xyzzy/foobar",
+						},
+					},
+				}
+			)
+
+			plugins[0].createContainer = create
+			plugins[1].validateAdjustment = validate
+			plugins[2].validateAdjustment = validate
+
+			s.Startup()
+			podReq := &api.RunPodSandboxRequest{Pod: pod}
+			Expect(runtime.RunPodSandbox(ctx, podReq)).To(Succeed())
+
+			ctrReq := &api.CreateContainerRequest{
+				Pod:       pod,
+				Container: ctr0,
+			}
+			reply, err := runtime.CreateContainer(ctx, ctrReq)
+			Expect(reply).ToNot(BeNil())
+			Expect(err).To(BeNil())
+
+			ctrReq = &api.CreateContainerRequest{
+				Pod:       pod,
+				Container: ctr1,
+			}
+			reply, err = runtime.CreateContainer(ctx, ctrReq)
+			Expect(err).ToNot(BeNil())
+			Expect(reply).To(BeNil())
+		})
+	})
+
+	When("default validator allows custom seccomp policy adjustment", func() {
+		BeforeEach(func() {
+			s.Prepare(
+				&mockRuntime{
+					options: []nri.Option{
+						nri.WithDefaultValidator(
+							&validator.DefaultValidatorConfig{
+								Enable:                        true,
+								RejectCustomSeccompAdjustment: false,
+							},
+						),
+					},
+				},
+				&mockPlugin{idx: "00", name: "foo"},
+				&mockPlugin{idx: "10", name: "validator1"},
+				&mockPlugin{idx: "20", name: "validator2"},
+			)
+		})
+
+		It("should not reject custom seccomp policy adjustment", func() {
+			var (
+				create = func(_ *mockPlugin, _ *api.PodSandbox, ctr *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
+					a := &api.ContainerAdjustment{}
+					if ctr.GetName() == "ctr1" {
+						a.SetLinuxSeccompPolicy(
+							func() *api.LinuxSeccomp {
+								seccomp := rspec.LinuxSeccomp{
+									DefaultAction: rspec.ActAllow,
+									ListenerPath:  "/run/meshuggah-rocks.sock",
+									Architectures: []rspec.Arch{},
+									Flags:         []rspec.LinuxSeccompFlag{},
+									Syscalls: []rspec.LinuxSyscall{{
+										Names:  []string{"sched_getaffinity"},
+										Action: rspec.ActNotify,
+										Args:   []rspec.LinuxSeccompArg{},
+									}},
+								}
+								return api.FromOCILinuxSeccomp(&seccomp)
+							}(),
+						)
+					}
+					return a, nil, nil
+				}
+
+				validate = func(_ *mockPlugin, _ *api.ValidateContainerAdjustmentRequest) error {
+					return nil
+				}
+
+				runtime = s.runtime
+				plugins = s.plugins
+				ctx     = context.Background()
+
+				pod = &api.PodSandbox{
+					Id:        "pod0",
+					Name:      "pod0",
+					Uid:       "uid0",
+					Namespace: "default",
+				}
+				ctr0 = &api.Container{
+					Id:           "ctr0",
+					PodSandboxId: "pod0",
+					Name:         "ctr0",
+					State:        api.ContainerState_CONTAINER_CREATED,
+				}
+				ctr1 = &api.Container{
+					Id:           "ctr1",
+					PodSandboxId: "pod0",
+					Name:         "ctr1",
+					State:        api.ContainerState_CONTAINER_CREATED,
+					Linux: &api.LinuxContainer{
+						SeccompProfile: &api.SecurityProfile{
+							ProfileType:  api.SecurityProfile_LOCALHOST,
+							LocalhostRef: "/xyzzy/foobar",
+						},
+					},
+				}
+			)
+
+			plugins[0].createContainer = create
+			plugins[1].validateAdjustment = validate
+			plugins[2].validateAdjustment = validate
+
+			s.Startup()
+			podReq := &api.RunPodSandboxRequest{Pod: pod}
+			Expect(runtime.RunPodSandbox(ctx, podReq)).To(Succeed())
+
+			ctrReq := &api.CreateContainerRequest{
+				Pod:       pod,
+				Container: ctr0,
+			}
+			reply, err := runtime.CreateContainer(ctx, ctrReq)
+			Expect(reply).ToNot(BeNil())
+			Expect(err).To(BeNil())
+
+			ctrReq = &api.CreateContainerRequest{
+				Pod:       pod,
+				Container: ctr1,
+			}
+			reply, err = runtime.CreateContainer(ctx, ctrReq)
+			Expect(reply).ToNot(BeNil())
+			Expect(err).To(BeNil())
+		})
+	})
+
+	When("default validator disallows unconfined seccomp policy adjustment", func() {
+		BeforeEach(func() {
+			s.Prepare(
+				&mockRuntime{
+					options: []nri.Option{
+						nri.WithDefaultValidator(
+							&validator.DefaultValidatorConfig{
+								Enable:                            true,
+								RejectUnconfinedSeccompAdjustment: true,
+							},
+						),
+					},
+				},
+				&mockPlugin{idx: "00", name: "foo"},
+				&mockPlugin{idx: "10", name: "validator1"},
+				&mockPlugin{idx: "20", name: "validator2"},
+			)
+		})
+
+		It("should reject unconfined seccomp policy adjustment", func() {
+			var (
+				create = func(_ *mockPlugin, _ *api.PodSandbox, ctr *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
+					a := &api.ContainerAdjustment{}
+					if ctr.GetName() == "ctr1" {
+						a.SetLinuxSeccompPolicy(
+							func() *api.LinuxSeccomp {
+								seccomp := rspec.LinuxSeccomp{
+									DefaultAction: rspec.ActAllow,
+									ListenerPath:  "/run/meshuggah-rocks.sock",
+									Architectures: []rspec.Arch{},
+									Flags:         []rspec.LinuxSeccompFlag{},
+									Syscalls: []rspec.LinuxSyscall{{
+										Names:  []string{"sched_getaffinity"},
+										Action: rspec.ActNotify,
+										Args:   []rspec.LinuxSeccompArg{},
+									}},
+								}
+								return api.FromOCILinuxSeccomp(&seccomp)
+							}(),
+						)
+					}
+					return a, nil, nil
+				}
+
+				validate = func(_ *mockPlugin, _ *api.ValidateContainerAdjustmentRequest) error {
+					return nil
+				}
+
+				runtime = s.runtime
+				plugins = s.plugins
+				ctx     = context.Background()
+
+				pod = &api.PodSandbox{
+					Id:        "pod0",
+					Name:      "pod0",
+					Uid:       "uid0",
+					Namespace: "default",
+				}
+				ctr0 = &api.Container{
+					Id:           "ctr0",
+					PodSandboxId: "pod0",
+					Name:         "ctr0",
+					State:        api.ContainerState_CONTAINER_CREATED,
+				}
+				ctr1 = &api.Container{
+					Id:           "ctr1",
+					PodSandboxId: "pod0",
+					Name:         "ctr1",
+					State:        api.ContainerState_CONTAINER_CREATED,
+					Linux: &api.LinuxContainer{
+						SeccompProfile: &api.SecurityProfile{
+							ProfileType: api.SecurityProfile_UNCONFINED,
+						},
+					},
+				}
+			)
+
+			plugins[0].createContainer = create
+			plugins[1].validateAdjustment = validate
+			plugins[2].validateAdjustment = validate
+
+			s.Startup()
+			podReq := &api.RunPodSandboxRequest{Pod: pod}
+			Expect(runtime.RunPodSandbox(ctx, podReq)).To(Succeed())
+
+			ctrReq := &api.CreateContainerRequest{
+				Pod:       pod,
+				Container: ctr0,
+			}
+			reply, err := runtime.CreateContainer(ctx, ctrReq)
+			Expect(reply).ToNot(BeNil())
+			Expect(err).To(BeNil())
+
+			ctrReq = &api.CreateContainerRequest{
+				Pod:       pod,
+				Container: ctr1,
+			}
+			reply, err = runtime.CreateContainer(ctx, ctrReq)
+			Expect(err).ToNot(BeNil())
+			Expect(reply).To(BeNil())
+		})
+	})
+
+	When("default validator allows unconfined seccomp policy adjustment", func() {
+		BeforeEach(func() {
+			s.Prepare(
+				&mockRuntime{
+					options: []nri.Option{
+						nri.WithDefaultValidator(
+							&validator.DefaultValidatorConfig{
+								Enable:                            true,
+								RejectUnconfinedSeccompAdjustment: false,
+							},
+						),
+					},
+				},
+				&mockPlugin{idx: "00", name: "foo"},
+				&mockPlugin{idx: "10", name: "validator1"},
+				&mockPlugin{idx: "20", name: "validator2"},
+			)
+		})
+
+		It("should not reject unconfined seccomp policy adjustment", func() {
+			var (
+				create = func(_ *mockPlugin, _ *api.PodSandbox, ctr *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
+					a := &api.ContainerAdjustment{}
+					if ctr.GetName() == "ctr1" {
+						a.SetLinuxSeccompPolicy(
+							func() *api.LinuxSeccomp {
+								seccomp := rspec.LinuxSeccomp{
+									DefaultAction: rspec.ActAllow,
+									ListenerPath:  "/run/meshuggah-rocks.sock",
+									Architectures: []rspec.Arch{},
+									Flags:         []rspec.LinuxSeccompFlag{},
+									Syscalls: []rspec.LinuxSyscall{{
+										Names:  []string{"sched_getaffinity"},
+										Action: rspec.ActNotify,
+										Args:   []rspec.LinuxSeccompArg{},
+									}},
+								}
+								return api.FromOCILinuxSeccomp(&seccomp)
+							}(),
+						)
+					}
+					return a, nil, nil
+				}
+
+				validate = func(_ *mockPlugin, _ *api.ValidateContainerAdjustmentRequest) error {
+					return nil
+				}
+
+				runtime = s.runtime
+				plugins = s.plugins
+				ctx     = context.Background()
+
+				pod = &api.PodSandbox{
+					Id:        "pod0",
+					Name:      "pod0",
+					Uid:       "uid0",
+					Namespace: "default",
+				}
+				ctr0 = &api.Container{
+					Id:           "ctr0",
+					PodSandboxId: "pod0",
+					Name:         "ctr0",
+					State:        api.ContainerState_CONTAINER_CREATED,
+				}
+				ctr1 = &api.Container{
+					Id:           "ctr1",
+					PodSandboxId: "pod0",
+					Name:         "ctr1",
+					State:        api.ContainerState_CONTAINER_CREATED,
+					Linux: &api.LinuxContainer{
+						SeccompProfile: &api.SecurityProfile{
+							ProfileType: api.SecurityProfile_UNCONFINED,
+						},
+					},
+				}
+			)
+
+			plugins[0].createContainer = create
+			plugins[1].validateAdjustment = validate
+			plugins[2].validateAdjustment = validate
+
+			s.Startup()
+			podReq := &api.RunPodSandboxRequest{Pod: pod}
+			Expect(runtime.RunPodSandbox(ctx, podReq)).To(Succeed())
+
+			ctrReq := &api.CreateContainerRequest{
+				Pod:       pod,
+				Container: ctr0,
+			}
+			reply, err := runtime.CreateContainer(ctx, ctrReq)
+			Expect(reply).ToNot(BeNil())
+			Expect(err).To(BeNil())
+
+			ctrReq = &api.CreateContainerRequest{
+				Pod:       pod,
+				Container: ctr1,
+			}
+			reply, err = runtime.CreateContainer(ctx, ctrReq)
+			Expect(reply).ToNot(BeNil())
+			Expect(err).To(BeNil())
+		})
+	})
+
+	When("the default validator is enabled and namespace adjustment is disabled", func() {
+		BeforeEach(func() {
+			s.Prepare(
+				&mockRuntime{
+					options: []nri.Option{
+						nri.WithDefaultValidator(
+							&validator.DefaultValidatorConfig{
+								Enable:                    true,
+								RejectNamespaceAdjustment: true,
+							},
+						),
+					},
+				},
+				&mockPlugin{idx: "00", name: "foo"},
+				&mockPlugin{idx: "10", name: "validator1"},
+				&mockPlugin{idx: "20", name: "validator2"},
+			)
+		})
+
+		It("should reject namespace adjustment", func() {
+			var (
+				create = func(_ *mockPlugin, _ *api.PodSandbox, ctr *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
+					a := &api.ContainerAdjustment{}
+					if ctr.GetName() == "ctr1" {
+						a.AddOrReplaceNamespace(
+							&api.LinuxNamespace{
+								Type: "cgroup",
+								Path: "/",
+							},
+						)
+					}
+					return a, nil, nil
+				}
+
+				validate = func(_ *mockPlugin, _ *api.ValidateContainerAdjustmentRequest) error {
+					return nil
+				}
+
+				runtime = s.runtime
+				plugins = s.plugins
+				ctx     = context.Background()
+
+				pod = &api.PodSandbox{
+					Id:        "pod0",
+					Name:      "pod0",
+					Uid:       "uid0",
+					Namespace: "default",
+				}
+				ctr0 = &api.Container{
+					Id:           "ctr0",
+					PodSandboxId: "pod0",
+					Name:         "ctr0",
+					State:        api.ContainerState_CONTAINER_CREATED,
+				}
+				ctr1 = &api.Container{
+					Id:           "ctr1",
+					PodSandboxId: "pod0",
+					Name:         "ctr1",
+					State:        api.ContainerState_CONTAINER_CREATED,
+				}
+			)
+
+			plugins[0].createContainer = create
+			plugins[1].validateAdjustment = validate
+			plugins[2].validateAdjustment = validate
+
+			s.Startup()
+			podReq := &api.RunPodSandboxRequest{Pod: pod}
+			Expect(runtime.RunPodSandbox(ctx, podReq)).To(Succeed())
+
+			ctrReq := &api.CreateContainerRequest{
+				Pod:       pod,
+				Container: ctr0,
+			}
+			reply, err := runtime.CreateContainer(ctx, ctrReq)
+			Expect(reply).ToNot(BeNil())
+			Expect(err).To(BeNil())
+
+			ctrReq = &api.CreateContainerRequest{
+				Pod:       pod,
+				Container: ctr1,
+			}
+			reply, err = runtime.CreateContainer(ctx, ctrReq)
+			Expect(err).ToNot(BeNil())
+			Expect(reply).To(BeNil())
+		})
+	})
+
+	When("the default validator is enabled with some required plugins", func() {
+		const AnnotationDomain = plugin.AnnotationDomain
+		BeforeEach(func() {
+			s.Prepare(
+				&mockRuntime{
+					options: []nri.Option{
+						nri.WithDefaultValidator(
+							&validator.DefaultValidatorConfig{
+								Enable: true,
+								RequiredPlugins: []string{
+									"foo",
+									"bar",
+								},
+								TolerateMissingAnnotation: "tolerate-missing-plugins." + AnnotationDomain,
+							},
+						),
+					},
+				},
+				&mockPlugin{idx: "00", name: "foo"},
+			)
+		})
+
+		It("should not allow container creation if required plugins are missing", func() {
+			var (
+				runtime = s.runtime
+				ctx     = context.Background()
+
+				pod = &api.PodSandbox{
+					Id:        "pod0",
+					Name:      "pod0",
+					Uid:       "uid0",
+					Namespace: "default",
+				}
+			)
+
+			s.Startup()
+			podReq := &api.RunPodSandboxRequest{Pod: pod}
+			Expect(runtime.RunPodSandbox(ctx, podReq)).To(Succeed())
+
+			ctrReq := &api.CreateContainerRequest{
+				Pod: pod,
+				Container: &api.Container{
+					Id:           "ctr0",
+					PodSandboxId: "pod0",
+					Name:         "ctr0",
+					State:        api.ContainerState_CONTAINER_CREATED,
+				},
+			}
+			reply, err := runtime.CreateContainer(ctx, ctrReq)
+			Expect(reply).To(BeNil())
+			Expect(err).ToNot(BeNil())
+		})
+
+		It("should allow container creation, if missing plugins are tolerated", func() {
+			var (
+				runtime = s.runtime
+				ctx     = context.Background()
+
+				pod = &api.PodSandbox{
+					Id:        "pod0",
+					Name:      "pod0",
+					Uid:       "uid0",
+					Namespace: "default",
+					Annotations: map[string]string{
+						"tolerate-missing-plugins." + AnnotationDomain + "/container.ctr0": "true",
+					},
+				}
+			)
+
+			s.Startup()
+			podReq := &api.RunPodSandboxRequest{Pod: pod}
+			Expect(runtime.RunPodSandbox(ctx, podReq)).To(Succeed())
+
+			ctrReq := &api.CreateContainerRequest{
+				Pod: pod,
+				Container: &api.Container{
+					Id:           "ctr0",
+					PodSandboxId: "pod0",
+					Name:         "ctr0",
+					State:        api.ContainerState_CONTAINER_CREATED,
+				},
+			}
+			reply, err := runtime.CreateContainer(ctx, ctrReq)
+			Expect(reply).ToNot(BeNil())
+			Expect(err).To(BeNil())
+		})
+
+		It("should allow container creation if all required plugins are present", func() {
+			var (
+				runtime = s.runtime
+				ctx     = context.Background()
+
+				pod = &api.PodSandbox{
+					Id:        "pod0",
+					Name:      "pod0",
+					Uid:       "uid0",
+					Namespace: "default",
+				}
+			)
+
+			s.Startup()
+			podReq := &api.RunPodSandboxRequest{Pod: pod}
+			Expect(runtime.RunPodSandbox(ctx, podReq)).To(Succeed())
+
+			s.StartPlugins(&mockPlugin{idx: "10", name: "bar"})
+			s.WaitForPluginsToSync(s.plugin("10-bar"))
+
+			ctrReq := &api.CreateContainerRequest{
+				Pod: pod,
+				Container: &api.Container{
+					Id:           "ctr0",
+					PodSandboxId: "pod0",
+					Name:         "ctr0",
+					State:        api.ContainerState_CONTAINER_CREATED,
+				},
+			}
+			reply, err := runtime.CreateContainer(ctx, ctrReq)
+			Expect(reply).ToNot(BeNil())
+			Expect(err).To(BeNil())
+		})
+
+		It("should not allow container creation if annotated required plugins are missing", func() {
+			var (
+				runtime = s.runtime
+				ctx     = context.Background()
+
+				pod = &api.PodSandbox{
+					Id:        "pod0",
+					Name:      "pod0",
+					Uid:       "uid0",
+					Namespace: "default",
+					Annotations: map[string]string{
+						"required-plugins." + AnnotationDomain + "/container.ctr0": "[ \"xyzzy\" ]",
+					},
+				}
+			)
+
+			s.Startup()
+			podReq := &api.RunPodSandboxRequest{Pod: pod}
+			Expect(runtime.RunPodSandbox(ctx, podReq)).To(Succeed())
+
+			s.StartPlugins(&mockPlugin{idx: "10", name: "bar"})
+			s.WaitForPluginsToSync(s.plugin("10-bar"))
+
+			ctrReq := &api.CreateContainerRequest{
+				Pod: pod,
+				Container: &api.Container{
+					Id:           "ctr0",
+					PodSandboxId: "pod0",
+					Name:         "ctr0",
+					State:        api.ContainerState_CONTAINER_CREATED,
+				},
+			}
+			reply, err := runtime.CreateContainer(ctx, ctrReq)
+			Expect(reply).To(BeNil())
+			Expect(err).ToNot(BeNil())
+
+			s.StartPlugins(&mockPlugin{idx: "20", name: "xyzzy"})
+			s.WaitForPluginsToSync(s.plugin("20-xyzzy"))
+
+			ctrReq = &api.CreateContainerRequest{
+				Pod: pod,
+				Container: &api.Container{
+					Id:           "ctr0",
+					PodSandboxId: "pod0",
+					Name:         "ctr0",
+					State:        api.ContainerState_CONTAINER_CREATED,
+				},
+			}
+			reply, err = runtime.CreateContainer(ctx, ctrReq)
+			Expect(reply).ToNot(BeNil())
+			Expect(err).To(BeNil())
+		})
+
 	})
 
 })
@@ -948,26 +2193,27 @@ var _ = Describe("Plugin container updates during creation", func() {
 				s.Startup()
 
 				podReq := &api.RunPodSandboxRequest{Pod: pod0}
-				Expect(runtime.runtime.RunPodSandbox(ctx, podReq)).To(Succeed())
+				Expect(runtime.RunPodSandbox(ctx, podReq)).To(Succeed())
 				ctrReq := &api.CreateContainerRequest{
 					Pod:       pod0,
 					Container: ctr0,
 				}
-				_, err := runtime.runtime.CreateContainer(ctx, ctrReq)
+				_, err := runtime.CreateContainer(ctx, ctrReq)
 				Expect(err).To(BeNil())
 
 				podReq = &api.RunPodSandboxRequest{Pod: pod1}
-				Expect(runtime.runtime.RunPodSandbox(ctx, podReq)).To(Succeed())
+				Expect(runtime.RunPodSandbox(ctx, podReq)).To(Succeed())
 				ctrReq = &api.CreateContainerRequest{
 					Pod:       pod1,
 					Container: ctr1,
 				}
-				reply, err = runtime.runtime.CreateContainer(ctx, ctrReq)
+				reply, err = runtime.CreateContainer(ctx, ctrReq)
 				Expect(err).To(BeNil())
 
 				Expect(len(reply.Update)).To(Equal(1))
 				expected.ContainerId = reply.Update[0].ContainerId
-				Expect(stripUpdate(reply.Update[0])).Should(Equal(stripUpdate(expected)))
+				Expect(protoEqual(reply.Update[0].Strip(), expected.Strip())).Should(BeTrue(),
+					protoDiff(reply.Update[0], expected))
 			},
 
 			Entry("update CPU resources", "resources/cpu",
@@ -1102,28 +2348,29 @@ var _ = Describe("Plugin container updates during creation", func() {
 				s.Startup()
 
 				podReq := &api.RunPodSandboxRequest{Pod: pod0}
-				Expect(runtime.runtime.RunPodSandbox(ctx, podReq)).To(Succeed())
+				Expect(runtime.RunPodSandbox(ctx, podReq)).To(Succeed())
 				ctrReq := &api.CreateContainerRequest{
 					Pod:       pod0,
 					Container: ctr0,
 				}
-				_, err := runtime.runtime.CreateContainer(ctx, ctrReq)
+				_, err := runtime.CreateContainer(ctx, ctrReq)
 				Expect(err).To(BeNil())
 
 				podReq = &api.RunPodSandboxRequest{Pod: pod1}
-				Expect(runtime.runtime.RunPodSandbox(ctx, podReq)).To(Succeed())
+				Expect(runtime.RunPodSandbox(ctx, podReq)).To(Succeed())
 				ctrReq = &api.CreateContainerRequest{
 					Pod:       pod1,
 					Container: ctr1,
 				}
-				reply, err = runtime.runtime.CreateContainer(ctx, ctrReq)
+				reply, err = runtime.CreateContainer(ctx, ctrReq)
 				if which == "both" {
 					Expect(err).ToNot(BeNil())
 				} else {
 					Expect(err).To(BeNil())
 					Expect(len(reply.Update)).To(Equal(1))
 					expected.ContainerId = reply.Update[0].ContainerId
-					Expect(stripUpdate(reply.Update[0])).Should(Equal(stripUpdate(expected)))
+					Expect(protoEqual(reply.Update[0].Strip(), expected.Strip())).Should(BeTrue(),
+						protoDiff(reply.Update[0], expected))
 				}
 			},
 
@@ -1306,12 +2553,12 @@ var _ = Describe("Solicited container updates by plugins", func() {
 				s.Startup()
 
 				podReq := &api.RunPodSandboxRequest{Pod: pod0}
-				Expect(runtime.runtime.RunPodSandbox(ctx, podReq)).To(Succeed())
+				Expect(runtime.RunPodSandbox(ctx, podReq)).To(Succeed())
 				ctrReq := &api.CreateContainerRequest{
 					Pod:       pod0,
 					Container: ctr0,
 				}
-				_, err := runtime.runtime.CreateContainer(ctx, ctrReq)
+				_, err := runtime.CreateContainer(ctx, ctrReq)
 				Expect(err).To(BeNil())
 
 				updReq := &api.UpdateContainerRequest{
@@ -1339,12 +2586,13 @@ var _ = Describe("Solicited container updates by plugins", func() {
 						},
 					},
 				}
-				reply, err = runtime.runtime.UpdateContainer(ctx, updReq)
+				reply, err = runtime.UpdateContainer(ctx, updReq)
 
 				Expect(len(reply.Update)).To(Equal(1))
 				Expect(err).To(BeNil())
 				expected.ContainerId = reply.Update[0].ContainerId
-				Expect(stripUpdate(reply.Update[0])).Should(Equal(stripUpdate(expected)))
+				Expect(protoEqual(reply.Update[0].Strip(), expected.Strip())).Should(BeTrue(),
+					protoDiff(reply.Update[0], expected))
 			},
 
 			Entry("update CPU resources", "resources/cpu",
@@ -1545,12 +2793,12 @@ var _ = Describe("Solicited container updates by plugins", func() {
 				s.Startup()
 
 				podReq := &api.RunPodSandboxRequest{Pod: pod0}
-				Expect(runtime.runtime.RunPodSandbox(ctx, podReq)).To(Succeed())
+				Expect(runtime.RunPodSandbox(ctx, podReq)).To(Succeed())
 				ctrReq := &api.CreateContainerRequest{
 					Pod:       pod0,
 					Container: ctr0,
 				}
-				_, err := runtime.runtime.CreateContainer(ctx, ctrReq)
+				_, err := runtime.CreateContainer(ctx, ctrReq)
 				Expect(err).To(BeNil())
 
 				updReq := &api.UpdateContainerRequest{
@@ -1578,14 +2826,16 @@ var _ = Describe("Solicited container updates by plugins", func() {
 						},
 					},
 				}
-				reply, err = runtime.runtime.UpdateContainer(ctx, updReq)
+				reply, err = runtime.UpdateContainer(ctx, updReq)
 				if which == "both" {
 					Expect(err).ToNot(BeNil())
 				} else {
 					Expect(err).To(BeNil())
 					Expect(len(reply.Update)).To(Equal(1))
 					expected.ContainerId = reply.Update[0].ContainerId
-					Expect(stripUpdate(reply.Update[0])).Should(Equal(stripUpdate(expected)))
+					Expect(protoEqual(reply.Update[0].Strip(), expected.Strip())).Should(BeTrue(),
+						protoDiff(reply.Update[0], expected))
+
 				}
 			},
 
@@ -1834,203 +3084,76 @@ var _ = Describe("Unsolicited container update requests", func() {
 	})
 })
 
-// Notes:
-//
-//	XXX FIXME KLUDGE
-//	Ever since we had to switch from gogo/protobuf to google.golang.org/protobuf
-//	(from the gogo one), we can't turn off sizeCache and a few other generated
-//	unexported fields (or if we can, I failed to figure out so far how). In some
-//	of our test cases this gives a false positive in ginkgo.Expect/Equal combos,
-//	since that also checks unexported fields for equality. As a band-aid work-
-//	around we marshal then unmarshal compared objects in offending test cases to
-//	clear those unexported fields.
-func strip(obj interface{}, ptr interface{}) interface{} {
-	bytes, err := yaml.Marshal(obj)
-	Expect(err).To(BeNil())
-	Expect(yaml.Unmarshal(bytes, ptr)).To(Succeed())
-	return ptr
+var _ = Describe("Plugin configuration request", func() {
+	var (
+		s = &Suite{}
+	)
+
+	AfterEach(func() {
+		s.Cleanup()
+	})
+
+	BeforeEach(func() {
+		s.Prepare(&mockRuntime{}, &mockPlugin{idx: "00", name: "test"})
+	})
+
+	It("should pass runtime version information to plugins", func() {
+		var (
+			runtimeName    = "test-runtime"
+			runtimeVersion = "1.2.3"
+		)
+
+		s.runtime.name = runtimeName
+		s.runtime.version = runtimeVersion
+
+		s.Startup()
+
+		Expect(s.plugins[0].RuntimeName()).To(Equal(runtimeName))
+		Expect(s.plugins[0].RuntimeVersion()).To(Equal(runtimeVersion))
+	})
+
+	When("unchanged", func() {
+		It("should pass default timeout information to plugins", func() {
+			var (
+				registerTimeout = nri.DefaultPluginRegistrationTimeout
+				requestTimeout  = nri.DefaultPluginRequestTimeout
+			)
+
+			s.Startup()
+			Expect(s.plugins[0].stub.RegistrationTimeout()).To(Equal(registerTimeout))
+			Expect(s.plugins[0].stub.RequestTimeout()).To(Equal(requestTimeout))
+		})
+	})
+
+	When("reconfigured", func() {
+		var (
+			registerTimeout = nri.DefaultPluginRegistrationTimeout + 5*time.Millisecond
+			requestTimeout  = nri.DefaultPluginRequestTimeout + 7*time.Millisecond
+		)
+
+		BeforeEach(func() {
+			nri.SetPluginRegistrationTimeout(registerTimeout)
+			nri.SetPluginRequestTimeout(requestTimeout)
+			s.Prepare(&mockRuntime{}, &mockPlugin{idx: "00", name: "test"})
+		})
+
+		AfterEach(func() {
+			nri.SetPluginRegistrationTimeout(nri.DefaultPluginRegistrationTimeout)
+			nri.SetPluginRequestTimeout(nri.DefaultPluginRequestTimeout)
+		})
+
+		It("should pass configured timeout information to plugins", func() {
+			s.Startup()
+			Expect(s.plugins[0].stub.RegistrationTimeout()).To(Equal(registerTimeout))
+			Expect(s.plugins[0].stub.RequestTimeout()).To(Equal(requestTimeout))
+		})
+	})
+})
+
+func protoDiff(a, b proto.Message) string {
+	return cmp.Diff(a, b, protocmp.Transform())
 }
 
-func stripAdjustment(a *api.ContainerAdjustment) *api.ContainerAdjustment {
-	stripAnnotations(a)
-	stripMounts(a)
-	stripEnv(a)
-	stripHooks(a)
-	stripRlimits(a)
-	stripLinuxAdjustment(a)
-	return a
-}
-
-func stripAnnotations(a *api.ContainerAdjustment) {
-	if len(a.Annotations) == 0 {
-		a.Annotations = nil
-	}
-}
-
-func stripMounts(a *api.ContainerAdjustment) {
-	if len(a.Mounts) == 0 {
-		a.Mounts = nil
-	}
-}
-
-func stripEnv(a *api.ContainerAdjustment) {
-	if len(a.Env) == 0 {
-		a.Env = nil
-	}
-}
-
-func stripHooks(a *api.ContainerAdjustment) {
-	if a.Hooks == nil {
-		return
-	}
-	switch {
-	case len(a.Hooks.Prestart) > 0:
-	case len(a.Hooks.CreateRuntime) > 0:
-	case len(a.Hooks.CreateContainer) > 0:
-	case len(a.Hooks.StartContainer) > 0:
-	case len(a.Hooks.Poststart) > 0:
-	case len(a.Hooks.Poststop) > 0:
-	default:
-		a.Hooks = nil
-	}
-}
-
-func stripRlimits(a *api.ContainerAdjustment) {
-	if len(a.Rlimits) == 0 {
-		a.Rlimits = nil
-	}
-}
-
-func stripLinuxAdjustment(a *api.ContainerAdjustment) {
-	if a.Linux == nil {
-		return
-	}
-	stripLinuxDevices(a)
-	a.Linux.Resources = stripLinuxResources(a.Linux.Resources)
-	if a.Linux.Devices == nil && a.Linux.Resources == nil && a.Linux.CgroupsPath == "" {
-		a.Linux = nil
-	}
-}
-
-func stripLinuxDevices(a *api.ContainerAdjustment) {
-	if len(a.Linux.Devices) == 0 {
-		a.Linux.Devices = nil
-	}
-}
-
-func stripLinuxResources(r *api.LinuxResources) *api.LinuxResources {
-	if r == nil {
-		return nil
-	}
-
-	r.Memory = stripLinuxResourcesMemory(r.Memory)
-	r.Cpu = stripLinuxResourcesCpu(r.Cpu)
-	r.HugepageLimits = stripLinuxResourcesHugepageLimits(r.HugepageLimits)
-	r.Unified = stripLinuxResourcesUnified(r.Unified)
-
-	switch {
-	case r.Memory != nil:
-		return r
-	case r.Cpu != nil:
-		return r
-	case r.HugepageLimits != nil:
-		return r
-	case r.Unified != nil:
-		return r
-	case r.BlockioClass.GetValue() != "":
-		return r
-	case r.RdtClass.GetValue() != "":
-		return r
-	}
-
-	return nil
-}
-
-func stripLinuxResourcesMemory(m *api.LinuxMemory) *api.LinuxMemory {
-	if m == nil {
-		return nil
-	}
-	switch {
-	case m.Limit.GetValue() != 0:
-		return m
-	case m.Reservation.GetValue() != 0:
-		return m
-	case m.Swap.GetValue() != 0:
-		return m
-	case m.Kernel.GetValue() != 0:
-		return m
-	case m.KernelTcp.GetValue() != 0:
-		return m
-	case m.Swappiness.GetValue() != 0:
-		return m
-	case m.DisableOomKiller.GetValue():
-		return m
-	case m.UseHierarchy.GetValue():
-		return m
-	}
-	return nil
-}
-
-func stripLinuxResourcesCpu(c *api.LinuxCPU) *api.LinuxCPU {
-	if c == nil {
-		return nil
-	}
-	switch {
-	case c.Shares.GetValue() != 0:
-		return c
-	case c.Quota.GetValue() != 0:
-		return c
-	case c.Period.GetValue() != 0:
-		return c
-	case c.RealtimeRuntime.GetValue() != 0:
-		return c
-	case c.RealtimePeriod.GetValue() != 0:
-		return c
-	case c.Cpus != "":
-		return c
-	case c.Mems != "":
-		return c
-	}
-	return nil
-}
-
-func stripLinuxResourcesHugepageLimits(l []*api.HugepageLimit) []*api.HugepageLimit {
-	if len(l) == 0 {
-		return nil
-	}
-	return l
-}
-
-func stripLinuxResourcesUnified(u map[string]string) map[string]string {
-	if len(u) == 0 {
-		return nil
-	}
-	return u
-}
-
-func stripUpdate(u *api.ContainerUpdate) *api.ContainerUpdate {
-	if u == nil {
-		return nil
-	}
-
-	u.Linux = stripUpdateLinux(u.Linux)
-	if u.ContainerId == "" && u.Linux == nil && !u.IgnoreFailure {
-		return nil
-	}
-
-	return u
-}
-
-func stripUpdateLinux(l *api.LinuxContainerUpdate) *api.LinuxContainerUpdate {
-	if l == nil {
-		return nil
-	}
-
-	r := stripLinuxResources(l.Resources)
-	if r == nil {
-		return l
-	}
-	l.Resources = r
-
-	return l
+func protoEqual(a, b proto.Message) bool {
+	return cmp.Equal(a, b, cmpopts.EquateEmpty(), protocmp.Transform())
 }
