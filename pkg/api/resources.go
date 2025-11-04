@@ -22,6 +22,10 @@ import (
 	rspec "github.com/opencontainers/runtime-spec/specs-go"
 )
 
+const (
+	UnlimitedPidsLimit = 0
+)
+
 // FromOCILinuxResources returns resources from an OCI runtime Spec.
 func FromOCILinuxResources(o *rspec.LinuxResources, _ map[string]string) *LinuxResources {
 	if o == nil {
@@ -67,8 +71,11 @@ func FromOCILinuxResources(o *rspec.LinuxResources, _ map[string]string) *LinuxR
 		})
 	}
 	if p := o.Pids; p != nil {
-		l.Pids = &LinuxPids{
-			Limit: p.Limit,
+		l.Pids = &LinuxPids{}
+		if p.Limit != nil {
+			l.Pids.Limit = *p.Limit
+		} else {
+			l.Pids.Limit = UnlimitedPidsLimit
 		}
 	}
 	if len(o.Unified) != 0 {
@@ -134,8 +141,10 @@ func (r *LinuxResources) ToOCI() *rspec.LinuxResources {
 		})
 	}
 	if r.Pids != nil {
-		o.Pids = &rspec.LinuxPids{
-			Limit: r.Pids.Limit,
+		o.Pids = &rspec.LinuxPids{}
+		if r.Pids.Limit > UnlimitedPidsLimit {
+			limit := r.Pids.Limit
+			o.Pids.Limit = &limit
 		}
 	}
 	return o
