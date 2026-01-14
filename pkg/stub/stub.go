@@ -282,30 +282,40 @@ func WithLogger(logger nrilog.Logger) Option {
 	}
 }
 
+// WithRequiredCapabilities sets the capabilities the plugin requires from the runtime.
+func WithRequiredCapabilities(required api.CapabilityMask) Option {
+	return func(s *stub) error {
+		mask := required.Clone()
+		s.capabilities = &mask
+		return nil
+	}
+}
+
 // stub implements Stub.
 type stub struct {
 	sync.Mutex
-	plugin     interface{}
-	handlers   handlers
-	events     api.EventMask
-	name       string
-	idx        string
-	socketPath string
-	dialer     func(string) (stdnet.Conn, error)
-	conn       stdnet.Conn
-	onClose    func()
-	serverOpts []ttrpc.ServerOpt
-	clientOpts []ttrpc.ClientOpts
-	rpcm       multiplex.Mux
-	rpcl       stdnet.Listener
-	rpcs       *ttrpc.Server
-	rpcc       *ttrpc.Client
-	runtime    api.RuntimeService
-	started    bool
-	doneC      chan struct{}
-	srvErrC    chan error
-	cfgErrC    chan error
-	syncReq    *api.SynchronizeRequest
+	plugin       interface{}
+	handlers     handlers
+	events       api.EventMask
+	name         string
+	idx          string
+	socketPath   string
+	dialer       func(string) (stdnet.Conn, error)
+	conn         stdnet.Conn
+	onClose      func()
+	serverOpts   []ttrpc.ServerOpt
+	clientOpts   []ttrpc.ClientOpts
+	capabilities *api.CapabilityMask
+	rpcm         multiplex.Mux
+	rpcl         stdnet.Listener
+	rpcs         *ttrpc.Server
+	rpcc         *ttrpc.Client
+	runtime      api.RuntimeService
+	started      bool
+	doneC        chan struct{}
+	srvErrC      chan error
+	cfgErrC      chan error
+	syncReq      *api.SynchronizeRequest
 
 	registrationTimeout time.Duration
 	requestTimeout      time.Duration
@@ -630,6 +640,20 @@ func (stub *stub) connClosed() {
 	}
 }
 
+// Verify runtime supported capabilities against plugin requirements.
+func (stub *stub) verifyCapabilities(supported api.CapabilityMask) error {
+	if stub.capabilities == nil {
+		return nil
+	}
+
+	if !stub.capabilities.IsSubsetOf(supported) {
+		missing := stub.capabilities.Difference(supported)
+		return fmt.Errorf("runtime lacks required capabilities %s", missing.String())
+	}
+
+	return nil
+}
+
 //
 // plugin event and request handlers
 //
@@ -678,6 +702,11 @@ func (stub *stub) Configure(ctx context.Context, req *api.ConfigureRequest) (rpl
 	defer func() {
 		stub.cfgErrC <- retErr
 	}()
+
+	if err := stub.verifyCapabilities(req.Capabilities); err != nil {
+		stub.logger.Errorf(ctx, "Plugin capability verification failed: %v", err)
+		return nil, err
+	}
 
 	if handler := stub.handlers.Configure; handler == nil {
 		events = stub.events
