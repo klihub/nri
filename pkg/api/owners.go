@@ -53,11 +53,6 @@ func (o *OwningPlugins) HooksOwner(id string) (string, bool) {
 	return o.OciHooksOwner(id)
 }
 
-// Deprecated: Use ClearOciHooks
-func (o *OwningPlugins) ClearHooks(id, plugin string) {
-	o.ClearOciHooks(id, plugin)
-}
-
 // Note: ClearRdt is a handwritten function as it did not match the pattern
 // used to generate the rest of the functions.
 
