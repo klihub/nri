@@ -74,6 +74,10 @@ var compoundKeys = map[string]string{
 	"LinuxNetDevices": "path",
 }
 
+var accumulatedOwnersFields = map[string]bool{
+	"OciHooks": true,
+}
+
 func main() {
 	var flags flag.FlagSet
 	flags.StringVar(&ownersGoFilename, "file", "owners_generated.go", "output filename for owner functions")
@@ -148,6 +152,7 @@ func generateOwnerFuncs(g *protogen.GeneratedFile, fieldEnum *protogen.Enum) {
 			fieldName = override
 		}
 
+		isAccumulated := accumulatedOwnersFields[originalFieldName]
 		isCompound := compoundFields[originalFieldName]
 		keyName := compoundKeys[originalFieldName]
 
@@ -196,7 +201,12 @@ func generateOwnerFuncs(g *protogen.GeneratedFile, fieldEnum *protogen.Enum) {
 
 			// FieldOwners.Claim<Field>
 			g.P("func (f *FieldOwners) Claim", fieldName, "(plugin string) error {")
-			g.P("    return f.claimSimple(Field_", originalFieldName, ".Key(), plugin)")
+			if isAccumulated {
+				g.P("    f.accumulateSimple(Field_", originalFieldName, ".Key(), plugin)")
+				g.P("    return nil")
+			} else {
+				g.P("    return f.claimSimple(Field_", originalFieldName, ".Key(), plugin)")
+			}
 			g.P("}")
 			g.P()
 
@@ -213,10 +223,12 @@ func generateOwnerFuncs(g *protogen.GeneratedFile, fieldEnum *protogen.Enum) {
 			g.P()
 
 			// OwningPlugins.Clear<Field>
-			g.P("func (o *OwningPlugins) Clear", fieldName, "(id, plugin string) {")
-			g.P("	o.mustOwnersFor(id).Clear", fieldName, "(plugin)")
-			g.P("}")
-			g.P()
+			if !isAccumulated {
+				g.P("func (o *OwningPlugins) Clear", fieldName, "(id, plugin string) {")
+				g.P("	o.mustOwnersFor(id).Clear", fieldName, "(plugin)")
+				g.P("}")
+				g.P()
+			}
 
 			// FieldOwners.Clear<Field>
 			g.P("func (f *FieldOwners) Clear", fieldName, "(plugin string) {")

@@ -74,7 +74,8 @@ func (o *OwningPlugins) ClaimOciHooks(id, plugin string) error {
 }
 
 func (f *FieldOwners) ClaimOciHooks(plugin string) error {
-	return f.claimSimple(Field_OciHooks.Key(), plugin)
+	f.accumulateSimple(Field_OciHooks.Key(), plugin)
+	return nil
 }
 
 func (o *OwningPlugins) OciHooksOwner(id string) (string, bool) {
@@ -83,10 +84,6 @@ func (o *OwningPlugins) OciHooksOwner(id string) (string, bool) {
 
 func (f *FieldOwners) OciHooksOwner() (string, bool) {
 	return f.simpleOwner(Field_OciHooks.Key())
-}
-
-func (o *OwningPlugins) ClearOciHooks(id, plugin string) {
-	o.mustOwnersFor(id).ClearOciHooks(plugin)
 }
 
 func (f *FieldOwners) ClearOciHooks(plugin string) {
