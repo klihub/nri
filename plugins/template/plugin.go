@@ -36,6 +36,8 @@ type config struct {
 type plugin struct {
 	stub stub.Stub
 	mask stub.EventMask
+	pods map[string]*api.PodSandbox
+	ctrs map[string]*api.Container
 }
 
 var (
@@ -63,6 +65,16 @@ func (p *plugin) Configure(_ context.Context, config, runtime, version string) (
 func (p *plugin) Synchronize(_ context.Context, pods []*api.PodSandbox, containers []*api.Container) ([]*api.ContainerUpdate, error) {
 	log.Infof("Synchronized state with the runtime (%d pods, %d containers)...",
 		len(pods), len(containers))
+
+	if p.pods != nil {
+		for _, pod := range pods {
+			p.pods[pod.GetId()] = pod
+		}
+		for _, ctr := range containers {
+			p.ctrs[ctr.GetId()] = ctr
+		}
+	}
+
 	return nil, nil
 }
 
@@ -72,6 +84,12 @@ func (p *plugin) Shutdown(_ context.Context) {
 
 func (p *plugin) RunPodSandbox(_ context.Context, pod *api.PodSandbox) error {
 	log.Infof("Started pod %s/%s...", pod.GetNamespace(), pod.GetName())
+
+	if p.pods != nil {
+		p.pods[pod.GetId()] = pod
+		log.Infof("Tracking %d pods...", len(p.pods))
+	}
+
 	return nil
 }
 
@@ -82,11 +100,17 @@ func (p *plugin) StopPodSandbox(_ context.Context, pod *api.PodSandbox) error {
 
 func (p *plugin) RemovePodSandbox(_ context.Context, pod *api.PodSandbox) error {
 	log.Infof("Removed pod %s/%s...", pod.GetNamespace(), pod.GetName())
+
+	if p.pods != nil {
+		delete(p.pods, pod.GetId())
+		log.Infof("Tracking %d pods...", len(p.pods))
+	}
+
 	return nil
 }
 
 func (p *plugin) CreateContainer(_ context.Context, pod *api.PodSandbox, ctr *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
-	log.Infof("Creating container %s/%s/%s...", pod.GetNamespace(), pod.GetName(), ctr.GetName())
+	log.Infof("Creating container %s/%s/%s (%s)...", pod.GetNamespace(), pod.GetName(), ctr.GetName(), ctr.GetId())
 
 	//
 	// This is the container creation request handler. Because the container
@@ -103,11 +127,21 @@ func (p *plugin) CreateContainer(_ context.Context, pod *api.PodSandbox, ctr *ap
 	adjustment := &api.ContainerAdjustment{}
 	updates := []*api.ContainerUpdate{}
 
+	if p.ctrs != nil {
+		p.ctrs[ctr.GetId()] = ctr
+		log.Infof("Tracking %d containers...", len(p.ctrs))
+	}
+
 	return adjustment, updates, nil
 }
 
 func (p *plugin) PostCreateContainer(_ context.Context, pod *api.PodSandbox, ctr *api.Container) error {
-	log.Infof("Created container %s/%s/%s...", pod.GetNamespace(), pod.GetName(), ctr.GetName())
+	log.Infof("PostCreate container %s/%s/%s...", pod.GetNamespace(), pod.GetName(), ctr.GetName())
+
+	if p.ctrs != nil {
+		p.ctrs[ctr.GetId()] = ctr
+	}
+
 	return nil
 }
 
@@ -156,7 +190,13 @@ func (p *plugin) StopContainer(_ context.Context, pod *api.PodSandbox, ctr *api.
 }
 
 func (p *plugin) RemoveContainer(_ context.Context, pod *api.PodSandbox, ctr *api.Container) error {
-	log.Infof("Removed container %s/%s/%s...", pod.GetNamespace(), pod.GetName(), ctr.GetName())
+	log.Infof("Removed container %s/%s/%s (%s)...", pod.GetNamespace(), pod.GetName(), ctr.GetName(), ctr.GetId())
+
+	if p.ctrs != nil {
+		delete(p.ctrs, ctr.GetId())
+		log.Infof("Tracking %d containers...", len(p.ctrs))
+	}
+
 	return nil
 }
 
@@ -170,6 +210,7 @@ func main() {
 		pluginName string
 		pluginIdx  string
 		socketPath string
+		trackPods  bool
 		err        error
 	)
 
@@ -181,6 +222,7 @@ func main() {
 	flag.StringVar(&pluginName, "name", "", "plugin name to register to NRI")
 	flag.StringVar(&pluginIdx, "idx", "", "plugin index to register to NRI")
 	flag.StringVar(&socketPath, "socket", "", "path to the plugin socket")
+	flag.BoolVar(&trackPods, "track-pods", false, "track pods and containers")
 	flag.Parse()
 
 	p := &plugin{}
@@ -195,6 +237,10 @@ func main() {
 	}
 	if socketPath != "" {
 		opts = append(opts, stub.WithSocketPath(socketPath))
+	}
+	if trackPods {
+		p.pods = make(map[string]*api.PodSandbox)
+		p.ctrs = make(map[string]*api.Container)
 	}
 
 	if p.stub, err = stub.New(p, opts...); err != nil {
