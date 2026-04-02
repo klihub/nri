@@ -73,6 +73,8 @@ type DefaultValidator struct {
 const (
 	// RequiredPlugins is the annotation key for extra required plugins.
 	RequiredPlugins = plugin.RequiredPluginsAnnotation
+
+	CDIRequiredPlugins = "cdi.k8s.io/required-plugins"
 )
 
 var (
@@ -256,6 +258,14 @@ func (v *DefaultValidator) validateRequiredPlugins(req *api.ValidateContainerAdj
 	}
 
 	if value, ok := plugin.GetEffectiveAnnotation(req.GetPod(), RequiredPlugins, container); ok {
+		var annotated []string
+		if err := yaml.Unmarshal([]byte(value), &annotated); err != nil {
+			return fmt.Errorf("invalid %s annotation %q: %w", RequiredPlugins, value, err)
+		}
+		required = append(required, annotated...)
+	}
+
+	if value, ok := req.GetContainer().GetAnnotations()[CDIRequiredPlugins]; ok {
 		var annotated []string
 		if err := yaml.Unmarshal([]byte(value), &annotated); err != nil {
 			return fmt.Errorf("invalid %s annotation %q: %w", RequiredPlugins, value, err)
