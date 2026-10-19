@@ -849,6 +849,66 @@ flags, which follow `critest` naming:
 | `-nri-test.scale-terminal` | `PostStartContainer` | stage a burst is measured to: `StartContainer`, the runtime asking before it starts a container, or `PostStartContainer`, being told it has started. They answer different questions; anything else is refused |
 | `-nri-test.scale-report` | none | write the raw per-pod timing table here as JSON, so a distribution can be plotted without re-running the burst; iterations after the first get the iteration number appended |
 | `-nri-test.scale-driver` | cri | what creates a scalability burst: `cri` drives the runtime directly, so every operation has client-side timing too and kubelet must be stopped; `k8s` scales a ReplicaSet, which needs kubelet running. The two have opposite kubelet requirements and a typo is refused rather than defaulted |
+| `-nri-test.scale-plugins` | 1 | plugins kept registered during a scalability burst, the recorder (index 00) included. Plugins 01 and up simulate real plugins: they subscribe and take time to answer, and NRI calls them in index order |
+| `-nri-test.scale-events` | every hook but `ValidateContainerAdjustment` | events the simulated plugins subscribe to, as `[INDEX=]EVENT,EVENT...`; repeatable. Without an index it applies to every simulated plugin. The recorder's events are fixed |
+| `-nri-test.scale-delay` | none | simulated processing time per event, as `DURATION` (every event) or `[INDEX/]EVENT=DURATION`, comma separated and repeatable; later entries win and `all` names every event. E.g. `50ms`, or `CreateContainer=200ms,StopContainer=200ms`. Any form without an index covers the simulated plugins only; naming index 0, the recorder, with a non-zero delay is refused |
+| `-nri-test.scale-delay-file` | none | the same, as a YAML file of named delay profiles: see [Delay profiles](#delay-profiles). Repeatable, and interleaved with `-nri-test.scale-delay` in the order given |
+
+### Delay profiles
+
+`-nri-test.scale-delay-file` says the same thing as repeated
+`-nri-test.scale-delay` items, in one file that can be named, committed and
+quoted back by a plot. It adds no new simulated behaviour: a profile is a set
+of fixed per-event durations, with no jitter, distribution or error injection.
+
+```yaml
+profiles:
+  slow-policy:
+    CreateContainer: 50ms
+    StopContainer: 50ms
+  chatty:
+    RunPodSandbox: 5ms
+    PostStartContainer: 2ms
+plugins:
+  1: slow-policy
+  2: chatty
+  "*": chatty
+```
+
+`profiles` is keyed by profile name, each profile mapping NRI hook names to
+durations. An event a profile does not name is not delayed by it, so a profile
+states what a plugin spends time on and nothing about the rest. `plugins` maps
+a plugin index to the profile it simulates; `"*"` covers the simulated plugins
+the mapping does not name explicitly, and never the recorder. A profile that is
+defined and never named is not an error, so one file can hold a library of them.
+
+Both delay flags append to one list in the order they were given, and a file
+expands into the same rules an inline item does, so **later wins, per plugin
+and per event**. Overrides therefore merge rather than replace: a later source
+changes only the pairs it names and leaves the rest of a plugin's profile
+standing, and an explicit `0s` clears one pair. That is the whole precedence
+rule for both flags together.
+
+What is refused, rather than accepted and quietly ignored: an unknown hook
+name, a duration that does not parse or is negative, a plugin index that does
+not exist, a mapping naming a profile the file does not define, a `plugins`
+section that is missing or empty, `"*"` in a run that has no simulated plugins,
+and any unknown key -- the file is decoded strictly, so `plugin:` written for
+`plugins:` fails loudly instead of delaying nothing while the run still
+produces numbers.
+
+The recorder is never delayed. Its own cost is part of what the run measures,
+so naming index 0 with a non-zero delay is an error and every wildcard form
+skips it.
+
+`ScalePlan.Describe()` names the profile in each plugin's line, and the
+scalability report carries those lines, so a plot can group runs by profile
+name without parsing durations:
+
+    plugin 01 (slow-policy, 13 events): delays CreateContainer=50ms StopContainer=50ms
+
+`hack/run-nri-test.sh` copies each file to the node next to the test binary and
+rewrites the path it passes, since the suite runs there.
 
 ### What `Setup` does before any test runs
 

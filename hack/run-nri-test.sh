@@ -391,6 +391,70 @@ scp "${ssh_opts[@]}" "$top_dir/build/bin/nri-test" "$NODE:$REMOTE_BIN" || {
     exit 1
 }
 
+# Copies every -nri-test.scale-delay-file to the node and rewrites its path
+# into suite_args, which the launch below passes instead of "$@": the suite
+# runs on the node and cannot see a local path. Remote names derive from
+# $REMOTE_BIN, so they stay within the characters the unquoted remote command
+# line allows, and are left behind like the binary.
+shipped_delay_file=""
+delay_files_sent=0
+
+# ship_delay_file copies one delay-profile file to the node and sets
+# shipped_delay_file to its path there.
+ship_delay_file() {
+    local src="$1"
+
+    if [ ! -f "$src" ]; then
+        # This exit is why the path is assigned and not printed: inside $(...)
+        # it would end only the subshell and the run would go on.
+        echo "ERROR: -nri-test.scale-delay-file $src does not exist or is not a file" >&2
+        exit 1
+    fi
+
+    delay_files_sent=$((delay_files_sent + 1))
+    shipped_delay_file="$REMOTE_BIN.delays.$delay_files_sent.yaml"
+
+    echo "--- copying $src to $NODE:$shipped_delay_file"
+    scp "${ssh_opts[@]}" "$src" "$NODE:$shipped_delay_file" || {
+        echo "ERROR: copying $src to $NODE:$shipped_delay_file failed" >&2
+        exit 1
+    }
+}
+
+delay_file_flag="-nri-test.scale-delay-file"
+suite_args=()
+want_delay_file=""
+
+for arg in "$@"; do
+    if [ -n "$want_delay_file" ]; then
+        want_delay_file=""
+
+        ship_delay_file "$arg"
+        suite_args+=("$shipped_delay_file")
+
+        continue
+    fi
+
+    case "$arg" in
+    "$delay_file_flag="*)
+        ship_delay_file "${arg#"$delay_file_flag"=}"
+        suite_args+=("$delay_file_flag=$shipped_delay_file")
+        ;;
+    "$delay_file_flag")
+        want_delay_file=yes
+        suite_args+=("$arg")
+        ;;
+    *)
+        suite_args+=("$arg")
+        ;;
+    esac
+done
+
+if [ -n "$want_delay_file" ]; then
+    echo "ERROR: $delay_file_flag was given with no path after it" >&2
+    exit 1
+fi
+
 # flag_value NAME ARGS... prints the value of -nri-test.NAME among ARGS, in
 # either the -flag=value or the -flag value spelling, or nothing if it is
 # absent. The suite's own flags are read here rather than mirrored into another
@@ -556,7 +620,7 @@ fi
 echo "--- running nri-test (handler: ${handler:-<runtime default>})"
 rc=0
 suite_launched=yes
-on_node_tty sudo "$REMOTE_BIN" "${args[@]}" "$@" &
+on_node_tty sudo "$REMOTE_BIN" "${args[@]}" "${suite_args[@]}" &
 suite_pid=$!
 wait "$suite_pid" || rc=$?
 suite_pid=""
