@@ -177,6 +177,18 @@ bash hack/run-nri-test.sh '' -test.run=TestSmoke
 # Kubernetes mode: workloads become pods, so kubelet has to stay up. The
 # script works that out from DRIVER and leaves kubelet alone.
 DRIVER=k8s bash hack/run-nri-test.sh runc
+
+# A CRI burst. Always restrict a scalability run with -test.run: a burst
+# leaves kubelet's requirements different from the conformance tests', and
+# running both in one invocation gets one of them wrong.
+bash hack/run-nri-test.sh '' -test.run=TestScalability \
+  -nri-test.scale-replicas=10
+
+# A ReplicaSet burst, which needs kubelet UP. The script works that out from
+# these flags by itself -- do NOT add DRIVER=k8s, which would also switch
+# every conformance test to the Kubernetes driver.
+bash hack/run-nri-test.sh '' -test.run=TestScalability \
+  -nri-test.scale-driver=k8s -nri-test.scale-replicas=5
 ```
 
 The script builds with `CGO_ENABLED=0`, copies the binary to the node, stops
@@ -244,7 +256,9 @@ test/nri-test/
     |-- ordering_test.go      multi-plugin invocation order by index
     |-- adjust_test.go        five creation adjustments, spec and kernel
     |-- input_test.go         the NRI input surface, per field and tier
-    `-- generate_test.go      adjustment merge semantics, mock arm only
+    |-- generate_test.go      adjustment merge semantics, mock arm only
+    |-- scale_test.go         a CRI pod burst, up and down, with a ladder
+    `-- scale_k8s_test.go     the same burst as a ReplicaSet
 ```
 
 ## Architecture
@@ -823,12 +837,18 @@ flags, which follow `critest` naming:
 | `-nri-test.keep-artifacts` | false | skip cleanup for debugging |
 | `-nri-test.timeout` | 30s | per-operation timeout |
 | `-nri-test.collect-failures` | false | collect expectation failures into an end-of-run summary instead of failing at the first; the run still exits non-zero if anything was collected |
-| `-nri-test.driver` | cri | what creates the tests' workloads: `cri` (needs kubelet stopped), `k8s` (pods through the API server, needs kubelet running) or `mock` (pkg/adaptation, no runtime and no root) |
+| `-nri-test.driver` | cri | what creates the tests' workloads: `cri` (needs kubelet stopped), `k8s` (pods through the API server, needs kubelet running) or `mock` (pkg/adaptation, no runtime and no root; conformance only, a burst needs a real runtime) |
 | `-nri-test.cri-namespaces` | k8s | namespace options the `cri` driver creates pods with: `k8s` sends what kubelet sends (network and IPC per pod, a PID namespace per container), `cri` sends none, so cri-api's zero values share one PID namespace per pod. The `k8s` driver is not affected |
 | `-nri-test.k8s-node` | this host | node the k8s driver places pods on |
-| `-nri-test.kubeconfig` | client-go rules | kubeconfig for the k8s driver |
+| `-nri-test.kubeconfig` | client-go rules | kubeconfig for the k8s driver or a scalability run |
 | `-nri-test.allow-kubelet` | false | run even though a kubelet process is present; its sandbox garbage collection may remove this run's pods mid-test |
 | `-nri-test.runtime-handler` | empty | CRI runtime handler, and so the low-level runtime, to create pods with; empty means the runtime's own default. One handler per run |
+| `-nri-test.scale-replicas` | 0 | replica count a scalability burst scales to; 0 skips the scalability test entirely, which is what an ordinary conformance run wants |
+| `-nri-test.scale-iterations` | 1 | how many bursts to measure |
+| `-nri-test.scale-settle` | 2m | how long to wait for one direction of a burst before reporting what arrived; a window that closes early reports a lower bound |
+| `-nri-test.scale-terminal` | `PostStartContainer` | stage a burst is measured to: `StartContainer`, the runtime asking before it starts a container, or `PostStartContainer`, being told it has started. They answer different questions; anything else is refused |
+| `-nri-test.scale-report` | none | write the raw per-pod timing table here as JSON, so a distribution can be plotted without re-running the burst; iterations after the first get the iteration number appended |
+| `-nri-test.scale-driver` | cri | what creates a scalability burst: `cri` drives the runtime directly, so every operation has client-side timing too and kubelet must be stopped; `k8s` scales a ReplicaSet, which needs kubelet running. The two have opposite kubelet requirements and a typo is refused rather than defaulted |
 
 ### What `Setup` does before any test runs
 

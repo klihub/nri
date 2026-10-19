@@ -180,6 +180,70 @@ type EventQ struct {
 	mu      sync.Mutex
 	q       []*Event
 	changed chan struct{}
+
+	// trackCost makes Add record how long each event took to reach the queue.
+	// Off by default: it is only wanted by the scalability measurement, which
+	// has to be able to say how much of what it measured was its own cost.
+	// TestPlugin.Capture is off by default for the same reason: this burst is
+	// timed by the hooks of the same plugin that can retain their payloads.
+	trackCost bool
+	costs     []time.Duration
+}
+
+// Grow reserves room for n more events.
+//
+// The scalability measurement calls this before a burst. Add runs inside NRI
+// callbacks, which the runtime waits for, so an append that reallocates adds
+// its cost to the latency being measured.
+func (q *EventQ) Grow(n int) {
+	if q == nil || n <= 0 {
+		return
+	}
+
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	q.q = slices.Grow(q.q, n)
+
+	if q.trackCost {
+		q.costs = slices.Grow(q.costs, n)
+	}
+}
+
+// TrackCost turns per-event cost recording on or off, and reserves room for n
+// samples.
+func (q *EventQ) TrackCost(on bool, n int) {
+	if q == nil {
+		return
+	}
+
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	q.trackCost = on
+
+	if on && n > 0 {
+		q.costs = slices.Grow(q.costs, n)
+	}
+}
+
+// Costs returns how long each recorded event took to get from the timestamp
+// its caller took to being queued.
+//
+// This is the instrument's own cost, and it is a lower bound on it: it spans
+// the scope filter and the queue's lock and append, not the NRI transport
+// before the callback nor the callback's return afterwards. A scalability
+// number whose instrument sits on the critical path has to be able to say how
+// big the instrument is, and this is the part of it we can see.
+func (q *EventQ) Costs() []time.Duration {
+	if q == nil {
+		return nil
+	}
+
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	return slices.Clone(q.costs)
 }
 
 // Add records an event and wakes any waiters.
@@ -192,6 +256,10 @@ func (q *EventQ) Add(e *Event) {
 	defer q.mu.Unlock()
 
 	q.q = append(q.q, e)
+
+	if q.trackCost && e != nil && !e.At.IsZero() {
+		q.costs = append(q.costs, time.Since(e.At))
+	}
 
 	if q.changed != nil {
 		close(q.changed)

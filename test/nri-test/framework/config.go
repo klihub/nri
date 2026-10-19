@@ -98,6 +98,23 @@ const (
 	// pause process. The Kubernetes driver is not affected: kubelet decides.
 	NamespacesK8s = "k8s"
 	NamespacesCRI = "cri"
+
+	// ScaleDriverCRI drives the burst over CRI, and is the default. We issue
+	// the calls, so every operation has a client-side start and end as well as
+	// an NRI callback, and the runtime's work either side of the hook can be
+	// separated without a trace exporter. It also controls the burst's shape,
+	// where a ReplicaSet's shape is kubelet's choice.
+	ScaleDriverCRI = "cri"
+	// ScaleDriverK8s scales a ReplicaSet. Less precise about when the burst
+	// began, because kubelet decides that, but it is the realistic path and
+	// includes the control plane and kubelet in the window.
+	ScaleDriverK8s = "k8s"
+
+	// DefaultScaleSettle bounds how long a scalability burst's events are
+	// waited for. Generous compared with DefaultTimeout because a burst of
+	// pods is slower than any single operation, and a window that closes early
+	// reports a burst that is only a lower bound.
+	DefaultScaleSettle = 2 * time.Minute
 )
 
 // DefaultRuntimeEndpoints are probed in order when no endpoint is given,
@@ -157,9 +174,9 @@ type Config struct {
 	// this suite runs on, because the suite inspects containers through that
 	// node's runtime. Empty means this host's name.
 	K8sNode string
-	// Kubeconfig names the cluster the Kubernetes driver uses. Empty uses
-	// client-go's usual rules, so KUBECONFIG and an in-cluster service
-	// account both work.
+	// Kubeconfig names the cluster the Kubernetes driver or a scalability run
+	// uses. Empty uses client-go's usual rules, so KUBECONFIG and an
+	// in-cluster service account both work.
 	Kubeconfig string
 	// RuntimeHandler is the low-level runtime every workload of the run is created
 	// with -- runc, crun, a VM runtime -- or the runtime's default one when empty.
@@ -179,6 +196,25 @@ type Config struct {
 	StopGrace time.Duration
 	// RunID scopes everything this run creates. Generated if empty.
 	RunID string
+
+	// ScaleReplicas is the replica count a scalability burst scales to. Zero
+	// turns the scalability test off, which is what an ordinary conformance
+	// run wants: it is the only mode that talks to Kubernetes.
+	ScaleReplicas int
+	// ScaleIterations is how many bursts to measure.
+	ScaleIterations int
+	// ScaleSettle bounds how long a burst's events are waited for.
+	ScaleSettle time.Duration
+	// ScaleTerminalEvent names the stage a burst is measured to, either
+	// StartContainer or PostStartContainer. They answer different questions;
+	// see ScaleTerminal.
+	ScaleTerminalEvent string
+	// ScaleReportPath is where the raw per-pod table is written, if anywhere.
+	ScaleReportPath string
+	// ScaleDriver selects what creates the burst: "cri" drives the runtime
+	// directly, "k8s" scales a ReplicaSet. They measure different things and
+	// have opposite requirements about kubelet; see ScaleViaK8s.
+	ScaleDriver string
 
 	// endpointCandidates is overridable for testing.
 	endpointCandidates []string
@@ -236,7 +272,8 @@ func RegisterFlags() {
 	flag.StringVar(&TestConfig.K8sNode, "nri-test.k8s-node", "",
 		"node the k8s driver places pods on; empty uses this host's name")
 	flag.StringVar(&TestConfig.Kubeconfig, "nri-test.kubeconfig", "",
-		"kubeconfig for the k8s driver; empty uses client-go's usual rules")
+		"kubeconfig for the k8s driver or a scalability run; empty uses "+
+			"client-go's usual rules")
 	// Single-valued; see Config.RuntimeHandler for why a list would be a flag that
 	// lies. The usage states what an empty value means, because "" is the ordinary
 	// case rather than a missing setting.
@@ -252,6 +289,95 @@ func RegisterFlags() {
 		"timeout for a single operation or event wait")
 	flag.StringVar(&TestConfig.RunID, "nri-test.run-id", "",
 		"run id scoping created workloads; generated when empty")
+	flag.IntVar(&TestConfig.ScaleReplicas, "nri-test.scale-replicas", 0,
+		"replica count a scalability burst scales to; 0 skips the scalability test")
+	flag.IntVar(&TestConfig.ScaleIterations, "nri-test.scale-iterations", 1,
+		"how many scalability bursts to measure")
+	flag.DurationVar(&TestConfig.ScaleSettle, "nri-test.scale-settle", DefaultScaleSettle,
+		"how long to wait for a burst's events before reporting what arrived")
+	flag.StringVar(&TestConfig.ScaleTerminalEvent, "nri-test.scale-terminal",
+		string(PostStartContainer),
+		"stage a burst is measured to: StartContainer or PostStartContainer")
+	flag.StringVar(&TestConfig.ScaleReportPath, "nri-test.scale-report", "",
+		"write the raw per-pod timing table here as JSON")
+	flag.StringVar(&TestConfig.ScaleDriver, "nri-test.scale-driver", ScaleDriverCRI,
+		"what creates a scalability burst: cri (direct, exact client-side timing, "+
+			"needs kubelet stopped) or k8s (a ReplicaSet, needs kubelet running)")
+}
+
+// ScaleNamespace returns the Kubernetes namespace a scalability run works in.
+//
+// It is derived from the run id so two concurrent runs on one cluster cannot
+// collide or adopt each other's pods, and so the namespace the plugins filter
+// on and the namespace the ReplicaSet lives in are the same string by
+// construction rather than by being set consistently in two places.
+func ScaleNamespace(runID string) string {
+	return "nri-test-scale-" + runID
+}
+
+// ScaleTerminal returns the stage a burst is measured to.
+//
+// PostStartContainer is the default because "the last event" is the natural
+// reading of how long a burst took. It is not interchangeable with
+// StartContainer: StartContainer is the runtime asking before it starts a
+// container, so measuring to it answers "how long until the runtime was ready
+// to start everything", while PostStartContainer is a notification afterwards
+// and answers "how long until we were told everything had started".
+func (c *Config) ScaleTerminal() EventType {
+	if EventType(c.ScaleTerminalEvent) == StartContainer {
+		return StartContainer
+	}
+
+	return PostStartContainer
+}
+
+// ScalePhaseBudget returns how long one direction of one burst may take.
+//
+// Each direction gets its own, for the reason withTimeout documents: a burst
+// that ran long would otherwise leave the teardown with an already-spent
+// deadline, so every teardown call would fail the moment it was issued and the
+// teardown report would be of a phase that never happened.
+//
+// It is never zero. A zero duration makes context.WithTimeout return an
+// already-expired context, which is exactly that failure arrived at from the
+// other side.
+func (c *Config) ScalePhaseBudget() time.Duration {
+	if c.ScaleSettle <= 0 {
+		return DefaultScaleSettle
+	}
+
+	return c.ScaleSettle
+}
+
+// ScaleBudget returns how long a whole scalability run may take: one
+// ScalePhaseBudget per direction of every iteration.
+//
+// Derived from ScalePhaseBudget rather than from ScaleSettle directly, so the
+// whole-run budget and the per-phase ones cannot drift into disagreeing about
+// how long a run is allowed to take.
+func (c *Config) ScaleBudget() time.Duration {
+	iterations := c.ScaleIterations
+	if iterations < 1 {
+		iterations = 1
+	}
+
+	return 2 * time.Duration(iterations) * c.ScalePhaseBudget()
+}
+
+// Scaling reports whether this run measures scalability.
+func (c *Config) Scaling() bool { return c.ScaleReplicas > 0 }
+
+// ScaleViaK8s reports whether the burst comes from a ReplicaSet rather than
+// from the CRI driver.
+//
+// The distinction decides the kubelet requirement, and the two are opposite: a
+// CRI burst creates sandboxes kubelet would garbage-collect, so kubelet must be
+// stopped, while a ReplicaSet burst is brought up by kubelet and cannot happen
+// without it. Getting this the wrong way round produces either a burst whose
+// pods vanish underneath it or one that never starts, so it is read from one
+// place.
+func (c *Config) ScaleViaK8s() bool {
+	return c.Scaling() && c.ScaleDriver == ScaleDriverK8s
 }
 
 // Complete fills in defaults and validates the configuration.
@@ -285,12 +411,46 @@ func (c *Config) Complete() error {
 		return fmt.Errorf("unknown -nri-test.driver %q: use %q, %q or %q",
 			c.Driver, DriverCRI, DriverK8s, DriverMock)
 	}
+	// A burst against an in-process mock measures Go calls, and a number
+	// produced that way would be read as a runtime's.
+	if c.Driver == DriverMock && c.Scaling() {
+		return fmt.Errorf("-nri-test.driver %q cannot measure scalability: a burst "+
+			"needs a real runtime; drop -nri-test.scale-replicas or choose %q or %q",
+			DriverMock, DriverCRI, DriverK8s)
+	}
 	if c.CRINamespaces == "" {
 		c.CRINamespaces = NamespacesK8s
 	}
 	if c.CRINamespaces != NamespacesK8s && c.CRINamespaces != NamespacesCRI {
 		return fmt.Errorf("unknown -nri-test.cri-namespaces %q: use %q or %q",
 			c.CRINamespaces, NamespacesK8s, NamespacesCRI)
+	}
+	if c.ScaleSettle == 0 {
+		c.ScaleSettle = DefaultScaleSettle
+	}
+	if c.ScaleIterations < 1 {
+		c.ScaleIterations = 1
+	}
+	// Refused rather than defaulted, as the driver and namespace modes above
+	// are. The two stages answer different questions, so a typo that silently
+	// measured to the other one would produce a number labelled as something
+	// it is not, and nothing downstream could tell.
+	if c.ScaleTerminalEvent != "" &&
+		EventType(c.ScaleTerminalEvent) != StartContainer &&
+		EventType(c.ScaleTerminalEvent) != PostStartContainer {
+		return fmt.Errorf("unknown -nri-test.scale-terminal %q: use %q or %q",
+			c.ScaleTerminalEvent, StartContainer, PostStartContainer)
+	}
+	if c.ScaleDriver == "" {
+		c.ScaleDriver = ScaleDriverCRI
+	}
+	if c.Scaling() && c.ScaleDriver != ScaleDriverCRI && c.ScaleDriver != ScaleDriverK8s {
+		// Refused rather than defaulted. The two drivers have opposite kubelet
+		// requirements, so a typo that silently picked one would either have
+		// the burst's pods collected underneath it or never see a pod at all,
+		// and the reason would be nowhere near the flag.
+		return fmt.Errorf("unknown -nri-test.scale-driver %q: use %q or %q",
+			c.ScaleDriver, ScaleDriverCRI, ScaleDriverK8s)
 	}
 	if c.RunID == "" {
 		id, err := generateRunID()
@@ -299,6 +459,20 @@ func (c *Config) Complete() error {
 		}
 		c.RunID = id
 	}
+	// In scalability mode the workload is a ReplicaSet, so the pod namespace is
+	// a real Kubernetes namespace rather than a convention the suite imposes.
+	// Overriding it here rather than asking the operator to keep two flags in
+	// agreement is what makes the plugins' scope filter accept exactly the
+	// burst's pods: a Kubernetes pod's CRI sandbox namespace is its Kubernetes
+	// namespace.
+	// Only the ReplicaSet driver needs this. A CRI burst creates its own
+	// sandboxes in the suite's ordinary namespace, exactly as every other test
+	// does, so overriding it there would move the workload away from the
+	// stale-workload sweep and the leak guard for no reason.
+	if c.ScaleViaK8s() {
+		c.Namespace = ScaleNamespace(c.RunID)
+	}
+
 	if c.RuntimeEndpoint == "" {
 		ep, err := c.detectRuntimeEndpoint()
 		if err != nil {

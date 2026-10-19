@@ -161,20 +161,20 @@ the in-tree adjustment-to-spec mapping -- and nothing below it. A clean
 run here says that chain held. It says nothing about CRI-O or containerd,
 and the summary says so twice.
 
-**103 passed, 0 failed. 28 of 41 input fields measured.**
+**103 passed, 0 failed, 19 skipped. 28 of 41 input fields measured.**
 
 Fourteen skips are capability gates: seven need `ObservedRuntimeState`,
 which this driver withholds because the pids, timestamps, lifecycle
 states, addresses and termination status it would report are its own
 invention; five need `Exec`, which needs a running container; one needs
 `CDIDevices`; and one needs `ContainerLifecycle`. Of the rest, the
-runtime-handler and pod-resource gates skip on any driver, one is
-`Container.hooks`, which no runtime adds here, and **one is inherent to
-the arm**: the second half of `TestNRIVersionExchange` cross-checks the
-advertised NRI version against the one inferred from the runtime
-version, and there is no runtime here to infer from. The arm advertises
-the NRI version it was built from, so `RequireNRIVersion` and every
-other version gate run here -- but only in a build that generated
+runtime-handler, pod-resource and scalability gates skip on any driver,
+one is `Container.hooks`, which no runtime adds here, and **one is
+inherent to the arm**: the second half of `TestNRIVersionExchange`
+cross-checks the advertised NRI version against the one inferred from
+the runtime version, and there is no runtime here to infer from. The arm
+advertises the NRI version it was built from, so `RequireNRIVersion` and
+every other version gate run here -- but only in a build that generated
 `pkg/version/info/git`, which `make nri-test` does and a bare
 `go test` in a fresh checkout does not.
 
