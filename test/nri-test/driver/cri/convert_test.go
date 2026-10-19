@@ -121,6 +121,40 @@ func TestContainerConfig(t *testing.T) {
 	})
 }
 
+func TestContainerConfigSetsUserSpecifiedImage(t *testing.T) {
+	// CRI-O requires ContainerConfig.Image.UserSpecifiedImage: with it empty it
+	// refuses the creation outright, with "user specified image not specified,
+	// cannot verify image signature", so a suite that leaves it unset cannot
+	// create a single container there. containerd does not require it -- this
+	// suite created containers against containerd throughout its existence
+	// without ever setting it -- which is why the omission cost nothing for the
+	// suite's whole life and then cost everything.
+	//
+	// Both fields are asserted, every time. A change that set UserSpecifiedImage
+	// and dropped Image would satisfy a test that only looked at the new field,
+	// and would break every runtime there is.
+	t.Run("should set both image fields from an explicit image", func(t *testing.T) {
+		cfg := ContainerConfig(testConfig(), &framework.ContainerSpec{
+			Name:  "ctr0",
+			Image: "docker.io/library/busybox:latest",
+		})
+
+		require.Equal(t, "docker.io/library/busybox:latest", cfg.Image.Image)
+		require.Equal(t, "docker.io/library/busybox:latest", cfg.Image.UserSpecifiedImage)
+	})
+
+	t.Run("should set both image fields from the configured image", func(t *testing.T) {
+		// The fallback to Config.Image has to reach both fields too: a spec with no
+		// image of its own is the ordinary case -- CtrSpec fills it in, but PodSpec's
+		// own containers need not -- so a fallback that filled only Image would
+		// leave CRI-O refusing exactly those containers.
+		cfg := ContainerConfig(testConfig(), &framework.ContainerSpec{Name: "ctr0"})
+
+		require.Equal(t, "registry.k8s.io/pause:3.10", cfg.Image.Image)
+		require.Equal(t, "registry.k8s.io/pause:3.10", cfg.Image.UserSpecifiedImage)
+	})
+}
+
 func TestLinuxResources(t *testing.T) {
 	t.Run("should be nil for nil resources", func(t *testing.T) {
 		// It used to dereference its argument, which UpdatePodResources could

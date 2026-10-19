@@ -76,6 +76,15 @@ func (d *Driver) Capabilities() framework.Capability {
 	return d.caps
 }
 
+// ConflictsWithKubelet reports that this driver's sandboxes conflict with a
+// running kubelet. CRI creates pod sandboxes directly, which kubelet does not
+// recognise and so garbage-collects, and a sandbox vanishing mid-test reads as
+// a runtime failure. Setup refuses to run while kubelet is up unless told
+// otherwise.
+func (d *Driver) ConflictsWithKubelet() bool {
+	return true
+}
+
 // probeCapabilities determines what the runtime behind this driver supports.
 //
 // Container lifecycle, error observation, container resource updates and exec
@@ -99,7 +108,10 @@ func (d *Driver) probeCapabilities() framework.Capability {
 func (d *Driver) CreatePod(ctx context.Context, p *framework.PodSpec) (*framework.Pod, error) {
 	cfg := PodSandboxConfig(p)
 
-	id, err := d.client.Runtime.RunPodSandbox(ctx, cfg, "")
+	// The handler, not a hardcoded "": an empty one still means the runtime's
+	// default, so the default path is unchanged and a selected handler is the only
+	// thing that differs. See framework.PodSpec.RuntimeHandler.
+	id, err := d.client.Runtime.RunPodSandbox(ctx, cfg, p.RuntimeHandler)
 	if err != nil {
 		return nil, fmt.Errorf("failed to run pod sandbox %s: %w", p.Name, err)
 	}
@@ -530,6 +542,37 @@ func (d *Driver) RuntimeVersion(ctx context.Context) (string, string, error) {
 	}
 
 	return rpl.GetRuntimeName(), rpl.GetRuntimeVersion(), nil
+}
+
+// RuntimeHandlers returns the names of the runtime handlers the node has
+// installed, as the runtime reports them over CRI.
+//
+// An entry with no name is dropped, and that is not tidying: CRI-O reports its
+// default handler as an entry with no name key at all, so GetName() is "" --
+// measured on CRI-O 1.37.2, which reports crun, runc and one such unnamed entry.
+// An empty handler name already means "the runtime's default" everywhere in this
+// suite, so offering "" as a selectable handler would make a selection
+// indistinguishable from the absence of one.
+//
+// Status is asked non-verbosely: what is wanted is handler names, and a verbose
+// status makes the runtime render its whole configuration to answer that.
+func (d *Driver) RuntimeHandlers(ctx context.Context) ([]string, error) {
+	rpl, err := d.client.Runtime.Status(ctx, false)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get runtime status: %w", err)
+	}
+
+	var names []string
+
+	for _, h := range rpl.GetRuntimeHandlers() {
+		if h.GetName() == "" {
+			continue
+		}
+
+		names = append(names, h.GetName())
+	}
+
+	return names, nil
 }
 
 // PullImage pulls an image, so that container creation does not race a pull.

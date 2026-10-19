@@ -88,6 +88,28 @@ type Config struct {
 	// NoPull skips pulling Image during setup, for air-gapped nodes where the
 	// image is already in the image store and no registry is reachable.
 	NoPull bool
+	// CollectFailures reports every expectation failure of a test instead of
+	// ending the test at its first one, and prints them all in the run's
+	// summary. It is what makes a first run against an unfamiliar runtime
+	// enumerate the differences in one go rather than one run per difference.
+	//
+	// It changes when a test stops, never whether a failure is reported: a
+	// failure is recorded in both modes, and a run that recorded one exits
+	// non-zero in both.
+	CollectFailures bool
+	// AllowKubelet lets the run proceed in a driver mode that kubelet would
+	// garbage-collect the workloads of while kubelet is running. Without it,
+	// setup refuses to start while a kubelet process is found.
+	AllowKubelet bool
+	// RuntimeHandler is the low-level runtime every workload of the run is created
+	// with -- runc, crun, a VM runtime -- or the runtime's default one when empty.
+	//
+	// Single-valued, and a sweep over handlers is two invocations of the binary
+	// rather than one run doing both. A flag that accepted a list and then used one
+	// entry of it would be a flag that lies about what it ran, which is the defect
+	// that got -nri-test.differential removed from this suite; and a run's summary
+	// names one handler, so a run that used two could not be quoted at all.
+	RuntimeHandler string
 	// Timeout bounds a single operation or event wait.
 	Timeout time.Duration
 	// RunID scopes everything this run creates. Generated if empty.
@@ -95,6 +117,9 @@ type Config struct {
 
 	// endpointCandidates is overridable for testing.
 	endpointCandidates []string
+	// procDir is the proc filesystem scanned for a running kubelet. Empty means
+	// /proc. Overridable for testing.
+	procDir string
 }
 
 // TestConfig is the configuration the suite runs with.
@@ -123,6 +148,22 @@ func RegisterFlags() {
 		"do not clean up created pods and containers")
 	flag.BoolVar(&TestConfig.NoPull, "nri-test.no-pull", false,
 		"do not pull the test image during setup; it must already be in the image store")
+	// Default false: a collecting default would make CI green on a real failure
+	// unless CI remembered to pass the flag, and the mode that reports the most
+	// is not the mode that should decide an unattended run's verdict.
+	flag.BoolVar(&TestConfig.CollectFailures, "nri-test.collect-failures", false,
+		"collect expectation failures and report them at the end of the run "+
+			"instead of failing at the first one")
+	flag.BoolVar(&TestConfig.AllowKubelet, "nri-test.allow-kubelet", false,
+		"run in CRI mode while kubelet is running; kubelet may garbage-collect "+
+			"the test's sandboxes mid-run")
+	// Single-valued; see Config.RuntimeHandler for why a list would be a flag that
+	// lies. The usage states what an empty value means, because "" is the ordinary
+	// case rather than a missing setting.
+	flag.StringVar(&TestConfig.RuntimeHandler, "nri-test.runtime-handler", "",
+		"low-level runtime to create every workload with, e.g. runc or crun; "+
+			"empty means the runtime's default handler. Setup refuses a handler the "+
+			"node does not have. One handler per run: sweep by running the suite again")
 	flag.DurationVar(&TestConfig.Timeout, "nri-test.timeout", DefaultTimeout,
 		"timeout for a single operation or event wait")
 	flag.StringVar(&TestConfig.RunID, "nri-test.run-id", "",

@@ -56,6 +56,31 @@ type fakeRuntime struct {
 
 	podResourceUpdates []*runtimeapi.UpdatePodSandboxResourcesRequest
 
+	// sandboxHandlers and sandboxConfigs are the runtime handler and the sandbox
+	// configuration every RunPodSandbox was asked for, in call order, so a test can
+	// assert what the driver told the runtime to run the sandbox with. Both as
+	// slices, for the reason podFilters is: the argument is the whole subject of
+	// the assertion, and a single field would hide a second call made with
+	// something else. The handler matters only paired with the config it arrived
+	// with -- a handler reaching the runtime beside some other pod's configuration
+	// is not the handler reaching that pod.
+	sandboxHandlers []string
+	sandboxConfigs  []*runtimeapi.PodSandboxConfig
+
+	// status is what Status answers with, and statusVerbose is every verbose flag
+	// it was asked with: handler discovery wants names only, and a verbose status
+	// makes the runtime render its whole configuration to answer it.
+	status        *runtimeapi.StatusResponse
+	statusErr     error
+	statusVerbose []bool
+
+	// version is what Version answers with, and versionAPIs is every apiVersion it
+	// was asked with: the driver must negotiate none, since what it wants is
+	// whatever the runtime reports about itself.
+	version     *runtimeapi.VersionResponse
+	versionErr  error
+	versionAPIs []string
+
 	execStdout   string
 	execStderr   string
 	execErr      error
@@ -131,6 +156,37 @@ func (f *fakeRuntime) RemovePodSandbox(_ context.Context, id string) error {
 	f.removed = append(f.removed, id)
 
 	return f.rmErr[id]
+}
+
+// RunPodSandbox records the runtime handler it was asked for and names the
+// sandbox after the spec, as a real runtime's id is a stand-in for the pod.
+func (f *fakeRuntime) RunPodSandbox(_ context.Context, cfg *runtimeapi.PodSandboxConfig, runtimeHandler string) (string, error) {
+	f.sandboxConfigs = append(f.sandboxConfigs, cfg)
+	f.sandboxHandlers = append(f.sandboxHandlers, runtimeHandler)
+
+	return cfg.GetMetadata().GetName(), nil
+}
+
+func (f *fakeRuntime) Status(_ context.Context, verbose bool) (*runtimeapi.StatusResponse, error) {
+	f.statusVerbose = append(f.statusVerbose, verbose)
+
+	if f.statusErr != nil {
+		return nil, f.statusErr
+	}
+
+	return f.status, nil
+}
+
+// Version models the real one: the runtime's name and its version come back in
+// two fields of one response, which the driver has to return in that order.
+func (f *fakeRuntime) Version(_ context.Context, apiVersion string) (*runtimeapi.VersionResponse, error) {
+	f.versionAPIs = append(f.versionAPIs, apiVersion)
+
+	if f.versionErr != nil {
+		return nil, f.versionErr
+	}
+
+	return f.version, nil
 }
 
 func (f *fakeRuntime) UpdatePodSandboxResources(_ context.Context, req *runtimeapi.UpdatePodSandboxResourcesRequest) (*runtimeapi.UpdatePodSandboxResourcesResponse, error) {
@@ -579,6 +635,81 @@ func TestDriverStalePods(t *testing.T) {
 	})
 }
 
+func TestCreatePodPassesRuntimeHandler(t *testing.T) {
+	// The whole point of the axis: a feature that fails under crun and passes under
+	// runc is a crun defect rather than an NRI one, and nothing can produce that
+	// distinction unless the handler the spec names actually reaches the runtime.
+	// RunPodSandbox's third argument is the only place CRI takes it.
+	t.Run("should ask the runtime for the handler the spec names", func(t *testing.T) {
+		rt := &fakeRuntime{}
+
+		pod, err := testDriver(scopedConfig(), rt).CreatePod(context.Background(),
+			&framework.PodSpec{Name: "p0", Namespace: "nri-test", RuntimeHandler: "crun"})
+		require.NoError(t, err)
+		require.Equal(t, "p0", pod.ID)
+		require.Equal(t, []string{"crun"}, rt.sandboxHandlers)
+
+		// The handler is only the handler of this pod if it arrived with this pod's
+		// configuration, on one call. Asserting the handler alone would pass with
+		// the config built from some other spec, or with a second RunPodSandbox the
+		// driver made for a sandbox nobody asked for -- and a run whose workloads
+		// were not the ones the handler was selected for produces a per-handler
+		// result that means nothing.
+		require.Len(t, rt.sandboxConfigs, 1, "one CreatePod must run one sandbox")
+		require.Equal(t, "p0", rt.sandboxConfigs[0].GetMetadata().GetName())
+		require.Equal(t, "nri-test", rt.sandboxConfigs[0].GetMetadata().GetNamespace())
+	})
+
+	t.Run("should ask for no handler when the spec names none", func(t *testing.T) {
+		// An empty handler means the runtime's default, which is legitimate and is
+		// what every run that does not pass -nri-test.runtime-handler gets. It must
+		// stay an empty argument: a runtime handed a handler name it does not know
+		// refuses the sandbox.
+		rt := &fakeRuntime{}
+
+		_, err := testDriver(scopedConfig(), rt).CreatePod(context.Background(),
+			&framework.PodSpec{Name: "p0", Namespace: "nri-test"})
+		require.NoError(t, err)
+		require.Equal(t, []string{""}, rt.sandboxHandlers)
+	})
+}
+
+func TestRuntimeHandlersDropsTheUnnamedDefault(t *testing.T) {
+	// Measured against CRI-O 1.37.2, which reports exactly three handlers: crun,
+	// runc, and one with no name key at all, whose GetName() is "". The unnamed
+	// entry is the runtime's default, and offering it as selectable would produce a
+	// -nri-test.runtime-handler="" that reads as a selection while asking for the
+	// default -- the one value that must mean "I selected nothing".
+	rt := &fakeRuntime{status: &runtimeapi.StatusResponse{
+		RuntimeHandlers: []*runtimeapi.RuntimeHandler{
+			{Name: "crun"},
+			{Name: "runc"},
+			{},
+		},
+	}}
+
+	handlers, err := testDriver(scopedConfig(), rt).RuntimeHandlers(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, []string{"crun", "runc"}, handlers)
+
+	require.Equal(t, []bool{false}, rt.statusVerbose,
+		"discovery wants handler names, and a verbose status makes the runtime "+
+			"render its whole configuration to answer that")
+}
+
+func TestRuntimeHandlersReportsStatusFailure(t *testing.T) {
+	// Returned rather than swallowed: Setup makes a discovery failure fatal only
+	// when a handler was requested, and it cannot make that distinction if the
+	// failure arrives as an empty list indistinguishable from a runtime that
+	// advertises nothing.
+	boom := errors.New("boom")
+
+	handlers, err := testDriver(scopedConfig(), &fakeRuntime{statusErr: boom}).
+		RuntimeHandlers(context.Background())
+	require.ErrorIs(t, err, boom)
+	require.Nil(t, handlers)
+}
+
 func TestDriverUpdatePodResources(t *testing.T) {
 	t.Run("should carry the requested resources", func(t *testing.T) {
 		rt := &fakeRuntime{}
@@ -895,5 +1026,69 @@ func TestDriverPullImage(t *testing.T) {
 		err := newDriver(img).PullImage(context.Background(), "")
 		require.ErrorIs(t, err, boom)
 		require.ErrorContains(t, err, "registry.k8s.io/pause:3.10")
+	})
+}
+
+// The framework discovers ConflictsWithKubelet by an unexported interface, so
+// nothing at compile time ties this method to it. Pin its name and signature
+// here: a rename would otherwise silently disable the kubelet refusal.
+func TestDriverConflictsWithKubelet(t *testing.T) {
+	d := &Driver{}
+
+	require.True(t, d.ConflictsWithKubelet())
+}
+
+// Driver must satisfy the interface framework.preflight discovers RuntimeVersion
+// by, which is an interface literal in framework/suite.go that nothing here can
+// see. This pins the driver's half of it: a rename or a changed signature on this
+// side would otherwise cost the suite its provenance with no build error.
+//
+// It cannot pin the other half, and does not pretend to -- a method renamed on
+// both sides still compiles and still matches. What it rules out is the one-sided
+// change, which is the whole failure mode of discovery by type assertion.
+var _ interface {
+	RuntimeVersion(context.Context) (string, string, error)
+} = (*Driver)(nil)
+
+func TestDriverRuntimeVersion(t *testing.T) {
+	// What a silent mismatch here costs is the header's reason for existing. The
+	// assertion stops matching, the suite never learns the runtime's name or
+	// version, every test still passes, and the summary prints "runtime:
+	// <unknown>" -- so every result the run recorded is unquotable, because
+	// nothing in it says what produced it.
+	t.Run("should report the runtime's name and version", func(t *testing.T) {
+		rt := &fakeRuntime{version: &runtimeapi.VersionResponse{
+			RuntimeName:    "cri-o",
+			RuntimeVersion: "1.37.2",
+		}}
+
+		name, version, err := testDriver(scopedConfig(), rt).RuntimeVersion(context.Background())
+		require.NoError(t, err)
+
+		// Asserted as a pair, not as two strings: both are strings of the same
+		// type returned side by side, so either assertion on its own passes with
+		// the two swapped, and a header reading "runtime: 1.37.2 cri-o" is exactly
+		// as unquotable as an empty one.
+		require.Equal(t, []string{"cri-o", "1.37.2"}, []string{name, version},
+			"the name and the version must come back in that order")
+
+		// CRI's Version negotiates an API version. The driver asks for none,
+		// deliberately: what it wants is whatever the runtime reports about itself,
+		// and naming a version would let a runtime refuse to answer at all.
+		require.Equal(t, []string{""}, rt.versionAPIs,
+			"the driver must not negotiate an API version to read the runtime's own")
+	})
+
+	t.Run("should report a refusal as an error, not as an unknown runtime", func(t *testing.T) {
+		// The error has to propagate: preflight returns it, which fails Setup
+		// loudly. Swallowing it would leave the run going with an empty runtime
+		// name, which is the unquotable state this whole method exists to avoid.
+		boom := errors.New("connection refused")
+		rt := &fakeRuntime{versionErr: boom}
+
+		name, version, err := testDriver(scopedConfig(), rt).RuntimeVersion(context.Background())
+		require.ErrorIs(t, err, boom)
+		require.Empty(t, name)
+		require.Empty(t, version)
 	})
 }
