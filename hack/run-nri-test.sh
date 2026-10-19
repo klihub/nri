@@ -76,6 +76,11 @@
 #   TIMEOUT       -nri-test.timeout value (default 60s)
 #   DRIVER        -nri-test.driver value: cri (default) or k8s. The k8s driver
 #                 needs kubelet running, so this script leaves it alone then.
+#                 A ReplicaSet scalability burst needs it too and is selected
+#                 by flags, not by this variable: pass
+#                 -nri-test.scale-driver=k8s with -nri-test.scale-replicas
+#                 and the script leaves kubelet alone without DRIVER=k8s
+#                 switching every conformance test to the k8s driver.
 #   K8S_KUBECONFIG  kubeconfig on the node for the k8s driver (default
 #                 /etc/kubernetes/admin.conf)
 
@@ -173,6 +178,11 @@ kubelet_restored=""
 restore_failed=""
 stop_unconfirmed=""
 suite_launched=""
+# Why this run needs kubelet left running, or empty. Declared here rather than
+# only where it is assigned, because it is read again when the suite's
+# arguments are built and a node whose kubelet was already down never reaches
+# the assignment -- which under `set -o nounset` would abort the run.
+kubelet_reason=""
 suite_pid=""
 
 # kill_remote_suite signals the suite's processes on the node, over an ssh
@@ -381,21 +391,93 @@ scp "${ssh_opts[@]}" "$top_dir/build/bin/nri-test" "$NODE:$REMOTE_BIN" || {
     exit 1
 }
 
+# flag_value NAME ARGS... prints the value of -nri-test.NAME among ARGS, in
+# either the -flag=value or the -flag value spelling, or nothing if it is
+# absent. The suite's own flags are read here rather than mirrored into another
+# environment variable, so a flag passed straight through cannot disagree with
+# the script's idea of what the run is doing.
+flag_value() {
+    local name="-nri-test.$1"
+    shift
+
+    local arg want_next=""
+
+    for arg in "$@"; do
+        if [ -n "$want_next" ]; then
+            printf '%s' "$arg"
+
+            return 0
+        fi
+
+        case "$arg" in
+        "$name="*)
+            printf '%s' "${arg#"$name"=}"
+
+            return 0
+            ;;
+        "$name")
+            want_next=yes
+            ;;
+        esac
+    done
+}
+
+# needs_kubelet_reason prints why this run must have kubelet left running, or
+# nothing when kubelet is this run's hazard rather than its precondition.
+#
+# There are two ways to need it and only one of them is an environment
+# variable, which is the whole point. Deciding from DRIVER alone stopped
+# kubelet for a ReplicaSet scalability burst -- a burst only kubelet can bring
+# up -- so the suite then refused with "no kubelet process found", and the only
+# workaround was DRIVER=k8s, which also switches every conformance test to the
+# k8s driver and so measures something nobody asked for.
+#
+# The condition mirrors framework.Config.ScaleViaK8s: a scale driver of k8s AND
+# a replica count above zero. A scale driver named without replicas is not a
+# scalability run, and must not keep kubelet up over a CRI-mode sweep whose
+# sandboxes it would collect.
+needs_kubelet_reason() {
+    if [ "$DRIVER" = k8s ]; then
+        printf 'DRIVER=%s, whose workloads kubelet creates' "$DRIVER"
+
+        return 0
+    fi
+
+    local replicas scale_driver
+    replicas="$(flag_value scale-replicas "$@")"
+    scale_driver="$(flag_value scale-driver "$@")"
+
+    if [ "${scale_driver:-cri}" = k8s ] && [ "${replicas:-0}" -gt 0 ] 2>/dev/null; then
+        printf -- '-nri-test.scale-driver=k8s with %s replicas, a ReplicaSet burst only kubelet can bring up' \
+            "$replicas"
+
+        return 0
+    fi
+
+    return 1
+}
+
 # Deciding kubelet's state, and refusing to guess. A non-zero `systemctl
 # is-active` means inactive only when systemctl is what answered: ssh's own
 # failures (255) and sudo's (1) are non-zero too, and reading either as
 # "kubelet is not running" would start the run with kubelet still up, where the
 # suite's own refusal is the only thing left to catch it -- or, worse, would
 # skip the stop and so skip the restore.
+# Asked once, before kubelet's own state is known, because it is a question
+# about this run and not about the node: a ReplicaSet burst needs a cluster
+# whether or not kubelet happens to be up, and the suite's arguments are built
+# from the same answer further down.
+kubelet_reason="$(needs_kubelet_reason "$@" || true)"
+
 echo "--- checking kubelet on $NODE"
 kubelet_rc=0
 on_node sudo systemctl is-active --quiet kubelet || kubelet_rc=$?
 
 case $kubelet_rc in
 0)
-    if [ "$DRIVER" = k8s ]; then
-        # The k8s driver is kubelet's client: stopping it would stop the run.
-        echo "--- DRIVER=k8s: leaving kubelet running"
+    if [ -n "$kubelet_reason" ]; then
+        # This run's workloads are kubelet's: stopping it would stop the run.
+        echo "--- leaving kubelet running: $kubelet_reason"
     else
         kubelet_was_active=yes
         echo "--- stopping kubelet for the run"
@@ -431,7 +513,22 @@ args=(
 [ -n "$ENDPOINT" ] && args+=(-runtime-endpoint "$ENDPOINT")
 [ -n "$handler" ] && args+=(-nri-test.runtime-handler "$handler")
 if [ "$DRIVER" != cri ]; then
-    args+=(-nri-test.driver "$DRIVER" -nri-test.kubeconfig "$K8S_KUBECONFIG")
+    args+=(-nri-test.driver "$DRIVER")
+fi
+
+# The kubeconfig goes with every run that talks to the cluster, which is the
+# same set as the runs that need kubelet left running: the k8s conformance
+# driver, and a ReplicaSet scalability burst. It used to be tied to DRIVER
+# alone, so a ReplicaSet burst was handed no kubeconfig and reached the
+# cluster only where client-go's own rules happened to find one -- a node with
+# /root/.kube/config worked, and a node without it failed with an error about
+# the cluster rather than about the missing flag.
+#
+# Read from kubelet_reason rather than asking again, so the kubeconfig and the
+# kubelet decision cannot come to disagree about whether this run uses a
+# cluster.
+if [ -n "$kubelet_reason" ] || [ "$DRIVER" != cri ]; then
+    args+=(-nri-test.kubeconfig "$K8S_KUBECONFIG")
 fi
 
 # Two details of this invocation are load-bearing, and neither is about ssh's

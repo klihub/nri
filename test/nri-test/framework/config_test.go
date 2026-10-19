@@ -150,3 +150,142 @@ func TestProcView(t *testing.T) {
 
 	require.Error(t, (&Config{ProcView: "nonsense"}).Complete())
 }
+
+func TestScaleTerminalDefaultsToTheLaterEvent(t *testing.T) {
+	require.Equal(t, PostStartContainer, (&Config{}).ScaleTerminal(),
+		"the headline reading of a burst is the last event")
+	require.Equal(t, StartContainer,
+		(&Config{ScaleTerminalEvent: string(StartContainer)}).ScaleTerminal())
+	require.Equal(t, PostStartContainer,
+		(&Config{ScaleTerminalEvent: "nonsense"}).ScaleTerminal(),
+		"a Config that never went through Complete falls back rather than "+
+			"measuring to nothing; Complete itself refuses the value, see "+
+			"TestCompleteRefusesAnUnknownScaleTerminal")
+}
+
+func TestCompleteRefusesAnUnknownScaleTerminal(t *testing.T) {
+	c := &Config{RuntimeEndpoint: "unix:///dev/null", ScaleTerminalEvent: "nonsense"}
+
+	err := c.Complete()
+
+	require.Error(t, err, "a typo must not silently measure to another stage")
+	require.ErrorContains(t, err, "nonsense")
+	require.ErrorContains(t, err, string(StartContainer))
+	require.ErrorContains(t, err, string(PostStartContainer))
+}
+
+func TestCompleteAcceptsBothScaleTerminals(t *testing.T) {
+	for _, stage := range []EventType{StartContainer, PostStartContainer} {
+		c := &Config{RuntimeEndpoint: "unix:///dev/null", ScaleTerminalEvent: string(stage)}
+		require.NoError(t, c.Complete())
+		require.Equal(t, stage, c.ScaleTerminal())
+	}
+
+	c := &Config{RuntimeEndpoint: "unix:///dev/null"}
+	require.NoError(t, c.Complete(), "an unset terminal is the default, not an error")
+	require.Equal(t, PostStartContainer, c.ScaleTerminal())
+}
+
+func TestCompleteOverridesTheNamespaceForAReplicaSetBurst(t *testing.T) {
+	c := &Config{
+		RunID:              "abc123",
+		Namespace:          "ignored-by-design",
+		ScaleReplicas:      5,
+		ScaleDriver:        ScaleDriverK8s,
+		endpointCandidates: []string{},
+	}
+
+	// detectRuntimeEndpoint will fail with no candidates, which is fine: the
+	// namespace is set before that and is what this pins.
+	_ = c.Complete()
+
+	require.Equal(t, ScaleNamespace("abc123"), c.Namespace,
+		"the plugins filter on this, so it must be the ReplicaSet's namespace")
+	require.Equal(t, "nri-test-scale-abc123", c.Namespace)
+}
+
+func TestCompleteLeavesTheNamespaceAloneOutsideScalabilityMode(t *testing.T) {
+	c := &Config{RunID: "abc123", Namespace: "mine", endpointCandidates: []string{}}
+
+	_ = c.Complete()
+
+	require.Equal(t, "mine", c.Namespace)
+}
+
+func TestScaleBudgetGrowsWithIterations(t *testing.T) {
+	one := (&Config{ScaleIterations: 1, ScaleSettle: time.Minute}).ScaleBudget()
+	three := (&Config{ScaleIterations: 3, ScaleSettle: time.Minute}).ScaleBudget()
+
+	require.Equal(t, 2*time.Minute, one, "settle time for the burst and the scale-down")
+	require.Equal(t, 6*time.Minute, three)
+	require.Equal(t, 2*time.Minute, (&Config{ScaleSettle: time.Minute}).ScaleBudget(),
+		"an unset iteration count counts as one rather than zero")
+}
+
+func TestCompleteLeavesTheNamespaceAloneForACRIBurst(t *testing.T) {
+	c := &Config{
+		RunID:              "abc123",
+		Namespace:          "mine",
+		ScaleReplicas:      5,
+		ScaleDriver:        ScaleDriverCRI,
+		endpointCandidates: []string{},
+	}
+
+	_ = c.Complete()
+
+	require.Equal(t, "mine", c.Namespace,
+		"a CRI burst creates its own sandboxes in the suite's namespace, so the "+
+			"stale sweep and the leak guard keep covering them")
+}
+
+func TestCompleteRefusesAnUnknownScaleDriver(t *testing.T) {
+	c := &Config{RunID: "abc123", ScaleReplicas: 5, ScaleDriver: "kubernetes"}
+
+	err := c.Complete()
+
+	require.Error(t, err, "a typo must not silently pick a driver")
+	require.ErrorContains(t, err, "kubernetes")
+	require.ErrorContains(t, err, ScaleDriverCRI)
+	require.ErrorContains(t, err, ScaleDriverK8s)
+}
+
+func TestCompleteDefaultsTheScaleDriverToCRI(t *testing.T) {
+	c := &Config{RunID: "abc123", endpointCandidates: []string{}}
+
+	_ = c.Complete()
+
+	require.Equal(t, ScaleDriverCRI, c.ScaleDriver)
+	require.False(t, c.ScaleViaK8s(), "not scaling at all is not scaling via k8s")
+}
+
+func TestScaleViaK8sNeedsBothFlags(t *testing.T) {
+	require.False(t, (&Config{ScaleDriver: ScaleDriverK8s}).ScaleViaK8s(),
+		"a driver choice without replicas is not a scalability run")
+	require.True(t, (&Config{ScaleReplicas: 2, ScaleDriver: ScaleDriverK8s}).ScaleViaK8s())
+	require.False(t, (&Config{ScaleReplicas: 2, ScaleDriver: ScaleDriverCRI}).ScaleViaK8s())
+}
+
+// One direction of one burst gets its own budget. The CRI burst creates a
+// context per phase rather than sharing one: the grace wait between them
+// spends part of the first, so a shared context would leave the teardown calls
+// expired, failing the moment they were issued.
+func TestScalePhaseBudgetIsNeverZero(t *testing.T) {
+	require.Equal(t, DefaultScaleSettle, (&Config{}).ScalePhaseBudget(),
+		"a zero budget is an already-expired context, which is the failure "+
+			"a per-phase budget exists to prevent")
+	require.Equal(t, time.Minute, (&Config{ScaleSettle: time.Minute}).ScalePhaseBudget())
+}
+
+func TestScaleBudgetIsTwoPhasesPerIteration(t *testing.T) {
+	for _, c := range []*Config{
+		{ScaleSettle: time.Minute},
+		{ScaleSettle: 90 * time.Second, ScaleIterations: 3},
+		{},
+	} {
+		iterations := max(c.ScaleIterations, 1)
+
+		require.Equal(t, time.Duration(2*iterations)*c.ScalePhaseBudget(), c.ScaleBudget(),
+			"the whole-run budget must stay the sum of the per-phase ones, or "+
+				"the two drift and one of them is wrong")
+	}
+}

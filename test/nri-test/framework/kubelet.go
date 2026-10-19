@@ -80,6 +80,38 @@ type kubeletConflicter interface {
 // nor reconfigures anything: stopping and restarting it is a wrapper script's
 // job.
 func checkKubelet(cfg *Config, d Driver) error {
+	procDir := cfg.procDir
+	if procDir == "" {
+		procDir = "/proc"
+	}
+
+	// The ReplicaSet scalability driver inverts this check rather than
+	// overriding it. The hazard the refusal exists for is kubelet collecting
+	// sandboxes the suite created over CRI; a ReplicaSet burst creates none,
+	// and only kubelet can bring it up. So kubelet is not a hazard there, it
+	// is a prerequisite, and a run without one would otherwise fail much later
+	// with an empty burst and no explanation.
+	//
+	// The CRI scalability driver is NOT inverted: it creates sandboxes over
+	// CRI like every other test, so the ordinary refusal applies to it
+	// unchanged.
+	//
+	// Inverted rather than simply skipped, because a check that is only ever
+	// overridden by a flag the operator has to remember is friction without
+	// safety, and because the opposite mistake -- pointing a scalability run at
+	// a node whose kubelet is stopped -- is just as easy to make.
+	if cfg.ScaleViaK8s() {
+		if found, _ := kubeletRunning(procDir); !found {
+			return fmt.Errorf("no kubelet process found, but -nri-test.scale-replicas "+
+				"is %d with -nri-test.scale-driver=%s: that burst is a ReplicaSet, "+
+				"which only kubelet can bring up. Start kubelet, or use "+
+				"-nri-test.scale-driver=%s to drive the burst over CRI instead",
+				cfg.ScaleReplicas, ScaleDriverK8s, ScaleDriverCRI)
+		}
+
+		return nil
+	}
+
 	if cfg.AllowKubelet {
 		return nil
 	}
@@ -87,11 +119,6 @@ func checkKubelet(cfg *Config, d Driver) error {
 	c, ok := d.(kubeletConflicter)
 	if !ok || !c.ConflictsWithKubelet() {
 		return nil
-	}
-
-	procDir := cfg.procDir
-	if procDir == "" {
-		procDir = "/proc"
 	}
 
 	found, pid := kubeletRunning(procDir)
