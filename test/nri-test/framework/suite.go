@@ -703,15 +703,18 @@ func (s *Suite) ExpectEnv(ctr *Container, key, want string) {
 }
 
 // ExpectMount fails the case unless both the container's OCI spec and the
-// container's own mount table have a mount at destination. See ExpectMount for
-// why both are required.
-func (s *Suite) ExpectMount(ctr *Container, destination string) {
+// container's own mount table have a mount at destination, and, when wantOpts
+// is given, the mount table records each of them for it. See ExpectMount for
+// why both are required, and for why wantOpts is matched against the mount
+// table alone.
+func (s *Suite) ExpectMount(ctr *Container, destination string, wantOpts ...string) {
 	s.t.Helper()
 
 	spec := s.Inspect(ctr.ID).Spec
 	mounts := s.Exec(ctr, "cat", "/proc/self/mounts")
 
-	require.NoError(s.t, ExpectMount(spec, mounts, destination), "container %s", ctr.ID)
+	require.NoError(s.t, ExpectMount(spec, mounts, destination, wantOpts...),
+		"container %s", ctr.ID)
 }
 
 // ExpectCpuset fails the case unless the kernel inside the container allows

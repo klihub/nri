@@ -191,7 +191,20 @@ func splitEnviron(environ string) []string {
 // path under test -- the opposite of what is being asserted. Paths containing
 // whitespace appear octal-escaped in the mount table and are not decoded here,
 // since nothing this suite mounts uses them.
-func ExpectMount(spec *rspec.Spec, procMounts, destination string) error {
+//
+// wantOpts, when given, names options the mount table must record for the
+// destination: each must be present as a whole element of field 4, so that "ro"
+// is not satisfied by "errors=remount-ro". Only the mount table is consulted for
+// them, never spec.Mounts[].Options, and the reason is a vocabulary difference
+// rather than a preference. The spec records what was requested, which includes
+// "bind" and "rprivate". Neither ever appears in /proc/self/mounts: "bind" is not
+// a kernel mount flag at all, and propagation such as "rprivate" lives in
+// /proc/self/mountinfo's optional fields, a file this suite does not read. So
+// wantOpts names kernel mount flags -- "ro", "nosuid", "noexec", "relatime" --
+// for which the kernel is the authority on whether the request took effect.
+// Asking for "bind" or "rprivate" here would fail against a runtime that did
+// everything right.
+func ExpectMount(spec *rspec.Spec, procMounts, destination string, wantOpts ...string) error {
 	if spec == nil {
 		return fmt.Errorf("mount at %q: there is no OCI spec to read it from", destination)
 	}
@@ -213,7 +226,63 @@ func ExpectMount(spec *rspec.Spec, procMounts, destination string) error {
 			destination, points)
 	}
 
+	if len(wantOpts) == 0 {
+		return nil
+	}
+
+	opts, err := mountOptions(procMounts, destination)
+	if err != nil {
+		return err
+	}
+
+	var missing []string
+
+	for _, want := range wantOpts {
+		if !slices.Contains(opts, want) {
+			missing = append(missing, want)
+		}
+	}
+
+	if len(missing) > 0 {
+		return fmt.Errorf("mount at %q: the container's mount table records options %q, "+
+			"which lack %q; the kernel did not apply them", destination,
+			strings.Join(opts, ","), missing)
+	}
+
 	return nil
+}
+
+// mountOptions returns the options the container's mount table records for a
+// destination.
+//
+// A /proc/<pid>/mounts line names the mount point in whitespace field 2 and the
+// comma-separated options in field 4, counting from one as mount(5) does. The
+// options come back split rather than as the raw field because the caller looks
+// for "ro", which is a substring of plenty of legitimate option and source
+// spellings -- "errors=remount-ro", "/var/lib/ro-data" -- and a substring search
+// would report a read-only mount that is nothing of the kind.
+//
+// A line for the destination with fewer than four fields is an error naming the
+// options field, not a skip and not a panic: the destination was found, so a
+// truncated line is evidence the table could not be read to the end.
+func mountOptions(procMounts, destination string) ([]string, error) {
+	for _, line := range strings.Split(procMounts, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || fields[1] != destination {
+			continue
+		}
+
+		if len(fields) < 4 {
+			return nil, fmt.Errorf("mount at %q: its line in the container's mount table "+
+				"has %d field(s) and no options field, so the options cannot be read: %q",
+				destination, len(fields), line)
+		}
+
+		return strings.Split(fields[3], ","), nil
+	}
+
+	return nil, fmt.Errorf("mount at %q: the container's mount table has no line for it "+
+		"to read the options from", destination)
 }
 
 // mountPoints returns the mount points named by a /proc/<pid>/mounts.
