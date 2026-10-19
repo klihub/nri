@@ -763,6 +763,51 @@ flags, which follow `critest` naming:
 | `-nri-test.scale-plugins` | 1 | plugins kept registered during a scalability burst, the recorder (index 00) included. Plugins 01 and up simulate real plugins: they subscribe and take time to answer, and NRI calls them in index order |
 | `-nri-test.scale-events` | every hook but `ValidateContainerAdjustment` | events the simulated plugins subscribe to, as `[INDEX=]EVENT,EVENT...`; repeatable. Without an index it applies to every simulated plugin. The recorder's events are fixed |
 | `-nri-test.scale-delay` | none | simulated processing time per event, as `DURATION` (every event) or `[INDEX/]EVENT=DURATION`, comma separated and repeatable; later entries win and `all` names every event. E.g. `50ms`, or `CreateContainer=200ms,StopContainer=200ms`. Index 0 delays the recorder, after it has recorded the event |
+| `-nri-test.scale-trace` | empty | measure from the runtime's OpenTelemetry spans instead of a recorder plugin: the `ADDR` an OTLP receiver listens on, e.g. `127.0.0.1:4317`. Every plugin is then simulated, so `-nri-test.scale-plugins` must be at least 1 |
+| `-nri-test.scale-trace-protocol` | http | `http` (OTLP/HTTP protobuf, `/v1/traces`) or `grpc` |
+| `-nri-test.scale-trace-dump` | none | write every span received to this file, one JSON span per line |
+
+### Measuring from the runtime's traces
+
+With `-nri-test.scale-trace` the scalability test has no recorder plugin.
+It starts an OTLP receiver, simulates all the plugins, and takes the
+timing of every NRI hook from the spans the runtime exports. The runtime
+must be configured to export to the receiver's address, which the test
+does not do. The suite runs on the node, so the address is local.
+
+containerd takes `OTEL_*` environment variables (a systemd drop-in is
+enough) and `-nri-test.scale-trace-protocol=http`:
+
+    OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
+    OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+    OTEL_SERVICE_NAME=containerd
+    OTEL_TRACES_SAMPLER=traceidratio
+    OTEL_TRACES_SAMPLER_ARG=1.0
+
+CRI-O takes a drop-in in `/etc/crio/crio.conf.d/` and
+`-nri-test.scale-trace=127.0.0.1:4317 -nri-test.scale-trace-protocol=grpc`:
+
+    [crio.tracing]
+    enable_tracing = true
+    tracing_endpoint = "127.0.0.1:4317"
+    tracing_sampling_rate_per_million = 1000000
+
+Limits to know about:
+
+- Runtimes batch spans, so the test waits up to 30 s for the last ones.
+- Full sampling slows the runtime. These are traced timings, and the
+  report says so.
+- Hook spans do not say which plugin they were for. Plugins are told apart
+  by start order, which relies on NRI calling them in index order.
+- A hook is attributed to a pod by the ids on its ancestor spans, or, for
+  CRI-O whose spans carry none, by the trace context the test sets on each
+  CRI call. containerd's `StopContainer` hook span is a root span with
+  neither, so it shows up as unattributed and the teardown stage count for
+  it is 0.
+- With containerd and 3 plugins at 50 ms on `CreateContainer` and
+  `StopContainer`, the traced per-pod CreateContainer to
+  PostCreateContainer times matched the recorder-based ones to within a
+  few milliseconds.
 
 ### What `Setup` does before any test runs
 

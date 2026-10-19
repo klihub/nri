@@ -205,12 +205,23 @@ type Config struct {
 	// see ScaleTerminal.
 	ScaleTerminalEvent string
 	// ScalePlugins is how many plugins a scalability run keeps registered,
-	// the recorder included.
+	// the recorder included, or all simulated when measuring from spans.
 	ScalePlugins int
 	// ScaleEvents and ScaleDelays are the raw -nri-test.scale-events and
 	// -nri-test.scale-delay entries. ScalePlan is what they parse to.
 	ScaleEvents, ScaleDelays []string
 	ScalePlan                *ScalePlan
+	// ScaleTrace is the address the run listens on for the runtime's
+	// OpenTelemetry spans. When set, the burst is measured from those spans
+	// instead of from a recorder plugin, and every registered plugin is a
+	// simulated one. Empty measures with the recorder.
+	ScaleTrace string
+	// ScaleTraceDump is where every received span is written, as JSON lines,
+	// when measuring from spans.
+	ScaleTraceDump string
+	// ScaleTraceProtocol is the OTLP transport ScaleTrace speaks: TraceHTTP
+	// or TraceGRPC.
+	ScaleTraceProtocol string
 	// ScaleReportPath is where the raw per-pod table is written, if anywhere.
 	ScaleReportPath string
 	// ScaleDriver selects what creates the burst: "cri" drives the runtime
@@ -311,6 +322,14 @@ func RegisterFlags() {
 		"simulated processing time, as DURATION (every event) or [INDEX/]EVENT=DURATION, "+
 			"comma separated and repeatable; later entries win; EVENT may be 'all'",
 		func(v string) error { TestConfig.ScaleDelays = append(TestConfig.ScaleDelays, v); return nil })
+	flag.StringVar(&TestConfig.ScaleTrace, "nri-test.scale-trace", "",
+		"listen for the runtime's OpenTelemetry spans on this address and measure the "+
+			"burst from them, with no recorder plugin; the runtime must be configured "+
+			"to export there")
+	flag.StringVar(&TestConfig.ScaleTraceProtocol, "nri-test.scale-trace-protocol", TraceHTTP,
+		"OTLP transport -nri-test.scale-trace speaks: http (containerd) or grpc (CRI-O)")
+	flag.StringVar(&TestConfig.ScaleTraceDump, "nri-test.scale-trace-dump", "",
+		"write every span received for -nri-test.scale-trace here, as JSON lines")
 	flag.StringVar(&TestConfig.ScaleReportPath, "nri-test.scale-report", "",
 		"write the raw per-pod timing table here as JSON")
 	flag.StringVar(&TestConfig.ScaleDriver, "nri-test.scale-driver", ScaleDriverCRI,
@@ -453,11 +472,22 @@ func (c *Config) Complete() error {
 	if c.ScalePlugins < 1 {
 		c.ScalePlugins = 1
 	}
-	plan, err := NewScalePlan(c.ScalePlugins, c.ScaleEvents, c.ScaleDelays)
+	newPlan := NewScalePlan
+	if c.ScaleTrace != "" {
+		newPlan = NewTracedScalePlan
+	}
+	plan, err := newPlan(c.ScalePlugins, c.ScaleEvents, c.ScaleDelays)
 	if err != nil {
 		return err
 	}
 	c.ScalePlan = plan
+	if c.ScaleTraceProtocol == "" {
+		c.ScaleTraceProtocol = TraceHTTP
+	}
+	if c.ScaleTraceProtocol != TraceHTTP && c.ScaleTraceProtocol != TraceGRPC {
+		return fmt.Errorf("unknown -nri-test.scale-trace-protocol %q: use %q or %q",
+			c.ScaleTraceProtocol, TraceHTTP, TraceGRPC)
+	}
 	if c.Scaling() && c.ScaleDriver != ScaleDriverCRI && c.ScaleDriver != ScaleDriverK8s {
 		// Refused rather than defaulted. The two drivers have opposite kubelet
 		// requirements, so a typo that silently picked one would either have

@@ -18,6 +18,7 @@ package suite
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"os"
 	"slices"
@@ -26,6 +27,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/containerd/nri/pkg/api"
 	"github.com/containerd/nri/test/nri-test/framework"
@@ -73,21 +75,187 @@ func recorderMask() api.EventMask {
 	return api.MustParseEventMask(names...)
 }
 
-// startScalePlugins starts the recorder and then the plan's simulated plugins.
-// The simulated ones record into queues of their own, so the recorder's queue
-// and the timelines built from it hold only the measured stages. NRI calls
-// plugins in index order, so each one's delay adds to the burst.
-func startScalePlugins(t *testing.T, s *framework.Suite) {
+// eventSource is where a burst's NRI events come from.
+type eventSource interface {
+	Events() []*framework.Event
+}
+
+// scaleSource is a run's instrument: either the recorder plugin's queue, or the
+// runtime's own OpenTelemetry spans.
+type scaleSource struct {
+	q    *framework.EventQ
+	recv *framework.TraceReceiver
+	// known maps sandbox ids to pod names for attributing spans, filled in as
+	// the burst creates pods.
+	mu    sync.Mutex
+	known map[string]string
+	// traces maps the ids of traces started by the client to pod names.
+	traces map[string]string
+}
+
+func (s *scaleSource) traced() bool { return s.recv != nil }
+
+// Events returns every event so far. For spans that is rebuilt from what the
+// receiver holds, since attribution can only be settled once a pod's spans
+// have all arrived.
+func (s *scaleSource) Events() []*framework.Event {
+	return s.hooks().Events
+}
+
+func (s *scaleSource) hooks() *framework.HookTrace {
+	if s.recv == nil {
+		return &framework.HookTrace{Events: s.q.Events()}
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return framework.NewHookTrace(s.recv.Spans(), s.known, s.traces)
+}
+
+// ctxFor returns ctx carrying a trace context of its own for a call about the
+// named pod, which the runtime's spans for the call then join. This is how
+// hooks are attributed to pods for runtimes whose spans carry no ids.
+func (s *scaleSource) ctxFor(ctx context.Context, pod string) context.Context {
+	if s.recv == nil {
+		return ctx
+	}
+
+	var sc trace.SpanContext
+
+	tid, sid := make([]byte, 16), make([]byte, 8)
+	_, _ = rand.Read(tid)
+	_, _ = rand.Read(sid)
+
+	sc = trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    trace.TraceID(tid),
+		SpanID:     trace.SpanID(sid),
+		TraceFlags: trace.FlagsSampled,
+		Remote:     true,
+	})
+
+	s.mu.Lock()
+	s.traces[sc.TraceID().String()] = pod
+	s.mu.Unlock()
+
+	return trace.ContextWithSpanContext(ctx, sc)
+}
+
+// learn tells the source a sandbox id's pod name.
+func (s *scaleSource) learn(id, name string) {
+	if s.recv == nil || id == "" {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.known[id] = name
+}
+
+// costs returns the recorder's own queue costs, of which spans have none.
+func (s *scaleSource) costs() []time.Duration {
+	if s.q == nil {
+		return nil
+	}
+
+	return s.q.Costs()
+}
+
+// grace is how long to wait for the trailing events of a burst. The runtime
+// exports spans in batches, so they arrive well after the calls they describe.
+func (s *scaleSource) grace() time.Duration {
+	if s.recv != nil {
+		return traceGrace
+	}
+
+	return 5 * time.Second
+}
+
+// traceGrace allows for the exporter's batch interval, 5s by default, with room
+// to spare.
+const traceGrace = 30 * time.Second
+
+// summarize says what the receiver got, so a run that attributed nothing can
+// be told apart from one that received nothing, and writes the spans out when
+// asked.
+func (s *scaleSource) summarize(t *testing.T) {
 	t.Helper()
 
-	plan := framework.TestConfig.ScalePlan
+	// Waited for rather than merely checked. The exporter batches, so "no
+	// spans yet" and "no spans ever" look the same at any single instant, and
+	// the second is the one worth a message of its own: every other failure a
+	// traced run can produce reads as the measurement having gone wrong rather
+	// than as the runtime never having been configured to export.
+	err := s.recv.WaitSpans(traceGrace)
+	require.NoError(t, err, "no spans arrived within %s, so the runtime is not "+
+		"exporting to %s; see the README on measuring from the runtime's traces",
+		traceGrace, s.recv.Addr())
 
-	recorder := s.NewPlugin("scale-recorder", "00", scaleMask)
-	plan.SimulateWork(recorder, 0)
+	spans := s.recv.Spans()
+	ht := s.hooks()
 
-	plugins := []*framework.TestPlugin{recorder}
+	t.Logf("received %d spans, %d NRI hook calls attributed to a pod and %d that were not",
+		len(spans), len(ht.Calls), len(ht.Orphans))
 
-	for i := 1; i < plan.Plugins; i++ {
+	if path := framework.TestConfig.ScaleTraceDump; path != "" {
+		require.NoError(t, s.recv.WriteSpans(path), "failed to write the spans")
+		t.Logf("wrote the spans to %s", path)
+	}
+}
+
+// report builds a burst's report from the source, adding the runtime's own
+// per-hook timings when measuring from spans.
+func (s *scaleSource) report(iteration, n int, t *framework.Timeline, names []string) *framework.ScaleReport {
+	r := framework.NewScaleReport(iteration, n, t)
+
+	if s.traced() {
+		r.Traced = true
+		r.Hooks = s.hooks().HookStats(names, t.Phase.Stages)
+	}
+
+	return r
+}
+
+// startScalePlugins starts the plan's plugins and returns the source the burst
+// is measured from.
+//
+// With a recorder, plugin 00 is the recorder and the rest are simulated; the
+// simulated ones record into queues of their own, so the recorder's queue and
+// the timelines built from it hold only the measured stages. When measuring
+// from spans there is no recorder, and every plugin is a simulated one. NRI
+// calls plugins in index order, so each one's delay adds to the burst.
+func startScalePlugins(t *testing.T, s *framework.Suite) *scaleSource {
+	t.Helper()
+
+	cfg := framework.TestConfig
+	plan := cfg.ScalePlan
+
+	src := &scaleSource{known: map[string]string{}, traces: map[string]string{}}
+	plugins := []*framework.TestPlugin{}
+	first := 0
+
+	if cfg.ScaleTrace != "" {
+		recv, err := framework.NewTraceReceiver(cfg.ScaleTraceProtocol, cfg.ScaleTrace)
+		require.NoError(t, err)
+
+		t.Cleanup(recv.Close)
+		t.Logf("measuring from the runtime's spans, received over OTLP/%s on %s",
+			cfg.ScaleTraceProtocol, recv.Addr())
+
+		src.recv = recv
+	} else {
+		recorder := s.NewPlugin("scale-recorder", "00", scaleMask)
+		plan.SimulateWork(recorder, 0)
+
+		plugins = append(plugins, recorder)
+		src.q = s.Q()
+		src.q.Grow(cfg.ScaleReplicas * scaleEventsPerPod)
+		src.q.TrackCost(true, cfg.ScaleReplicas*scaleEventsPerPod)
+		first = 1
+	}
+
+	for i := first; i < plan.Plugins; i++ {
 		mask, err := plan.Mask(i)
 		require.NoError(t, err)
 
@@ -103,6 +271,8 @@ func startScalePlugins(t *testing.T, s *framework.Suite) {
 	}
 
 	s.StartPlugins(plugins...)
+
+	return src
 }
 
 func TestScalability(t *testing.T) {
@@ -136,11 +306,7 @@ func runCRIBurst(t *testing.T, iteration int) {
 	s := framework.NewSuite(t, "scale-cri")
 	framework.RequireCaps(t, framework.CapContainerLifecycle)
 
-	q := s.Q()
-	q.Grow(n * scaleEventsPerPod)
-	q.TrackCost(true, n*scaleEventsPerPod)
-
-	startScalePlugins(t, s)
+	q := startScalePlugins(t, s)
 
 	// Specs are built up front, serially, so the burst itself does nothing but
 	// issue calls. PodSpec stamps the run id and the case label, so the
@@ -186,7 +352,11 @@ func runCRIBurst(t *testing.T, iteration int) {
 	// because those end the test through require, and testify's FailNow has to
 	// run on the test's own goroutine. Errors come back through the OpLog and
 	// are asserted once the burst is over.
-	// The startup's own budget; the teardown gets a second one below.
+	// The startup's own budget. The teardown gets a second one below rather
+	// than sharing this: the grace wait between them spends part of this one,
+	// so a burst that ran long would hand the teardown an already-expired
+	// context, every teardown call would fail the moment it was issued, and
+	// the teardown report would be of a phase that never happened.
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.ScalePhaseBudget())
 	defer cancel()
 
@@ -204,12 +374,14 @@ func runCRIBurst(t *testing.T, iteration int) {
 				Op: framework.RunPodSandbox, PodName: spec.Name,
 			}, func() error {
 				var err error
-				pod, err = s.Driver().CreatePod(ctx, spec)
+				pod, err = s.Driver().CreatePod(q.ctxFor(ctx, spec.Name), spec)
 
 				return err
 			})
 
 			if pod != nil {
+				q.learn(pod.ID, spec.Name)
+
 				mu.Lock()
 				pods = append(pods, pod)
 				names = append(names, spec.Name)
@@ -231,7 +403,7 @@ func runCRIBurst(t *testing.T, iteration int) {
 
 			err = ops.Time(crec, func() error {
 				var err error
-				ctr, err = s.Driver().CreateContainer(ctx, pod, cspec)
+				ctr, err = s.Driver().CreateContainer(q.ctxFor(ctx, spec.Name), pod, cspec)
 
 				return err
 			})
@@ -257,7 +429,7 @@ func runCRIBurst(t *testing.T, iteration int) {
 				Op: framework.StartContainer, PodName: spec.Name,
 				PodID: pod.ID, CtrName: cspec.Name, CtrID: ctr.ID,
 			}, func() error {
-				return s.Driver().StartContainer(ctx, ctr)
+				return s.Driver().StartContainer(q.ctxFor(ctx, spec.Name), ctr)
 			})
 		}(spec)
 	}
@@ -271,13 +443,15 @@ func runCRIBurst(t *testing.T, iteration int) {
 	// be in flight.
 	// The stage the run asked to be measured to, not a fixed one: waiting for
 	// an event the measurement does not use would spend the grace on nothing.
-	waitForStage(q, names, cfg.ScaleTerminal(), len(names), 5*time.Second)
+	waitForStage(q, names, cfg.ScaleTerminal(), len(names), q.grace())
 
-	up := framework.NewPhaseTimeline(cfg, q.Events(), names, framework.StartupPhase())
-	up.RecorderCost = q.Costs()
+	events := q.Events()
 
-	upReport := framework.NewScaleReport(iteration, n, up)
-	upReport.OpStats = framework.CorrelateOps(ops.Records(), q.Events())
+	up := framework.NewPhaseTimeline(cfg, events, names, framework.StartupPhase())
+	up.RecorderCost = q.costs()
+
+	upReport := q.report(iteration, n, up, names)
+	upReport.OpStats = framework.CorrelateOps(ops.Records(), events)
 	upReport.ClientBurst = framework.ClientBurst(ops.Records(), up)
 	upReport.Print(os.Stdout)
 
@@ -286,20 +460,18 @@ func runCRIBurst(t *testing.T, iteration int) {
 	// and the tidy-up are the same act rather than two.
 	downOps := framework.NewOpLog(len(pods) * 2)
 
-	// Its own budget, not the burst's. The wait above spends part of that one,
-	// so sharing it would hand the teardown an already-expired context: every
-	// call below would fail the moment it was issued and the numbers would be
-	// of a teardown that never happened.
 	downCtx, downCancel := context.WithTimeout(context.Background(), cfg.ScalePhaseBudget())
 	defer downCancel()
 
-	tearDownCRIBurst(t, s, pods, downOps, downCtx)
+	tearDownCRIBurst(t, s, q, pods, downOps, downCtx)
 
-	waitForStage(q, names, framework.RemovePodSandbox, len(names), 5*time.Second)
+	waitForStage(q, names, framework.RemovePodSandbox, len(names), q.grace())
 
-	down := framework.NewPhaseTimeline(cfg, q.Events(), names, framework.TeardownPhase())
-	downReport := framework.NewScaleReport(iteration, n, down)
-	downReport.OpStats = framework.CorrelateOps(downOps.Records(), q.Events())
+	events = q.Events()
+
+	down := framework.NewPhaseTimeline(cfg, events, names, framework.TeardownPhase())
+	downReport := q.report(iteration, n, down, names)
+	downReport.OpStats = framework.CorrelateOps(downOps.Records(), events)
 	downReport.ClientBurst = framework.ClientBurst(downOps.Records(), down)
 	downReport.Print(os.Stdout)
 
@@ -310,11 +482,11 @@ func runCRIBurst(t *testing.T, iteration int) {
 	// The deliverable is the measurement, so the assertions are about whether
 	// it is trustworthy rather than about a latency budget. A threshold would
 	// be a number nobody has measured yet.
-	// Both directions, through the same helper. The teardown's calls are
-	// issued with their errors collected rather than asserted -- a burst
-	// goroutine cannot use require -- so a direction left out here is a
-	// direction whose failures nobody ever sees, printing a report that reads
-	// as a measurement.
+	// Both directions, through the same helper. The teardown's failures used
+	// to be discarded entirely -- its calls are issued with `_ =` because a
+	// burst goroutine cannot use require -- so a scale-down in which
+	// StopPodSandbox or RemovePodSandbox failed still printed a teardown
+	// report that read as a measurement.
 	for _, phase := range []struct {
 		name string
 		ops  *framework.OpLog
@@ -336,6 +508,11 @@ func runCRIBurst(t *testing.T, iteration int) {
 	}
 
 	require.Equal(t, n, attempted, "every pod of the burst must have been attempted")
+
+	if q.traced() {
+		q.summarize(t)
+	}
+
 	require.Equal(t, len(names), upReport.Started,
 		"every pod needs a RunPodSandbox callback, or the recorder missed events "+
 			"and the burst is measured over an incomplete set")
@@ -343,7 +520,7 @@ func runCRIBurst(t *testing.T, iteration int) {
 
 // tearDownCRIBurst stops and removes the burst's pods together, timing each
 // call.
-func tearDownCRIBurst(t *testing.T, s *framework.Suite, pods []*framework.Pod,
+func tearDownCRIBurst(t *testing.T, s *framework.Suite, q *scaleSource, pods []*framework.Pod,
 	ops *framework.OpLog, ctx context.Context) {
 	t.Helper()
 
@@ -362,13 +539,13 @@ func tearDownCRIBurst(t *testing.T, s *framework.Suite, pods []*framework.Pod,
 			_ = ops.Time(&framework.OpRecord{
 				Op: framework.StopPodSandbox, PodName: pod.Spec.Name, PodID: pod.ID,
 			}, func() error {
-				return s.Driver().StopPod(ctx, pod)
+				return s.Driver().StopPod(q.ctxFor(ctx, pod.Spec.Name), pod)
 			})
 
 			_ = ops.Time(&framework.OpRecord{
 				Op: framework.RemovePodSandbox, PodName: pod.Spec.Name, PodID: pod.ID,
 			}, func() error {
-				return s.Driver().RemovePod(ctx, pod)
+				return s.Driver().RemovePod(q.ctxFor(ctx, pod.Spec.Name), pod)
 			})
 		}(pod)
 	}
@@ -381,7 +558,7 @@ func tearDownCRIBurst(t *testing.T, s *framework.Suite, pods []*framework.Pod,
 //
 // For a CRI burst only the trailing notifications need this, since the hooks
 // are synchronous. For a ReplicaSet burst it is how the window closes at all.
-func waitForStage(q *framework.EventQ, names []string, stage framework.EventType,
+func waitForStage(q eventSource, names []string, stage framework.EventType,
 	want int, timeout time.Duration) {
 	deadline := time.Now().Add(timeout)
 
@@ -396,7 +573,7 @@ func waitForStage(q *framework.EventQ, names []string, stage framework.EventType
 
 // countReached returns how many of the named pods have an event of the given
 // type recorded.
-func countReached(q *framework.EventQ, pods []string, e framework.EventType) int {
+func countReached(q eventSource, pods []string, e framework.EventType) int {
 	seen := map[string]struct{}{}
 
 	for _, ev := range q.Events() {

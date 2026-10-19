@@ -183,3 +183,28 @@ func TestScalePlanDescribeSkipsEventsTheRecorderDoesNotGet(t *testing.T) {
 	require.NotContains(t, d[0], "UpdateContainer")
 	require.NotContains(t, d[0], "UpdatePodSandbox")
 }
+
+func TestScalePlanTracedHasNoRecorder(t *testing.T) {
+	_, err := NewScalePlan(2, []string{"0=CreateContainer"}, nil)
+	require.Error(t, err, "plugin 0 is the recorder, whose events are fixed")
+
+	p, err := NewTracedScalePlan(2, []string{"0=CreateContainer"}, []string{"0/CreateContainer=10ms"})
+	require.NoError(t, err)
+	require.True(t, p.Traced)
+	require.Equal(t, []EventType{CreateContainer}, p.Events(0))
+
+	lines := p.Describe()
+	require.Contains(t, lines[0], "plugin 00 (1 events)", "plugin 0 is a simulated plugin when there is no recorder")
+	require.Contains(t, lines[0], "CreateContainer=10ms")
+
+	_, err = NewTracedScalePlan(2, []string{"2=CreateContainer"}, nil)
+	require.Error(t, err)
+
+	p, err = NewTracedScalePlan(3, []string{"CreateContainer"}, nil)
+	require.NoError(t, err)
+	require.Equal(t, []EventType{CreateContainer}, p.Events(0), "a bare event list reaches plugin 0 too")
+
+	recorded, err := NewScalePlan(2, nil, nil)
+	require.NoError(t, err)
+	require.Contains(t, recorded.Describe()[0], "plugin 00 (recorder)")
+}
