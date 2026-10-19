@@ -760,6 +760,9 @@ flags, which follow `critest` naming:
 | `-nri-test.scale-terminal` | `PostStartContainer` | stage a burst is measured to: `StartContainer`, the runtime asking before it starts a container, or `PostStartContainer`, being told it has started. They answer different questions; anything else is refused |
 | `-nri-test.scale-report` | none | write the raw per-pod timing table here as JSON, so a distribution can be plotted without re-running the burst; iterations after the first get the iteration number appended |
 | `-nri-test.scale-driver` | cri | what creates a scalability burst: `cri` drives the runtime directly, so every operation has client-side timing too and kubelet must be stopped; `k8s` scales a ReplicaSet, which needs kubelet running. The two have opposite kubelet requirements and a typo is refused rather than defaulted |
+| `-nri-test.scale-plugins` | 1 | plugins kept registered during a scalability burst, the recorder (index 00) included. Plugins 01 and up simulate real plugins: they subscribe and take time to answer, and NRI calls them in index order |
+| `-nri-test.scale-events` | every hook but `ValidateContainerAdjustment` | events the simulated plugins subscribe to, as `[INDEX=]EVENT,EVENT...`; repeatable. Without an index it applies to every simulated plugin. The recorder's events are fixed |
+| `-nri-test.scale-delay` | none | simulated processing time per event, as `DURATION` (every event) or `[INDEX/]EVENT=DURATION`, comma separated and repeatable; later entries win and `all` names every event. E.g. `50ms`, or `CreateContainer=200ms,StopContainer=200ms`. Index 0 delays the recorder, after it has recorded the event |
 
 ### What `Setup` does before any test runs
 

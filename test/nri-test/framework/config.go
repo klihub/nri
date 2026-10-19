@@ -204,6 +204,13 @@ type Config struct {
 	// StartContainer or PostStartContainer. They answer different questions;
 	// see ScaleTerminal.
 	ScaleTerminalEvent string
+	// ScalePlugins is how many plugins a scalability run keeps registered,
+	// the recorder included.
+	ScalePlugins int
+	// ScaleEvents and ScaleDelays are the raw -nri-test.scale-events and
+	// -nri-test.scale-delay entries. ScalePlan is what they parse to.
+	ScaleEvents, ScaleDelays []string
+	ScalePlan                *ScalePlan
 	// ScaleReportPath is where the raw per-pod table is written, if anywhere.
 	ScaleReportPath string
 	// ScaleDriver selects what creates the burst: "cri" drives the runtime
@@ -293,6 +300,17 @@ func RegisterFlags() {
 	flag.StringVar(&TestConfig.ScaleTerminalEvent, "nri-test.scale-terminal",
 		string(PostStartContainer),
 		"stage a burst is measured to: StartContainer or PostStartContainer")
+	flag.IntVar(&TestConfig.ScalePlugins, "nri-test.scale-plugins", 1,
+		"plugins kept registered during a scalability run, the recorder included; "+
+			"the others simulate plugins that subscribe and take time to answer")
+	flag.Func("nri-test.scale-events",
+		"events simulated plugins subscribe to, as [INDEX=]EVENT,EVENT...; repeatable; "+
+			"the default is every hook except ValidateContainerAdjustment",
+		func(v string) error { TestConfig.ScaleEvents = append(TestConfig.ScaleEvents, v); return nil })
+	flag.Func("nri-test.scale-delay",
+		"simulated processing time, as DURATION (every event) or [INDEX/]EVENT=DURATION, "+
+			"comma separated and repeatable; later entries win; EVENT may be 'all'",
+		func(v string) error { TestConfig.ScaleDelays = append(TestConfig.ScaleDelays, v); return nil })
 	flag.StringVar(&TestConfig.ScaleReportPath, "nri-test.scale-report", "",
 		"write the raw per-pod timing table here as JSON")
 	flag.StringVar(&TestConfig.ScaleDriver, "nri-test.scale-driver", ScaleDriverCRI,
@@ -432,6 +450,14 @@ func (c *Config) Complete() error {
 	if c.ScaleDriver == "" {
 		c.ScaleDriver = ScaleDriverCRI
 	}
+	if c.ScalePlugins < 1 {
+		c.ScalePlugins = 1
+	}
+	plan, err := NewScalePlan(c.ScalePlugins, c.ScaleEvents, c.ScaleDelays)
+	if err != nil {
+		return err
+	}
+	c.ScalePlan = plan
 	if c.Scaling() && c.ScaleDriver != ScaleDriverCRI && c.ScaleDriver != ScaleDriverK8s {
 		// Refused rather than defaulted. The two drivers have opposite kubelet
 		// requirements, so a typo that silently picked one would either have

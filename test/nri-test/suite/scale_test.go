@@ -18,6 +18,7 @@ package suite
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"slices"
 	"sync"
@@ -61,10 +62,48 @@ const scaleEventsPerPod = 10
 // scaleMask is what the recorder subscribes to: every startup and teardown
 // stage, and nothing else. A recorder that could adjust would be measuring its
 // own adjustment path rather than the runtime's scheduling.
-var scaleMask = api.MustParseEventMask(
-	"RunPodSandbox,StopPodSandbox,RemovePodSandbox," +
-		"CreateContainer,PostCreateContainer,StartContainer,PostStartContainer," +
-		"StopContainer,RemoveContainer")
+var scaleMask = recorderMask()
+
+func recorderMask() api.EventMask {
+	names := make([]string, 0, len(framework.RecorderEvents))
+	for _, ev := range framework.RecorderEvents {
+		names = append(names, string(ev))
+	}
+
+	return api.MustParseEventMask(names...)
+}
+
+// startScalePlugins starts the recorder and then the plan's simulated plugins.
+// The simulated ones record into queues of their own, so the recorder's queue
+// and the timelines built from it hold only the measured stages. NRI calls
+// plugins in index order, so each one's delay adds to the burst.
+func startScalePlugins(t *testing.T, s *framework.Suite) {
+	t.Helper()
+
+	plan := framework.TestConfig.ScalePlan
+
+	recorder := s.NewPlugin("scale-recorder", "00", scaleMask)
+	plan.SimulateWork(recorder, 0)
+
+	plugins := []*framework.TestPlugin{recorder}
+
+	for i := 1; i < plan.Plugins; i++ {
+		mask, err := plan.Mask(i)
+		require.NoError(t, err)
+
+		p := framework.NewTestPlugin(fmt.Sprintf("scale-sim%02d", i), fmt.Sprintf("%02d", i),
+			mask, &framework.EventQ{}, s.Scope())
+		plan.SimulateWork(p, i)
+
+		plugins = append(plugins, p)
+	}
+
+	for _, line := range plan.Describe() {
+		t.Log(line)
+	}
+
+	s.StartPlugins(plugins...)
+}
 
 func TestScalability(t *testing.T) {
 	cfg := framework.TestConfig
@@ -101,8 +140,7 @@ func runCRIBurst(t *testing.T, iteration int) {
 	q.Grow(n * scaleEventsPerPod)
 	q.TrackCost(true, n*scaleEventsPerPod)
 
-	recorder := s.NewPlugin("scale-recorder", "00", scaleMask)
-	s.StartPlugins(recorder)
+	startScalePlugins(t, s)
 
 	// Specs are built up front, serially, so the burst itself does nothing but
 	// issue calls. PodSpec stamps the run id and the case label, so the
