@@ -28,11 +28,6 @@ import (
 	"github.com/containerd/nri/test/nri-test/framework"
 )
 
-const (
-	// stopTimeout is the grace period given to a container being stopped.
-	stopTimeout = int64(0)
-)
-
 // Driver creates and mutates test workloads over CRI.
 type Driver struct {
 	cfg    *framework.Config
@@ -65,6 +60,9 @@ func NewDriver(ctx context.Context, cfg *framework.Config) (*Driver, *Inspector,
 
 	return d, NewInspector(client), nil
 }
+
+// Client returns the driver's CRI client, for a driver that wraps this one.
+func (d *Driver) Client() *Client { return d.client }
 
 // Name identifies the driver.
 func (d *Driver) Name() string {
@@ -101,12 +99,14 @@ func (d *Driver) probeCapabilities() framework.Capability {
 	return framework.CapContainerLifecycle |
 		framework.CapObserveOpError |
 		framework.CapUpdateContainerResources |
-		framework.CapExec
+		framework.CapExec |
+		framework.CapRawResources |
+		framework.CapContainerMetadata
 }
 
 // CreatePod creates a pod sandbox and any containers its spec carries.
 func (d *Driver) CreatePod(ctx context.Context, p *framework.PodSpec) (*framework.Pod, error) {
-	cfg := PodSandboxConfig(p)
+	cfg := PodSandboxConfig(d.cfg, p)
 
 	// The handler, not a hardcoded "": an empty one still means the runtime's
 	// default, so the default path is unchanged and a selected handler is the only
@@ -123,9 +123,12 @@ func (d *Driver) CreatePod(ctx context.Context, p *framework.PodSpec) (*framewor
 	d.mu.Unlock()
 
 	for _, c := range p.Containers {
-		if _, err := d.CreateContainer(ctx, pod, c); err != nil {
+		ctr, err := d.CreateContainer(ctx, pod, c)
+		if err != nil {
 			return pod, err
 		}
+
+		pod.Containers = append(pod.Containers, ctr)
 	}
 
 	return pod, nil
@@ -175,7 +178,7 @@ func (d *Driver) RemovePod(ctx context.Context, p *framework.Pod) error {
 // CreateContainer creates a container in a pod.
 func (d *Driver) CreateContainer(ctx context.Context, p *framework.Pod, c *framework.ContainerSpec) (*framework.Container, error) {
 	var (
-		podCfg = PodSandboxConfig(p.Spec)
+		podCfg = PodSandboxConfig(d.cfg, p.Spec)
 		ctrCfg = ContainerConfig(d.cfg, c)
 	)
 
@@ -209,7 +212,7 @@ func (d *Driver) UpdateContainerResources(ctx context.Context, c *framework.Cont
 
 // StopContainer stops a running container.
 func (d *Driver) StopContainer(ctx context.Context, c *framework.Container) error {
-	if err := d.client.Runtime.StopContainer(ctx, c.ID, stopTimeout); err != nil {
+	if err := d.client.Runtime.StopContainer(ctx, c.ID, d.cfg.StopGraceSeconds()); err != nil {
 		return fmt.Errorf("failed to stop container %s: %w", c.ID, err)
 	}
 

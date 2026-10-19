@@ -42,8 +42,9 @@ type PodSpec struct {
 	// -> kernel, and a feature that fails under one low-level runtime and passes
 	// under another is a defect in that runtime, not in NRI.
 	RuntimeHandler string
-	// Containers are created together with the pod by drivers that lack
-	// CapContainerLifecycle. Drivers that have it may create them lazily.
+	// Containers are created together with the pod. This is the path every
+	// driver supports, and the one tests should use: a driver whose containers
+	// cannot be created apart from their pod has no other.
 	Containers []*ContainerSpec
 }
 
@@ -95,6 +96,10 @@ type Pod struct {
 	ID string
 	// Spec is what the pod was created from.
 	Spec *PodSpec
+	// Containers are the ones created together with the pod, in the order of
+	// Spec.Containers. They are present even when creating the pod failed part
+	// way, so that what was created can still be cleaned up and attributed.
+	Containers []*Container
 }
 
 // Container is a created container.

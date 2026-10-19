@@ -30,35 +30,60 @@ import (
 // runLifecycle drives a pod and one container through their whole lifecycle,
 // exercising every NRI hook and recording the events a plugin receives.
 //
-// It creates a pod and container, starts the container, updates container resources,
-// stops the container, removes the container, stops the pod, and removes the pod.
-// This sequence exercises RunPodSandbox, CreateContainer, PostCreateContainer,
+// It creates a pod with a container, starts the container, updates container
+// resources, stops and removes the container if the driver can do that apart from its
+// pod, then stops and removes the pod. Either way the sequence exercises RunPodSandbox, CreateContainer, PostCreateContainer,
 // StartContainer, PostStartContainer, UpdateContainer, PostUpdateContainer,
 // StopContainer, RemoveContainer, StopPodSandbox, and RemovePodSandbox hooks.
 func runLifecycle(t *testing.T, s *framework.Suite) (*framework.Pod, *framework.Container) {
 	t.Helper()
 
-	pod := s.CreatePod(s.PodSpec("pod"))
-	ctr := s.CreateContainer(pod, s.CtrSpec("ctr0"))
+	pod, ctr := s.CreatePodWithContainer("pod", s.CtrSpec("ctr0"))
 
 	// Every call goes through the Suite, so each one is bounded by
 	// Config.Timeout. See Suite.do for why a bare context.Background() here is a
 	// leak waiting to happen.
 	s.StartContainer(ctr)
-	s.UpdateContainerResources(ctr, &framework.Resources{CPUShares: 512})
-	s.StopContainer(ctr)
-	s.RemoveContainer(ctr)
-	s.StopPod(pod)
-	s.RemovePod(pod)
+	if s.Driver().Capabilities().Has(framework.CapUpdateContainerResources) {
+		s.UpdateContainerResources(ctr, &framework.Resources{CPUShares: 512})
+	}
+	removeWorkload(s, pod, ctr)
 
 	return pod, ctr
+}
+
+// removeWorkload takes a pod and its container down. The container is stopped and
+// removed on its own first when the driver can, which is how the runtime is asked
+// for those two events directly; otherwise they are the runtime's to send when the
+// pod goes.
+func removeWorkload(s *framework.Suite, pod *framework.Pod, ctr *framework.Container) {
+	if s.Driver().Capabilities().Has(framework.CapContainerLifecycle) {
+		s.StopContainer(ctr)
+		s.RemoveContainer(ctr)
+	}
+
+	s.StopPod(pod)
+	s.RemovePod(pod)
+}
+
+// requireUpdatesIfSubscribed skips a case that subscribes to an update event
+// when the driver cannot make the runtime send one. A case that does not
+// subscribe to one runs with every driver: runLifecycle only updates the
+// container when it can.
+func requireUpdatesIfSubscribed(t *testing.T, subscriptions ...string) {
+	t.Helper()
+
+	for _, mask := range subscriptions {
+		if strings.Contains(mask, "UpdateContainer") {
+			framework.RequireCaps(t, framework.CapUpdateContainerResources)
+			return
+		}
+	}
 }
 
 func TestPodAndContainerRequestsAndEvents(t *testing.T) {
 	t.Run("should succeed when no plugin is connected", func(t *testing.T) {
 		s := framework.NewSuite(t, "events-no-plugins")
-		framework.RequireCaps(t,
-			framework.CapContainerLifecycle|framework.CapUpdateContainerResources)
 
 		runLifecycle(t, s)
 	})
@@ -69,8 +94,7 @@ func TestPodAndContainerRequestsAndEvents(t *testing.T) {
 func subscriptionTable(subscriptions ...string) func(*testing.T) {
 	return func(t *testing.T) {
 		s := framework.NewSuite(t, "events-subscribed")
-		framework.RequireCaps(t,
-			framework.CapContainerLifecycle|framework.CapUpdateContainerResources)
+		requireUpdatesIfSubscribed(t, subscriptions...)
 
 		plugin := s.NewPlugin("subscribed", "00", api.MustParseEventMask(subscriptions...))
 		s.StartPlugins(plugin)

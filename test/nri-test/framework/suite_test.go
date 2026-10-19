@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -151,6 +152,8 @@ type fakeDriver struct {
 	// several pods cannot share one budget is how the shared-deadline defect is
 	// reproduced.
 	opDelay time.Duration
+	// podCtrs are the containers CreatePod reports having created.
+	podCtrs []*Container
 	// createPodErr is what CreatePod fails with. The pod is returned alongside
 	// it, as a real driver's partially created sandbox is, so the suite's
 	// record-before-asserting path is exercised too.
@@ -190,7 +193,7 @@ func (d *fakeDriver) ConflictsWithKubelet() bool { return true }
 func (d *fakeDriver) CreatePod(_ context.Context, spec *PodSpec) (*Pod, error) {
 	d.createdPods = append(d.createdPods, spec.Name)
 
-	return &Pod{ID: spec.Name, Spec: spec}, d.createPodErr
+	return &Pod{ID: spec.Name, Spec: spec, Containers: d.podCtrs}, d.createPodErr
 }
 
 // wait models an RPC that takes opDelay and fails if the context expires first.
@@ -525,45 +528,37 @@ func TestSuiteCleanupGivesTheContainerGuardABudgetOfItsOwn(t *testing.T) {
 		"the container guard must still report its leak")
 }
 
-func TestSuiteCreatePodRefusesSpecContainersWhenTheDriverCanCreateThemLazily(t *testing.T) {
-	// PodSpec.Containers is for drivers that lack CapContainerLifecycle. A driver
-	// that has it creates those containers inside CreatePod and hands back only the
-	// pod, so the suite never learns their ids and the leak guard can only report
-	// them as pre-existing -- a real leak attributed to an earlier case that never
-	// existed. The tracked path is right there, so this is worth refusing rather
-	// than documenting.
+func TestSuiteCreatePodRecordsTheContainersItCreated(t *testing.T) {
+	// The containers created with a pod are on s.ctrs, so the leak guard names
+	// them as this case's. That holds for a driver that can also create containers
+	// individually: there is no second, better path to refuse them for.
 	useConfig(t, &Config{Timeout: time.Minute, Namespace: "nri-test"})
 
-	t.Run("refuses them when the driver creates containers individually", func(t *testing.T) {
-		d := &fakeDriver{caps: CapContainerLifecycle}
+	for _, caps := range []Capability{0, CapContainerLifecycle} {
+		d := &fakeDriver{caps: caps, podCtrs: []*Container{{ID: "ctr-0"}}}
 		useDriver(t, d)
 
 		ft := &fakeT{}
 		s := newFakeSuite(ft)
 
-		// fakeT.FailNow panics rather than unwinding a goroutine, which is what lets
-		// this see that nothing was created.
-		require.Panics(t, func() { s.CreatePod(s.PodSpec("pod", s.CtrSpec("ctr0"))) })
+		pod := s.CreatePod(s.PodSpec("pod", s.CtrSpec("ctr0")))
 
-		require.Contains(t, ft.allErrors(), "Suite.CreateContainer",
-			"the message must name the path that is tracked")
-		require.Empty(t, d.createdPods,
-			"the pod must be refused before the runtime is asked for anything")
-	})
-
-	t.Run("allows them when the driver cannot", func(t *testing.T) {
-		// The future Kubernetes driver: every container arrives with its pod, so this
-		// is the only path it has and refusing it would refuse the driver.
-		d := &fakeDriver{}
-		useDriver(t, d)
-
-		ft := &fakeT{}
-		s := newFakeSuite(ft)
-
-		s.CreatePod(s.PodSpec("pod", s.CtrSpec("ctr0")))
-
+		require.Empty(t, ft.errors, "driver capabilities %v", caps)
 		require.Len(t, d.createdPods, 1)
-		require.Empty(t, ft.errors)
+		require.Equal(t, pod.Containers, s.ctrs)
+	}
+
+	t.Run("records them when creating the pod failed part way", func(t *testing.T) {
+		useReport(t)
+
+		d := &fakeDriver{podCtrs: []*Container{{ID: "ctr-0"}}, createPodErr: errors.New("refused")}
+		useDriver(t, d)
+
+		ft := &fakeT{}
+		s := newFakeSuite(ft)
+
+		require.Panics(t, func() { s.CreatePod(s.PodSpec("pod", s.CtrSpec("ctr0"))) })
+		require.Len(t, s.ctrs, 1)
 	})
 }
 
@@ -1116,10 +1111,24 @@ type pullDriver struct {
 
 	err    error
 	pulled []string
+
+	// delay is how long each pull takes, and budgets what each was given.
+	delay   time.Duration
+	budgets []time.Duration
 }
 
-func (d *pullDriver) PullImage(_ context.Context, image string) error {
+func (d *pullDriver) PullImage(ctx context.Context, image string) error {
 	d.pulled = append(d.pulled, image)
+
+	// What budget this pull was handed, so a test can tell a per-image one
+	// from a shared one that the previous image already spent.
+	if deadline, ok := ctx.Deadline(); ok {
+		d.budgets = append(d.budgets, time.Until(deadline))
+	} else {
+		d.budgets = append(d.budgets, 0)
+	}
+
+	time.Sleep(d.delay)
 
 	return d.err
 }
@@ -1159,6 +1168,30 @@ func TestPullImage(t *testing.T) {
 		require.NoError(t, pullImage(context.Background(),
 			&Config{Image: cfg.Image, NoPull: true}))
 		require.Empty(t, d.pulled)
+	})
+
+	t.Run("gives each image a budget of its own", func(t *testing.T) {
+		// One shared budget meant the first image's pull spent the second's:
+		// on a node where the first is slow or absent, the later images fail
+		// on a deadline the pull before them used up, and the message blames
+		// the wrong image. Each image gets its own, as PullImages already did.
+		useExtraImages(t, "second/img:1")
+
+		d := &pullDriver{delay: 60 * time.Millisecond}
+		useDriver(t, d)
+
+		budget := &Config{Image: cfg.Image, Timeout: 500 * time.Millisecond}
+
+		require.NoError(t, pullImage(context.Background(), budget))
+		require.Len(t, d.pulled, 2, "both images must be pulled")
+		require.Len(t, d.budgets, 2)
+
+		for i, got := range d.budgets {
+			require.Greater(t, got, 400*time.Millisecond,
+				"image %d (%s) was handed %v of a %v budget, so the pulls are "+
+					"sharing one deadline rather than each having its own",
+				i, d.pulled[i], got, budget.Timeout)
+		}
 	})
 
 	t.Run("is optional for a driver that cannot pull", func(t *testing.T) {
@@ -1543,7 +1576,7 @@ func TestSuiteCtrSpecCarriesAKeepAliveCommand(t *testing.T) {
 
 	spec := newFakeSuite(&fakeT{}).CtrSpec("ctr0")
 
-	require.Equal(t, []string{"sleep", "600"}, spec.Command,
+	require.Equal(t, KeepAliveCommand(), spec.Command,
 		"a test container must be given a command that keeps it running")
 }
 
@@ -1881,3 +1914,26 @@ func (*noOpDriver) ListRunPods(context.Context) ([]string, error)       { return
 func (*noOpDriver) ListRunContainers(context.Context) ([]string, error) { return nil, nil }
 func (*noOpDriver) Cleanup(context.Context) error                       { return nil }
 func (*noOpDriver) Close(context.Context) error                         { return nil }
+
+func TestCheckCgroupV2(t *testing.T) {
+	saved := cgroupRoot
+	t.Cleanup(func() { cgroupRoot = saved })
+
+	cgroupRoot = t.TempDir()
+	require.ErrorContains(t, checkCgroupV2(), "cgroup v2",
+		"a root with no cgroup.controllers is a v1 or hybrid hierarchy")
+
+	require.NoError(t, os.WriteFile(filepath.Join(cgroupRoot, "cgroup.controllers"), nil, 0o600))
+	require.NoError(t, checkCgroupV2())
+}
+
+func TestSuiteProcStatusInitView(t *testing.T) {
+	useConfig(t, &Config{Timeout: time.Minute, Namespace: "nri-test", ProcView: ProcViewInit})
+
+	e := &fakeExecutor{stdout: "Name:\tsleep\n"}
+	useExecutor(t, e)
+
+	newFakeSuite(&fakeT{}).ProcSelfStatus(&Container{ID: "ctr0"})
+
+	require.Equal(t, [][]string{{"cat", "/proc/1/status"}}, e.cmds)
+}

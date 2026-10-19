@@ -56,8 +56,43 @@ const (
 	// suite can adjust, reject, or inspect a workload it did not create.
 	DefaultNamespace = "nri-test"
 
+	// DefaultStopGrace is how long a test container or pod is given to stop
+	// before it is killed. Test containers exit on TERM (see KeepAliveCommand),
+	// so a stop normally takes far less; this only bounds a misbehaving one. It
+	// is the one place the suite's grace periods come from: the CRI stop
+	// timeout and the Kubernetes pod's terminationGracePeriodSeconds and
+	// deletion grace. A test that needs another value can still set its own.
+	DefaultStopGrace = 2 * time.Second
+
+	// ProcViewSelf and ProcViewInit name which process's /proc entry the suite
+	// reads to see a container's applied cpuset and NUMA nodes. ProcViewSelf
+	// reads /proc/self/status of the exec'd process, which matched the
+	// container's cgroup in every measured combination. ProcViewInit reads
+	// /proc/1/status, which is right only where PID 1 is the container's own
+	// init, that is with a per-container PID namespace. It exists to
+	// cross-check the exec path against runtimes where exec is suspected of
+	// placing its process differently.
+	ProcViewSelf = "self"
+	ProcViewInit = "init"
+
 	// DefaultTimeout bounds a single operation or event wait.
 	DefaultTimeout = 30 * time.Second
+
+	// DriverCRI and DriverK8s name the drivers a conformance run can use.
+	// The CRI driver talks to the runtime directly and needs kubelet stopped.
+	// The Kubernetes driver creates pods through the API server and needs
+	// kubelet running, so its workloads arrive the way a user's do.
+	DriverCRI = "cri"
+	DriverK8s = "k8s"
+
+	// NamespacesK8s and NamespacesCRI name the namespace options the CRI driver
+	// creates pods with. NamespacesK8s sends what kubelet sends for an ordinary
+	// pod, so a container has a PID namespace of its own and its PID 1 is its
+	// own init process. NamespacesCRI sends no options, and cri-api's zero
+	// values share one PID namespace per pod, whose PID 1 is the sandbox's
+	// pause process. The Kubernetes driver is not affected: kubelet decides.
+	NamespacesK8s = "k8s"
+	NamespacesCRI = "cri"
 )
 
 // DefaultRuntimeEndpoints are probed in order when no endpoint is given,
@@ -88,6 +123,12 @@ type Config struct {
 	// NoPull skips pulling Image during setup, for air-gapped nodes where the
 	// image is already in the image store and no registry is reachable.
 	NoPull bool
+	// ListImages prints the images the suite uses and exits, without needing a
+	// runtime.
+	ListImages bool
+	// PullImages pulls the images the suite uses into the node's image store and
+	// exits, without running any test.
+	PullImages bool
 	// CollectFailures reports every expectation failure of a test instead of
 	// ending the test at its first one, and prints them all in the run's
 	// summary. It is what makes a first run against an unfamiliar runtime
@@ -101,6 +142,20 @@ type Config struct {
 	// garbage-collect the workloads of while kubelet is running. Without it,
 	// setup refuses to start while a kubelet process is found.
 	AllowKubelet bool
+	// Driver selects what creates the conformance tests' workloads: DriverCRI
+	// or DriverK8s.
+	Driver string
+	// CRINamespaces selects the namespace options the CRI driver creates pods
+	// and containers with: NamespacesK8s or NamespacesCRI.
+	CRINamespaces string
+	// K8sNode is the node the Kubernetes driver places pods on. It is the node
+	// this suite runs on, because the suite inspects containers through that
+	// node's runtime. Empty means this host's name.
+	K8sNode string
+	// Kubeconfig names the cluster the Kubernetes driver uses. Empty uses
+	// client-go's usual rules, so KUBECONFIG and an in-cluster service
+	// account both work.
+	Kubeconfig string
 	// RuntimeHandler is the low-level runtime every workload of the run is created
 	// with -- runc, crun, a VM runtime -- or the runtime's default one when empty.
 	//
@@ -112,6 +167,11 @@ type Config struct {
 	RuntimeHandler string
 	// Timeout bounds a single operation or event wait.
 	Timeout time.Duration
+	// ProcView selects ProcViewSelf (the default) or ProcViewInit.
+	ProcView string
+	// StopGrace is the grace period given to stopping a container or a pod.
+	// Zero kills at once.
+	StopGrace time.Duration
 	// RunID scopes everything this run creates. Generated if empty.
 	RunID string
 
@@ -146,6 +206,10 @@ func RegisterFlags() {
 	// its user is worse than a missing one. It belongs with the check itself.
 	flag.BoolVar(&TestConfig.KeepArtifacts, "nri-test.keep-artifacts", false,
 		"do not clean up created pods and containers")
+	flag.BoolVar(&TestConfig.ListImages, "nri-test.list-images", false,
+		"print the images the suite uses, one per line, and exit")
+	flag.BoolVar(&TestConfig.PullImages, "nri-test.pull-images", false,
+		"pull the images the suite uses into the node's image store and exit")
 	flag.BoolVar(&TestConfig.NoPull, "nri-test.no-pull", false,
 		"do not pull the test image during setup; it must already be in the image store")
 	// Default false: a collecting default would make CI green on a real failure
@@ -157,6 +221,17 @@ func RegisterFlags() {
 	flag.BoolVar(&TestConfig.AllowKubelet, "nri-test.allow-kubelet", false,
 		"run in CRI mode while kubelet is running; kubelet may garbage-collect "+
 			"the test's sandboxes mid-run")
+	flag.StringVar(&TestConfig.Driver, "nri-test.driver", DriverCRI,
+		"what creates the tests' workloads: cri (the runtime directly, needs kubelet "+
+			"stopped) or k8s (pods through the API server, needs kubelet running)")
+	flag.StringVar(&TestConfig.CRINamespaces, "nri-test.cri-namespaces", NamespacesK8s,
+		"namespace options the cri driver creates pods with: k8s (what kubelet "+
+			"sends, a PID namespace per container) or cri (none, so a PID namespace "+
+			"per pod)")
+	flag.StringVar(&TestConfig.K8sNode, "nri-test.k8s-node", "",
+		"node the k8s driver places pods on; empty uses this host's name")
+	flag.StringVar(&TestConfig.Kubeconfig, "nri-test.kubeconfig", "",
+		"kubeconfig for the k8s driver; empty uses client-go's usual rules")
 	// Single-valued; see Config.RuntimeHandler for why a list would be a flag that
 	// lies. The usage states what an empty value means, because "" is the ordinary
 	// case rather than a missing setting.
@@ -164,6 +239,10 @@ func RegisterFlags() {
 		"low-level runtime to create every workload with, e.g. runc or crun; "+
 			"empty means the runtime's default handler. Setup refuses a handler the "+
 			"node does not have. One handler per run: sweep by running the suite again")
+	flag.StringVar(&TestConfig.ProcView, "nri-test.proc-view", ProcViewSelf,
+		"which process's /proc/<pid>/status shows a container's applied cpuset and NUMA nodes: self or init")
+	flag.DurationVar(&TestConfig.StopGrace, "nri-test.stop-grace", DefaultStopGrace,
+		"grace period for stopping test containers and pods; 0 kills at once")
 	flag.DurationVar(&TestConfig.Timeout, "nri-test.timeout", DefaultTimeout,
 		"timeout for a single operation or event wait")
 	flag.StringVar(&TestConfig.RunID, "nri-test.run-id", "",
@@ -181,8 +260,32 @@ func (c *Config) Complete() error {
 	if c.Image == "" {
 		c.Image = DefaultImage
 	}
+	if c.ProcView == "" {
+		c.ProcView = ProcViewSelf
+	}
+	if c.ProcView != ProcViewSelf && c.ProcView != ProcViewInit {
+		return fmt.Errorf("unknown -nri-test.proc-view %q: use %q or %q",
+			c.ProcView, ProcViewSelf, ProcViewInit)
+	}
+	if c.StopGrace < 0 {
+		return fmt.Errorf("-nri-test.stop-grace must not be negative, got %v", c.StopGrace)
+	}
 	if c.Timeout == 0 {
 		c.Timeout = DefaultTimeout
+	}
+	if c.Driver == "" {
+		c.Driver = DriverCRI
+	}
+	if c.Driver != DriverCRI && c.Driver != DriverK8s {
+		return fmt.Errorf("unknown -nri-test.driver %q: use %q or %q",
+			c.Driver, DriverCRI, DriverK8s)
+	}
+	if c.CRINamespaces == "" {
+		c.CRINamespaces = NamespacesK8s
+	}
+	if c.CRINamespaces != NamespacesK8s && c.CRINamespaces != NamespacesCRI {
+		return fmt.Errorf("unknown -nri-test.cri-namespaces %q: use %q or %q",
+			c.CRINamespaces, NamespacesK8s, NamespacesCRI)
 	}
 	if c.RunID == "" {
 		id, err := generateRunID()
@@ -252,4 +355,10 @@ func generateRunID() (string, error) {
 	}
 
 	return hex.EncodeToString(buf), nil
+}
+
+// StopGraceSeconds returns StopGrace in the whole seconds CRI and Kubernetes
+// take.
+func (c *Config) StopGraceSeconds() int64 {
+	return int64(c.StopGrace / time.Second)
 }

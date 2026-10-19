@@ -17,6 +17,8 @@
 package suite
 
 import (
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -25,10 +27,23 @@ import (
 	"github.com/containerd/nri/test/nri-test/framework"
 )
 
+// onlineSet returns a kernel online list such as "0-15", or "" when the node
+// does not expose it. The suite runs on the node, so this is the node's own.
+func onlineSet(t *testing.T, path string) string {
+	t.Helper()
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Logf("cannot read %s: %v", path, err)
+		return ""
+	}
+
+	return strings.TrimSpace(string(raw))
+}
+
 func TestSmoke(t *testing.T) {
 	t.Run("should deliver a full pod and container lifecycle to a plugin", func(t *testing.T) {
 		s := framework.NewSuite(t, "smoke")
-		framework.RequireCaps(t, framework.CapContainerLifecycle)
 
 		plugin := s.NewPlugin("smoke", "00", api.MustParseEventMask(
 			"RunPodSandbox,StopPodSandbox,RemovePodSandbox",
@@ -38,17 +53,11 @@ func TestSmoke(t *testing.T) {
 		))
 		s.StartPlugins(plugin)
 
-		var (
-			pod  = s.CreatePod(s.PodSpec("pod"))
-			ctr  = s.CreateContainer(pod, s.CtrSpec("ctr0"))
-			name = plugin.FullName()
-		)
+		pod, ctr := s.CreatePodWithContainer("pod", s.CtrSpec("ctr0"))
+		name := plugin.FullName()
 
 		s.StartContainer(ctr)
-		s.StopContainer(ctr)
-		s.RemoveContainer(ctr)
-		s.StopPod(pod)
-		s.RemovePod(pod)
+		removeWorkload(s, pod, ctr)
 
 		for _, want := range []framework.EventType{
 			framework.RunPodSandbox,
@@ -69,11 +78,32 @@ func TestSmoke(t *testing.T) {
 		}
 	})
 
+	t.Run("should deliver the container's stop and removal when only its pod is removed", func(t *testing.T) {
+		// The path a driver that cannot touch containers apart from their pod has,
+		// and so what the other tests rely on when they skip the per-container steps.
+		s := framework.NewSuite(t, "smoke-pod-teardown")
+
+		plugin := s.NewPlugin("teardown", "00", api.MustParseEventMask(
+			"StopContainer,RemoveContainer",
+		))
+		s.StartPlugins(plugin)
+
+		pod, ctr := s.CreatePodWithContainer("pod", s.CtrSpec("ctr0"))
+		s.StartContainer(ctr)
+		s.StopPod(pod)
+		s.RemovePod(pod)
+
+		for _, want := range []framework.EventType{framework.StopContainer, framework.RemoveContainer} {
+			_, err := s.Q().WaitFor(&framework.Event{
+				Type: want, Plugin: plugin.FullName(), PodID: pod.ID, CtrID: ctr.ID,
+			}, s.Timeout())
+			require.NoError(t, err, "plugin %s did not receive %s", plugin.FullName(), want)
+		}
+	})
+
 	t.Run("should expose the created container's OCI spec", func(t *testing.T) {
 		s := framework.NewSuite(t, "smoke-inspect")
-		framework.RequireCaps(t, framework.CapContainerLifecycle)
 
-		pod := s.CreatePod(s.PodSpec("pod"))
 		ctrSpec := s.CtrSpec("ctr0")
 		// Set a distinctive environment variable that the test itself controls,
 		// so we can verify the inspector returns THIS container's spec, not just any spec.
@@ -81,14 +111,18 @@ func TestSmoke(t *testing.T) {
 		ctrSpec.Env = map[string]string{
 			"NRI_TEST_SMOKE": envValue,
 		}
-		ctr := s.CreateContainer(pod, ctrSpec)
+		_, ctr := s.CreatePodWithContainer("pod", ctrSpec)
 
 		o := s.Inspect(ctr.ID)
 		require.NotNil(t, o.Spec)
 		require.NotNil(t, o.Spec.Process)
 		require.NotNil(t, o.Spec.Root)
 		require.NotNil(t, o.Spec.Linux)
-		require.Equal(t, framework.StateCreated, o.State)
+		// Created when the driver leaves the container for the test to start, running
+		// when the driver's containers start on their own. The spec is the same.
+		require.Contains(t, []framework.ContainerState{
+			framework.StateCreated, framework.StateRunning,
+		}, o.State)
 
 		// CRI pod and container annotations do not reach the container's OCI spec
 		// unless the runtime is configured to pass them through (containerd's
@@ -120,19 +154,28 @@ func TestSmoke(t *testing.T) {
 		// through this same chain, so if this subtest passes the chain works and if
 		// it fails nothing built on it can be trusted.
 		s := framework.NewSuite(t, "smoke-exec")
-		framework.RequireCaps(t, framework.CapExec|framework.CapContainerLifecycle)
-
-		pod := s.CreatePod(s.PodSpec("pod"))
+		framework.RequireCaps(t, framework.CapExec)
 
 		ctrSpec := s.CtrSpec("ctr0")
-		// CPU 0, because every machine has one, so this is safe on any host. Set
-		// through CRI rather than through an NRI adjustment on purpose: what is
-		// under test here is the observation channel, and an adjustment would put
-		// NRI in the way of the thing measuring it.
-		const wantCPUs = "0"
-		ctrSpec.Resources = &framework.Resources{CpusetCpus: wantCPUs}
+		// A driver that applies a cpuset verbatim pins CPU 0, because every
+		// machine has one, so this is safe on any host. Set through the driver
+		// rather than through an NRI adjustment on purpose: what is under test
+		// here is the observation channel, and an adjustment would put NRI in
+		// the way of the thing measuring it.
+		//
+		// A driver that cannot pin leaves the container with what the node
+		// allows it, which is the whole online set: the Kubernetes driver
+		// refuses to run unless the kubelet's CPU and memory managers are off.
+		wantCPUs, wantMems := onlineSet(t, "/sys/devices/system/cpu/online"),
+			onlineSet(t, "/sys/devices/system/node/online")
+		require.NotEmpty(t, wantCPUs, "the node's online CPUs must be readable")
+		pinned := s.Driver().Capabilities().Has(framework.CapRawResources)
+		if pinned {
+			wantCPUs = "0"
+			ctrSpec.Resources = &framework.Resources{CpusetCpus: wantCPUs}
+		}
 
-		ctr := s.CreateContainer(pod, ctrSpec)
+		_, ctr := s.CreatePodWithContainer("pod", ctrSpec)
 
 		// Started, not merely created: exec needs a running container. Spec-only
 		// assertions deliberately skip this, and pay no flake for it.
@@ -153,5 +196,12 @@ func TestSmoke(t *testing.T) {
 			"container %s was created with CpusetCpus %q, so the kernel inside it "+
 				"must report Cpus_allowed_list %q; it reported %q",
 			ctr.ID, wantCPUs, wantCPUs, status["Cpus_allowed_list"])
+
+		// Only with two or more NUMA nodes: a single-node machine reports "0"
+		// whatever the container was given, so the check would say nothing.
+		if !pinned && strings.ContainsAny(wantMems, "-,") {
+			require.Equal(t, wantMems, status["Mems_allowed_list"],
+				"an unpinned container %s must see every online memory node", ctr.ID)
+		}
 	})
 }
