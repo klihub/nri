@@ -27,6 +27,21 @@ type PodSpec struct {
 	Annotations map[string]string
 	// CgroupParent is the pod's cgroup parent, when the driver needs one.
 	CgroupParent string
+	// RuntimeHandler selects the low-level runtime the pod and its containers are
+	// created with -- runc, crun, a VM runtime -- or the runtime's default one
+	// when empty. Empty is not a handler named "": it is the absence of a
+	// selection, and every driver has to pass it through as such.
+	//
+	// Mode-neutral on purpose, as the rest of this spec is. The CRI driver maps it
+	// onto RunPodSandboxRequest.RuntimeHandler; a Kubernetes driver will map it
+	// onto pod.spec.runtimeClassName, which is a name for the same choice one
+	// indirection further out.
+	//
+	// It exists so that a failure can be located rather than merely observed: the
+	// chain under test is plugin -> NRI -> runtime -> OCI spec -> low-level runtime
+	// -> kernel, and a feature that fails under one low-level runtime and passes
+	// under another is a defect in that runtime, not in NRI.
+	RuntimeHandler string
 	// Containers are created together with the pod by drivers that lack
 	// CapContainerLifecycle. Drivers that have it may create them lazily.
 	Containers []*ContainerSpec

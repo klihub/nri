@@ -219,18 +219,23 @@ func ExpectMount(spec *rspec.Spec, procMounts, destination string, wantOpts ...s
 			"that destination; it records %v", destination, recorded)
 	}
 
-	points := mountPoints(procMounts)
-	if !slices.Contains(points, destination) {
+	line, ok := mountLine(procMounts, destination)
+	if !ok {
 		return fmt.Errorf("mount at %q: the container's mount table has no such mount "+
 			"point, though the runtime recorded one; the container has mounted %v",
-			destination, points)
+			destination, mountPoints(procMounts))
 	}
 
 	if len(wantOpts) == 0 {
 		return nil
 	}
 
-	opts, err := mountOptions(procMounts, destination)
+	// The located line is handed down rather than the whole table searched again.
+	// Two searches with the same predicate is one predicate too many: the second
+	// could only ever fail to find what the first found, so its not-found branch
+	// was unreachable, and an unreachable branch in an expectation is a claim about
+	// a mount table that nothing can ever check.
+	opts, err := mountOptions(line, destination)
 	if err != nil {
 		return err
 	}
@@ -252,40 +257,52 @@ func ExpectMount(spec *rspec.Spec, procMounts, destination string, wantOpts ...s
 	return nil
 }
 
-// mountOptions returns the options the container's mount table records for a
-// destination.
+// mountLine returns the /proc/<pid>/mounts line whose mount point is
+// destination, and whether there was one.
 //
-// A /proc/<pid>/mounts line names the mount point in whitespace field 2 and the
-// comma-separated options in field 4, counting from one as mount(5) does. The
-// options come back split rather than as the raw field because the caller looks
-// for "ro", which is a substring of plenty of legitimate option and source
+// Field 2 is the mount point, counting from one as mount(5) does. A line with
+// fewer than two fields cannot name one and is skipped, on the same predicate
+// mountPoints uses -- the two must agree about what counts as a line, or
+// ExpectMount would report a mount point it then could not find a line for.
+func mountLine(procMounts, destination string) (string, bool) {
+	for _, line := range strings.Split(procMounts, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[1] == destination {
+			return line, true
+		}
+	}
+
+	return "", false
+}
+
+// mountOptions returns the options a container's mount table line records.
+//
+// The line is the one mountLine located, so there is no searching here and no
+// not-found case: the caller has already proved the destination has a line, and
+// a second search for it could only ever reproduce that answer.
+//
+// A /proc/<pid>/mounts line holds the comma-separated options in whitespace
+// field 4. They come back split rather than as the raw field because the caller
+// looks for "ro", which is a substring of plenty of legitimate option and source
 // spellings -- "errors=remount-ro", "/var/lib/ro-data" -- and a substring search
 // would report a read-only mount that is nothing of the kind.
 //
-// A line for the destination with fewer than four fields is an error naming the
-// options field, not a skip and not a panic: the destination was found, so a
-// truncated line is evidence the table could not be read to the end.
-func mountOptions(procMounts, destination string) ([]string, error) {
-	for _, line := range strings.Split(procMounts, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 2 || fields[1] != destination {
-			continue
-		}
-
-		if len(fields) < 4 {
-			return nil, fmt.Errorf("mount at %q: its line in the container's mount table "+
-				"has %d field(s) and no options field, so the options cannot be read: %q",
-				destination, len(fields), line)
-		}
-
-		return strings.Split(fields[3], ","), nil
+// A line with fewer than four fields is an error naming the options field, not a
+// skip and not a panic: the destination was found, so a truncated line is
+// evidence the table could not be read to the end.
+func mountOptions(line, destination string) ([]string, error) {
+	fields := strings.Fields(line)
+	if len(fields) < 4 {
+		return nil, fmt.Errorf("mount at %q: its line in the container's mount table "+
+			"has %d field(s) and no options field, so the options cannot be read: %q",
+			destination, len(fields), line)
 	}
 
-	return nil, fmt.Errorf("mount at %q: the container's mount table has no line for it "+
-		"to read the options from", destination)
+	return strings.Split(fields[3], ","), nil
 }
 
-// mountPoints returns the mount points named by a /proc/<pid>/mounts.
+// mountPoints returns the mount points named by a /proc/<pid>/mounts. It is what
+// names the table's contents in a failure message; mountLine is what finds one.
 //
 // A line with fewer than two fields is skipped rather than indexed into: output
 // read back through an exec can be truncated, and a short last line must not

@@ -25,15 +25,45 @@ import (
 	"golang.org/x/mod/semver"
 )
 
-// gateT is the part of *testing.T the gates below use.
+// skipT is the part of *testing.T that Skipped uses.
+type skipT interface {
+	Helper()
+	Name() string
+	Skipf(string, ...any)
+}
+
+// gateT is the part of *testing.T the gates below use: everything Skipped needs,
+// since every gate can skip, plus Fatal for the ones that cannot evaluate their
+// own condition.
+//
+// Stated by embedding rather than by repeating skipT's three members, so that
+// the relationship is the declaration: a gate can do whatever a skip can, and
+// one more thing.
 //
 // It is an interface only so that their failure paths can be unit tested:
 // Fatal does not return on a real *testing.T, so a test cannot survive calling
 // it, and a fake is the only way to observe that it was called.
 type gateT interface {
-	Helper()
+	skipT
+
 	Fatal(args ...any)
-	Skipf(format string, args ...any)
+}
+
+// Skipped skips the test and records the skip with the summary.
+//
+// Every skip in the suite goes through here. The summary cannot enumerate skips
+// after the fact, since testing offers no way to ask which tests skipped, so a
+// skip that does not come through here is invisible to it. The reason is recorded
+// exactly as formatted, and is reported through Skipf unchanged.
+func Skipped(t skipT, format string, args ...any) {
+	t.Helper()
+
+	reason := fmt.Sprintf(format, args...)
+	TestReport.AddSkip(Skip{Test: t.Name(), Reason: reason})
+
+	// The reason goes through %s, not as the format itself: a reason may contain
+	// a percent sign, and it must reach the test output exactly as it was written.
+	t.Skipf("%s", reason)
 }
 
 // RequireCaps skips the test unless the active driver has all the given
@@ -56,7 +86,7 @@ func RequireCaps(t gateT, caps Capability) {
 
 	have := driver.Capabilities()
 	if !have.Has(caps) {
-		t.Skipf("driver %q lacks required capabilities: need %s, have %s",
+		Skipped(t, "driver %q lacks required capabilities: need %s, have %s",
 			driver.Name(), caps, have)
 	}
 }
@@ -68,14 +98,14 @@ func RequireNRIVersion(t *testing.T, min string) {
 
 	have := runtimeNRIVersion
 	if have == "" {
-		t.Skipf("runtime NRI version unknown; %s or later required", min)
+		Skipped(t, "runtime NRI version unknown; %s or later required", min)
 	}
 	if !semver.IsValid(have) {
-		t.Skipf("runtime NRI version %q is not valid semver; %s or later required",
+		Skipped(t, "runtime NRI version %q is not valid semver; %s or later required",
 			have, min)
 	}
 	if semver.Compare(have, min) < 0 {
-		t.Skipf("runtime NRI version is %s; %s or later required", have, min)
+		Skipped(t, "runtime NRI version is %s; %s or later required", have, min)
 	}
 }
 
@@ -85,8 +115,46 @@ func SkipUnlessConfigSuite(t *testing.T, name string) {
 	t.Helper()
 
 	if TestConfig.ConfigSuite != name {
-		t.Skipf("requires -nri-test.config=%s", name)
+		Skipped(t, "requires -nri-test.config=%s", name)
 	}
+}
+
+// SkipUnlessRuntimeHandler skips the test unless the node has the named
+// low-level runtime installed.
+//
+// It is the gate a test specific to one low-level runtime needs. Without it, such
+// a test run on a node that does not have the runtime fails at CreatePod -- the
+// runtime refuses a handler it does not know -- and reads as a conformance
+// failure of whatever the test was about. What is true is weaker and has to be
+// said as such: the property went unverified here.
+//
+// It gates on what discovery found, not on what -nri-test.runtime-handler
+// selected: the question is whether this node can run the test at all. A node
+// that advertises no handlers skips too, since nothing there can confirm the
+// runtime is present.
+//
+// The contract is two-step, and a caller that reads it as one step will measure
+// the wrong thing. Passing this gate means only that the node HAS name. It does
+// not make this test's workloads run under name: Suite.PodSpec stamps the handler
+// the run selected with -nri-test.runtime-handler, so a test that must exercise
+// name has to set PodSpec.RuntimeHandler = name on each spec it creates as well.
+// Gate, then stamp. A test that gates and does not stamp runs under whatever the
+// run selected while reading as though it had pinned the handler.
+func SkipUnlessRuntimeHandler(t gateT, name string) {
+	t.Helper()
+
+	// Through the accessor, so the gate and anything else reading the discovered
+	// set cannot come to disagree about the node.
+	if slices.Contains(RuntimeHandlers(), name) {
+		return
+	}
+
+	// Through Skipped, never t.Skipf: a skip the run's summary does not name is a
+	// skip its reader takes for a pass.
+	Skipped(t, "the runtime handler %q is not installed on this node, which reports "+
+		"%s; what this test would verify under %s is unmeasured here. Run it on a node "+
+		"that has %s installed to measure it",
+		name, installedHandlers(), name, name)
 }
 
 // gateStatusReader is the part of *Suite the allowed-list gates below use.
@@ -236,7 +304,7 @@ func skipUnlessAllowedListSize(t gateT, s gateStatusReader, ctr *Container,
 			return
 		}
 
-		t.Skipf("the container's kernel reports no %s, so its %s cannot be counted; "+
+		Skipped(t, "the container's kernel reports no %s, so its %s cannot be counted; "+
 			"this test needs at least %d of them to be able to fail, and what it "+
 			"would have verified is unmeasured here", key, subject, min)
 
@@ -252,7 +320,7 @@ func skipUnlessAllowedListSize(t gateT, s gateStatusReader, ctr *Container,
 	}
 
 	if len(set) < min {
-		t.Skipf("the container's %s is %q, fewer than the %d %s this test needs to be "+
+		Skipped(t, "the container's %s is %q, fewer than the %d %s this test needs to be "+
 			"able to fail: with fewer, the value it asks for is already what an "+
 			"unadjusted container gets, so the test would pass without verifying "+
 			"anything. What it would have verified is unmeasured on this host; run it "+

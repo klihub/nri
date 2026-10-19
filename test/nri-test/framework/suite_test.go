@@ -150,11 +150,15 @@ type fakeDriver struct {
 	// opDelay is how long StopPod and RemovePod take. A delay long enough that
 	// several pods cannot share one budget is how the shared-deadline defect is
 	// reproduced.
-	opDelay   time.Duration
-	stopErr   error
-	removeErr error
-	listPods  []string
-	listErr   error
+	opDelay time.Duration
+	// createPodErr is what CreatePod fails with. The pod is returned alongside
+	// it, as a real driver's partially created sandbox is, so the suite's
+	// record-before-asserting path is exercised too.
+	createPodErr error
+	stopErr      error
+	removeErr    error
+	listPods     []string
+	listErr      error
 	// listDelay is how long ListRunPods takes. Longer than the timeout is how a
 	// budget the pod guard shares with the container guard is reproduced: the pod
 	// listing spends it, and the container listing is handed the remains.
@@ -179,10 +183,14 @@ type fakeDriver struct {
 
 func (d *fakeDriver) Capabilities() Capability { return d.caps }
 
+// ConflictsWithKubelet makes fakeDriver kubelet-sensitive, as the CRI driver is.
+// A driver that is not sensitive is modelled by noOpDriver, which lacks it.
+func (d *fakeDriver) ConflictsWithKubelet() bool { return true }
+
 func (d *fakeDriver) CreatePod(_ context.Context, spec *PodSpec) (*Pod, error) {
 	d.createdPods = append(d.createdPods, spec.Name)
 
-	return &Pod{ID: spec.Name, Spec: spec}, nil
+	return &Pod{ID: spec.Name, Spec: spec}, d.createPodErr
 }
 
 // wait models an RPC that takes opDelay and fails if the context expires first.
@@ -560,10 +568,12 @@ func TestSuiteCreatePodRefusesSpecContainersWhenTheDriverCanCreateThemLazily(t *
 }
 
 func TestSuiteCreateContainerRecordsTheContainerBeforeAsserting(t *testing.T) {
-	// Record before asserting, for the reason CreatePod documents: require.NoError
-	// does not return, so a container appended after it is a container the leak
-	// guard can never attribute to this case -- and a creation that failed part way
-	// is exactly the case phase two asserts leaks nothing.
+	// Record before asserting, for the reason CreatePod documents: fatalf does not
+	// return, so a container appended after it is a container the leak guard can
+	// never attribute to this case -- and a creation that failed part way is
+	// exactly the case phase two asserts leaks nothing.
+	useReport(t)
+
 	d := &fakeDriver{
 		createdCtr:   &Container{ID: "ctr-0", PodID: "pod-0"},
 		createCtrErr: errors.New("create refused"),
@@ -575,7 +585,7 @@ func TestSuiteCreateContainerRecordsTheContainerBeforeAsserting(t *testing.T) {
 	s := newFakeSuite(ft, &Pod{ID: "pod-0"})
 
 	// fakeT.FailNow panics instead of unwinding a goroutine, which is what lets this
-	// inspect the state require.NoError left behind.
+	// inspect the state fatalf left behind.
 	require.Panics(t, func() { s.CreateContainer(&Pod{ID: "pod-0"}, s.CtrSpec("ctr0")) })
 
 	require.Equal(t, []*Container{{ID: "ctr-0", PodID: "pod-0"}}, s.ctrs,
@@ -955,9 +965,10 @@ func TestSuiteCleanupCancelsThePluginContextEvenWithKeepArtifacts(t *testing.T) 
 }
 
 func TestSuiteStartPluginsRecordsAPluginBeforeAssertingOnItsStart(t *testing.T) {
-	// Record before asserting, for the reason CreatePod documents: require.NoError
-	// does not return, so a plugin appended after it is a plugin cleanup never gets
-	// to stop.
+	// Record before asserting, for the reason CreatePod documents: fatalf does not
+	// return, so a plugin appended after it is a plugin cleanup never gets to
+	// stop.
+	useReport(t)
 	useDriver(t, &fakeDriver{})
 	useConfig(t, &Config{
 		Timeout:       100 * time.Millisecond,
@@ -971,7 +982,7 @@ func TestSuiteStartPluginsRecordsAPluginBeforeAssertingOnItsStart(t *testing.T) 
 	p := s.NewPlugin("cannot-connect", "00", 0)
 
 	// fakeT.FailNow panics instead of unwinding a goroutine, which is what lets this
-	// inspect the state require.NoError left behind.
+	// inspect the state fatalf left behind.
 	require.Panics(t, func() { s.StartPlugins(p) })
 	require.Contains(t, ft.allErrors(), "failed to start plugin 00-cannot-connect")
 
@@ -1232,6 +1243,9 @@ func TestSuiteExec(t *testing.T) {
 	t.Run("fails the case when the command fails", func(t *testing.T) {
 		e := &fakeExecutor{stdout: "partial", stderr: "cat: no such file", err: errors.New("exit 1")}
 		useExecutor(t, e)
+		// A failed Exec is a recorded operation failure now, so it must record into
+		// a report of this test's own rather than into the run's.
+		useReport(t)
 
 		ft := &fakeT{}
 		s := newFakeSuite(ft)
@@ -1285,6 +1299,167 @@ func TestSuiteProcSelfStatus(t *testing.T) {
 		"the status must be read from /proc/self, not from /proc/1")
 	require.Equal(t, "0", status["Cpus_allowed_list"])
 	require.Equal(t, "sleep", status["Name"])
+}
+
+// useReport installs a fresh Report as TestReport for the duration of the test
+// and returns it, so a test can assert on what an expectation recorded without
+// the run's own report carrying it afterwards.
+//
+// A helper rather than a Reset method on Report: a reset has no caller outside
+// a test, and a production Report is written once and printed once.
+func useReport(t *testing.T) *Report {
+	t.Helper()
+
+	saved := TestReport
+	t.Cleanup(func() { TestReport = saved })
+	TestReport = &Report{}
+
+	return TestReport
+}
+
+func TestExpectCollectsInCollectingMode(t *testing.T) {
+	// Collecting mode reports the failure through Errorf and returns, so the rest
+	// of the test body runs and its later expectations are evaluated too. That is
+	// the whole point: one run enumerates every difference a runtime has, instead
+	// of one run per difference.
+	useConfig(t, &Config{Timeout: time.Minute, Namespace: "nri-test", CollectFailures: true})
+
+	r := useReport(t)
+	ft := &fakeT{name: "TestCollectingCase"}
+
+	// No require.Panics around this call: fakeT.FailNow panics, so reaching the
+	// end of expect without a panic is itself the assertion that the test was not
+	// aborted.
+	newFakeSuite(ft).expect("annotation", "OCI spec", errors.New("annotation was not applied"))
+
+	require.Contains(t, ft.allErrors(), "annotation was not applied",
+		"a collected failure must still be reported against the test")
+
+	findings := r.Findings()
+	require.Len(t, findings, 1)
+	require.Equal(t, "TestCollectingCase", findings[0].Test)
+	require.Equal(t, "annotation", findings[0].Feature)
+	require.Equal(t, "OCI spec", findings[0].Surface)
+	require.EqualError(t, findings[0].Err, "annotation was not applied")
+}
+
+func TestExpectAbortsInDefaultMode(t *testing.T) {
+	// The mode decides whether the test aborts, not whether the failure is
+	// reported: the finding is recorded first, so the summary and the exit code
+	// are the same in both modes.
+	useConfig(t, &Config{Timeout: time.Minute, Namespace: "nri-test"})
+
+	r := useReport(t)
+	ft := &fakeT{name: "TestDefaultCase"}
+
+	// fakeT.FailNow panics instead of unwinding a goroutine, which is what lets
+	// this test observe that require aborted rather than returned.
+	require.Panics(t, func() {
+		newFakeSuite(ft).expect("cpuset", "/proc/self/status", errors.New("cpuset was not applied"))
+	}, "the default mode must end the test at its first expectation failure")
+
+	require.Len(t, r.Findings(), 1,
+		"the finding must be recorded before the abort, or the abort loses it")
+	require.Contains(t, ft.allErrors(), "cpuset was not applied")
+}
+
+func TestDriverCallFailureIsRecordedAndFatal(t *testing.T) {
+	// Both halves, in one test, because either on its own is a defect. Fatal is
+	// the design decision Task 3 made and it still holds: a collected
+	// CreateContainer failure would leave the test body running with a nil
+	// *Container, and the derived panics would bury the one real failure.
+	// Recorded is what was missing, and what let a 34-failure sweep print "No
+	// expectation failures were collected".
+	useConfig(t, &Config{Timeout: time.Minute, Namespace: "nri-test"})
+
+	d := &fakeDriver{createPodErr: errors.New("sandbox name is reserved")}
+	useDriver(t, d)
+
+	r := useReport(t)
+	ft := &fakeT{name: "TestCreatePodCase"}
+	s := newFakeSuite(ft)
+
+	// fakeT.FailNow panics instead of unwinding a goroutine, which is what lets
+	// this test observe that the call aborted rather than returned.
+	require.Panics(t, func() {
+		s.CreatePod(s.PodSpec("pod0"))
+	}, "a failed driver call must still end its test")
+
+	findings := r.Findings()
+	require.Len(t, findings, 1, "a failed driver call is recorded exactly once")
+	require.Equal(t, KindOperation, findings[0].Kind,
+		"a failed driver call is an operation failure, not an unmet expectation")
+	require.Equal(t, "TestCreatePodCase", findings[0].Test)
+	require.Equal(t, "CreatePod", findings[0].Feature,
+		"the finding must name the operation that failed")
+	require.ErrorIs(t, findings[0].Err, d.createPodErr,
+		"the finding must carry the driver's own error")
+
+	// The wrapper's message names the workload, and a finding is read in a
+	// summary far from the test output the message would otherwise reach -- so it
+	// has to be in the recorded error, as ctrError documents for expectations.
+	require.Contains(t, findings[0].Err.Error(), "failed to create pod",
+		"the wrapper's own message must reach the summary")
+
+	require.Contains(t, ft.allErrors(), "sandbox name is reserved",
+		"the failure must still be reported against the test")
+}
+
+func TestExpectRecordsNothingForAMetExpectation(t *testing.T) {
+	useConfig(t, &Config{Timeout: time.Minute, Namespace: "nri-test", CollectFailures: true})
+
+	r := useReport(t)
+	ft := &fakeT{}
+
+	newFakeSuite(ft).expect("mount", "OCI spec + /proc/self/mounts", nil)
+
+	require.False(t, r.HasFindings(), "a met expectation records nothing")
+	require.Empty(t, ft.allErrors(), "a met expectation reports nothing")
+}
+
+func TestSummaryHeaderDescribesTheRun(t *testing.T) {
+	// The header is the only thing that makes a summary quotable, and it is built
+	// from package vars the summary itself cannot see. Pinned here because a
+	// field left unwired prints as a plausible-looking blank rather than as a
+	// failure.
+	savedName, savedVersion, savedNRI := runtimeName, runtimeVersion, runtimeNRIVersion
+	t.Cleanup(func() {
+		runtimeName, runtimeVersion, runtimeNRIVersion = savedName, savedVersion, savedNRI
+	})
+
+	runtimeName, runtimeVersion, runtimeNRIVersion = "containerd", "2.3.3", "0.9.0"
+	useConfig(t, &Config{RunID: "run0", CollectFailures: true, RuntimeHandler: "crun"})
+
+	require.Equal(t,
+		Header{
+			Runtime:        "containerd",
+			RuntimeVersion: "2.3.3",
+			NRIVersion:     "0.9.0",
+			RuntimeHandler: "crun",
+			RunID:          "run0",
+			Collecting:     true,
+			Failed:         true,
+		},
+		summaryHeader(true))
+
+	TestConfig.CollectFailures = false
+	require.False(t, summaryHeader(true).Collecting,
+		"the header must report the mode the run actually used")
+
+	// Both directions, because this is the field that decides which of the two
+	// nothing-collected sentences the summary prints, and a header that always said
+	// one of them would make the other dead code.
+	require.False(t, summaryHeader(false).Failed,
+		"a run go test passed must not be reported as failed")
+	require.True(t, summaryHeader(true).Failed,
+		"a run go test failed must be reported as failed, whatever the report holds")
+
+	// The default is reported as the absence of a selection, which is what the
+	// summary prints as "<runtime default>". A header that named some handler for a
+	// run that selected none would be the one failure the field exists to prevent.
+	TestConfig.RuntimeHandler = ""
+	require.Empty(t, summaryHeader(true).RuntimeHandler,
+		"a run that selected no handler must not claim one")
 }
 
 func TestExecutorOf(t *testing.T) {
@@ -1370,6 +1545,318 @@ func TestSuiteCtrSpecCarriesAKeepAliveCommand(t *testing.T) {
 
 	require.Equal(t, []string{"sleep", "600"}, spec.Command,
 		"a test container must be given a command that keeps it running")
+}
+
+// kubeletSetupConfig returns a Config for exercising Setup's kubelet check. Its
+// NRI socket does not exist, so once the check has passed, preflight fails at
+// connect without touching any socket on the host.
+func kubeletSetupConfig(procDir string) *Config {
+	return &Config{
+		NRISocketPath: "/nonexistent/nri-test/nri.sock",
+		Timeout:       2 * time.Second,
+		procDir:       procDir,
+	}
+}
+
+// setupWith runs Setup with d as the driver. Setup overwrites the package
+// globals, so they are saved and restored here.
+func setupWith(t *testing.T, cfg *Config, d Driver) error {
+	t.Helper()
+
+	useDriver(t, &noOpDriver{})
+	useInspector(t, nil)
+	useExecutor(t, nil)
+
+	return Setup(cfg, func(context.Context, *Config) (Driver, Inspector, error) {
+		return d, nil, nil
+	})
+}
+
+// requireFellThroughKubeletCheck asserts that Setup got past the kubelet check
+// and failed in preflight, for the unrelated reason the socket guarantees. It
+// must not merely be an error: the kubelet refusal's own text is the only
+// thing that would make it a refusal.
+func requireFellThroughKubeletCheck(t *testing.T, err error) {
+	t.Helper()
+
+	require.ErrorContains(t, err, "no NRI plugin could connect")
+	require.NotContains(t, err.Error(), "-nri-test.allow-kubelet")
+}
+
+func TestSetupRefusesWithKubeletRunning(t *testing.T) {
+	procDir := t.TempDir()
+	writeComm(t, procDir, "123", "kubelet\n")
+
+	t.Run("RefusesWithKubeletRunning", func(t *testing.T) {
+		err := setupWith(t, kubeletSetupConfig(procDir), &fakeDriver{})
+
+		require.Error(t, err)
+		require.ErrorContains(t, err, "kubelet")
+		require.ErrorContains(t, err, "pid 123")
+		require.ErrorContains(t, err, "-nri-test.allow-kubelet")
+		// Refused before preflight: no NRI connect was attempted.
+		require.NotContains(t, err.Error(), "no NRI plugin could connect")
+	})
+
+	t.Run("AllowKubeletProceedsPastTheCheck", func(t *testing.T) {
+		cfg := kubeletSetupConfig(procDir)
+		cfg.AllowKubelet = true
+
+		requireFellThroughKubeletCheck(t, setupWith(t, cfg, &fakeDriver{}))
+	})
+
+	t.Run("NonConflictingDriverProceedsPastTheCheck", func(t *testing.T) {
+		requireFellThroughKubeletCheck(t,
+			setupWith(t, kubeletSetupConfig(procDir), &noOpDriver{}))
+	})
+
+	t.Run("NoKubeletRunningProceedsPastTheCheck", func(t *testing.T) {
+		requireFellThroughKubeletCheck(t,
+			setupWith(t, kubeletSetupConfig(t.TempDir()), &fakeDriver{}))
+	})
+}
+
+// handlerDriver is a driver that lists runtime handlers, as the CRI driver does
+// through the unexported runtimeHandlerLister interface. It embeds noOpDriver
+// rather than fakeDriver so that it is not kubelet-sensitive: the handler phase
+// is what these tests are about, and a kubelet refusal would pre-empt it.
+type handlerDriver struct {
+	noOpDriver
+
+	handlers []string
+	err      error
+
+	calls int
+	// ctxErrs is the state of the context each call was handed, so a test can pin
+	// that discovery got a live budget of its own rather than a spent one.
+	ctxErrs []error
+}
+
+func (d *handlerDriver) RuntimeHandlers(ctx context.Context) ([]string, error) {
+	d.calls++
+	d.ctxErrs = append(d.ctxErrs, ctx.Err())
+
+	if d.err != nil {
+		return nil, d.err
+	}
+
+	return d.handlers, nil
+}
+
+var _ runtimeHandlerLister = &handlerDriver{}
+
+// useRuntimeHandlers installs handlers as the discovered set for the duration of
+// the test. Every test that runs Setup or a handler gate must do this: the set is
+// a package var, and a test that left its own behind would decide another's gate.
+func useRuntimeHandlers(t *testing.T, handlers []string) {
+	t.Helper()
+
+	saved := runtimeHandlers
+	t.Cleanup(func() { runtimeHandlers = saved })
+	runtimeHandlers = handlers
+}
+
+// handlerSetupConfig returns a Config for exercising Setup's runtime-handler
+// phase, requesting handler. Its NRI socket does not exist, for the reason
+// kubeletSetupConfig's does not: once the phase has passed, preflight fails at
+// connect without touching any socket on the host.
+//
+// It is installed as TestConfig as well as returned, because that is how a real
+// run is wired -- TestMain passes TestConfig to Setup -- and because
+// RuntimeHandler() answers from TestConfig.
+func handlerSetupConfig(t *testing.T, handler string) *Config {
+	t.Helper()
+
+	cfg := kubeletSetupConfig(t.TempDir())
+	cfg.RuntimeHandler = handler
+
+	useConfig(t, cfg)
+	useRuntimeHandlers(t, nil)
+
+	return cfg
+}
+
+// requireFellThroughRuntimeHandlerCheck asserts that Setup got past the
+// runtime-handler phase and failed in preflight, for the unrelated reason the
+// nonexistent socket guarantees.
+//
+// Two-sided on purpose, exactly as requireFellThroughKubeletCheck is. A
+// pass-expecting subtest cannot assert NoError -- preflight always fails here,
+// since it connects a real plugin to a socket this host does not have -- so
+// "validation passed" has to be pinned as "the error is preflight's AND is not
+// the handler phase's". Asserting merely that some error came back would pass
+// just as well if the handler phase had refused the run, which is the one thing
+// these subtests exist to rule out.
+func requireFellThroughRuntimeHandlerCheck(t *testing.T, err error) {
+	t.Helper()
+
+	require.ErrorContains(t, err, "no NRI plugin could connect")
+	require.NotContains(t, err.Error(), "-nri-test.runtime-handler")
+}
+
+func TestSetupRejectsAnUninstalledRuntimeHandler(t *testing.T) {
+	// One message naming both halves of the mismatch. A run asking for a handler
+	// the node does not have would otherwise fail at the first CreatePod, where CRI
+	// reports a handler error per test and nothing says which handlers exist.
+	cfg := handlerSetupConfig(t, "gvisor")
+
+	err := setupWith(t, cfg, &handlerDriver{handlers: []string{"runc"}})
+
+	require.Error(t, err)
+	require.ErrorContains(t, err, "gvisor", "the refusal must name what was asked for")
+	require.ErrorContains(t, err, "runc", "the refusal must name what is installed")
+	require.ErrorContains(t, err, "-nri-test.runtime-handler",
+		"the refusal must name the flag that caused it")
+	require.ErrorContains(t, err, "Select one of those handlers",
+		"a node that has handlers must be told to pick one of them")
+	// Refused before preflight, which is the whole reason the phase sits where it
+	// does: a validation phase after preflight would never be reached on a host
+	// with no runtime, so this refusal would be unobservable.
+	require.NotContains(t, err.Error(), "no NRI plugin could connect")
+}
+
+func TestSetupRefusalAdviceFitsANodeWithNoHandlers(t *testing.T) {
+	// The node this refusal is most likely to be read on: a runtime that advertises
+	// no handlers at all refuses any requested one, and the advice must not tell its
+	// operator to select one of an empty list, which reads as a bug in the suite
+	// rather than as a fact about the node.
+	cfg := handlerSetupConfig(t, "crun")
+
+	err := setupWith(t, cfg, &handlerDriver{handlers: nil})
+
+	require.ErrorContains(t, err, "crun")
+	require.ErrorContains(t, err, "names no handlers at all",
+		"the advice must say the node offers nothing to select")
+	require.NotContains(t, err.Error(), "Select one of those handlers",
+		"there is no 'one of those' on a node that reports an empty list")
+	require.NotContains(t, err.Error(), "no NRI plugin could connect")
+}
+
+func TestSetupAcceptsAnInstalledRuntimeHandler(t *testing.T) {
+	cfg := handlerSetupConfig(t, "runc")
+	d := &handlerDriver{handlers: []string{"crun", "runc"}}
+
+	// Fell through to preflight's failure, not the handler phase's: see
+	// requireFellThroughRuntimeHandlerCheck for why this cannot be a NoError.
+	requireFellThroughRuntimeHandlerCheck(t, setupWith(t, cfg, d))
+
+	require.Equal(t, 1, d.calls, "discovery must ask the driver exactly once")
+	require.Equal(t, []error{nil}, d.ctxErrs,
+		"discovery must be given a live budget of its own")
+
+	require.Equal(t, []string{"crun", "runc"}, RuntimeHandlers(),
+		"the discovered handlers must reach the accessor the gates read")
+	require.Equal(t, "runc", RuntimeHandler(),
+		"the selected handler must reach the accessor the summary reads")
+}
+
+func TestSetupToleratesHandlerDiscoveryFailure(t *testing.T) {
+	// A run that asked for nothing gets the runtime's default handler and does not
+	// care whether Status answered; a run that asked for one cannot be allowed to
+	// proceed as if it had got it.
+	t.Run("NoHandlerRequested", func(t *testing.T) {
+		cfg := handlerSetupConfig(t, "")
+
+		// Seeded non-empty, so the assertion below can fail. With the list left nil
+		// by handlerSetupConfig, "a failed discovery leaves no handlers behind" is
+		// true before Setup is even called, and the assertion would be a guard that
+		// reads as one without being one. Seeded, it pins the reset at the top of
+		// selectRuntimeHandler: a run whose discovery failed must not inherit the
+		// previous run's node.
+		useRuntimeHandlers(t, []string{"stale"})
+
+		// Again preflight's failure, for an unrelated reason, and specifically not
+		// the handler phase's: a bare require.Error here would be satisfied by the
+		// discovery failure this subtest exists to prove is tolerated.
+		requireFellThroughRuntimeHandlerCheck(t,
+			setupWith(t, cfg, &handlerDriver{err: errors.New("status is not answering")}))
+
+		require.Empty(t, RuntimeHandlers(),
+			"a failed discovery must leave no handlers behind for a gate to read")
+	})
+
+	t.Run("NoHandlerRequestedStillDiscovers", func(t *testing.T) {
+		// The phase is two jobs, and only one of them is about the flag. Discovery
+		// has to run on an ordinary default run as well, because the list it fills in
+		// is the only thing SkipUnlessRuntimeHandler reads: short-circuit the phase on
+		// an empty Config.RuntimeHandler and every handler gate silently skips on
+		// every ordinary run, with no test saying so.
+		cfg := handlerSetupConfig(t, "")
+		d := &handlerDriver{handlers: []string{"crun", "runc"}}
+
+		requireFellThroughRuntimeHandlerCheck(t, setupWith(t, cfg, d))
+
+		require.Equal(t, 1, d.calls,
+			"discovery must run even when no handler was requested")
+		require.Equal(t, []string{"crun", "runc"}, RuntimeHandlers(),
+			"the gates' list must be filled in on an ordinary default run too")
+	})
+
+	t.Run("HandlerRequested", func(t *testing.T) {
+		cfg := handlerSetupConfig(t, "crun")
+
+		err := setupWith(t, cfg,
+			&handlerDriver{err: errors.New("status is not answering")})
+
+		require.Error(t, err)
+		require.ErrorContains(t, err, "crun", "the failure must name what was asked for")
+		require.ErrorContains(t, err, "status is not answering",
+			"the failure must name the discovery failure underneath it")
+		require.ErrorContains(t, err, "-nri-test.runtime-handler")
+		require.NotContains(t, err.Error(), "no NRI plugin could connect",
+			"the run must be refused before preflight")
+	})
+
+	t.Run("DriverCannotList", func(t *testing.T) {
+		// A driver that does not implement the optional interface at all. Asking for
+		// a handler it cannot check is the same situation as a discovery that failed,
+		// and must not be silently downgraded to the runtime's default.
+		cfg := handlerSetupConfig(t, "crun")
+
+		err := setupWith(t, cfg, &noOpDriver{})
+
+		require.ErrorContains(t, err, "crun")
+		require.ErrorContains(t, err, "-nri-test.runtime-handler")
+		require.NotContains(t, err.Error(), "no NRI plugin could connect")
+		// The refusal must be this path's own. Every assertion above is satisfied by
+		// the not-installed refusal as well, so without this one the cannot-list path
+		// could be collapsed into the empty-list path unnoticed -- and that path says
+		// the node "names no handlers at all", which is the wrong statement about a
+		// driver that was never able to be asked.
+		require.ErrorContains(t, err, "cannot list",
+			"a driver that cannot be asked must not be reported as a node with no handlers")
+		require.ErrorContains(t, err, "noop", "the refusal must name the driver")
+		require.NotContains(t, err.Error(), "names no handlers at all")
+	})
+
+	t.Run("DriverCannotListAndNoneRequested", func(t *testing.T) {
+		requireFellThroughRuntimeHandlerCheck(t,
+			setupWith(t, handlerSetupConfig(t, ""), &noOpDriver{}))
+	})
+}
+
+func TestPodSpecCarriesTheConfiguredHandler(t *testing.T) {
+	// Stamped by PodSpec rather than by each test: a test that forgot would create
+	// its pods with the runtime's default handler while the run's summary claimed
+	// the selected one, which is a false result rather than a missing feature.
+	t.Run("stamps the selected handler", func(t *testing.T) {
+		useConfig(t, &Config{
+			Timeout:        time.Minute,
+			Namespace:      "nri-test",
+			RunID:          "deadbeef",
+			RuntimeHandler: "crun",
+		})
+
+		require.Equal(t, "crun", newFakeSuite(&fakeT{}).PodSpec("pod0").RuntimeHandler)
+	})
+
+	t.Run("leaves it empty when none was selected", func(t *testing.T) {
+		// Empty must stay empty rather than become a name: it is what asks the
+		// runtime for its default handler.
+		useConfig(t, &Config{Timeout: time.Minute, Namespace: "nri-test", RunID: "deadbeef"})
+
+		require.Empty(t, newFakeSuite(&fakeT{}).PodSpec("pod0").RuntimeHandler)
+	})
 }
 
 // noOpDriver is a minimal driver implementation for testing.
