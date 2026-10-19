@@ -44,7 +44,7 @@ type TestPlugin struct {
 	//
 	// SyncedPods and SyncedCtrs still report the unfiltered ids, and
 	// RawSyncedPods and RawSyncedCtrs the unfiltered protos, for a test that needs
-	// to know what the runtime actually sent — measuring the fidelity of the very
+	// to know what the runtime actually sent -- measuring the fidelity of the very
 	// fields the filter keys on has to be done there rather than here.
 	SynchronizeFn func(context.Context, []*api.PodSandbox, []*api.Container) ([]*api.ContainerUpdate, error)
 
@@ -184,8 +184,8 @@ func (p *TestPlugin) SyncedCtrs() []string {
 // RawSyncedPods returns the pods the most recent Synchronize was sent, before
 // scope filtering, as clones of the protos the runtime delivered.
 //
-// This exists for fidelity measurement — "did the runtime describe this pod
-// correctly" — and only for that. The pod fields a fidelity test measures are the
+// This exists for fidelity measurement -- "did the runtime describe this pod
+// correctly" -- and only for that. The pod fields a fidelity test measures are the
 // very fields the scope filter keys on, so measuring them through the filtered
 // SynchronizeFn is circular: a runtime that reported our pod with the wrong
 // namespace would be filtered out, and the test would report "the runtime did not
@@ -198,7 +198,7 @@ func (p *TestPlugin) SyncedCtrs() []string {
 //
 // Reading foreign workloads here does not reopen the hazard the input filter
 // closed: filterUpdates still guards every exit, so a test can look at a workload
-// outside this run but cannot act on one — an update naming a container we have
+// outside this run but cannot act on one -- an update naming a container we have
 // not seen through an in-scope callback is dropped and recorded. That separation,
 // prevention on the way in and enforcement on the way out, is why both layers
 // exist.
@@ -295,8 +295,8 @@ func (p *TestPlugin) UpdateContainers(updates []*api.ContainerUpdate) ([]*api.Co
 
 // Start connects the plugin to the runtime and waits for it to be synchronized.
 //
-// A TestPlugin is single-use: it may be started at most once — successfully or
-// not — and a second Start returns an error rather than appearing to succeed.
+// A TestPlugin is single-use: it may be started at most once -- successfully or
+// not -- and a second Start returns an error rather than appearing to succeed.
 // Readiness is signalled by closing a channel that Synchronize closes once and
 // never reopens, so a restarted plugin would return from Start before the new
 // Synchronize had happened, and a reconnect test would pass vacuously. Tests
@@ -399,8 +399,8 @@ func (p *TestPlugin) Stop() {
 // minimalEventMask is the smallest subscription a TestPlugin may return from
 // Configure.
 //
-// Subscribing to no events at all is meaningless — a plugin that wants nothing
-// has no reason to be connected — so Configure must always return a deliberate,
+// Subscribing to no events at all is meaningless -- a plugin that wants nothing
+// has no reason to be connected -- so Configure must always return a deliberate,
 // non-zero mask. Returning the mask explicitly is also what lets TestPlugin
 // implement every handler interface, so tests can use any callback, without
 // being auto-registered for every event: pkg/stub honours any non-zero mask
@@ -409,7 +409,7 @@ func (p *TestPlugin) Stop() {
 //
 // That substitution is why zero must never escape. TestPlugin implements all the
 // handler interfaces, so its "everything" is the full event set, including
-// VALIDATE_CONTAINER_ADJUSTMENT — and a registered validator makes the runtime
+// VALIDATE_CONTAINER_ADJUSTMENT -- and a registered validator makes the runtime
 // build and proto.Clone a validation request for every container it creates,
 // changing its behaviour for the very workloads we must not touch.
 //
@@ -480,7 +480,7 @@ func (p *TestPlugin) Synchronize(ctx context.Context, pods []*api.PodSandbox, ct
 
 	// The runtime hands the handshake its whole world: every pod and container on
 	// the node. Every other callback is scope filtered on its input, and
-	// Synchronize used to be the documented exception — which is exactly the kind
+	// Synchronize used to be the documented exception -- which is exactly the kind
 	// of exception that gets forgotten. So the in-scope set is derived here, from
 	// the pods themselves, rather than inherited from a scope check that never
 	// ran, and only the in-scope part of it is passed on. A SynchronizeFn that
@@ -500,8 +500,8 @@ func (p *TestPlugin) Synchronize(ctx context.Context, pods []*api.PodSandbox, ct
 	}
 
 	// A container is ours only if its pod is one of ours. A container whose
-	// PodSandboxId matches no in-scope pod — including one whose pod is absent
-	// from the list entirely — stays foreign.
+	// PodSandboxId matches no in-scope pod -- including one whose pod is absent
+	// from the list entirely -- stays foreign.
 	ourCtrs := make([]*api.Container, 0, len(ctrs))
 	for _, ctr := range ctrs {
 		if _, ok := inScope[ctr.GetPodSandboxId()]; ok {

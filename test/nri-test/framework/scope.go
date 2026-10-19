@@ -42,8 +42,8 @@ type Scope struct {
 // The pod's namespace is the hard guard: it is pod identity metadata, so unlike
 // labels and annotations it does not depend on the runtime round-tripping
 // anything. Within one of our namespaces the run id separates concurrent runs of
-// the suite, but a pod carrying no run id at all is still ours — the namespace is
-// dedicated — so we accept it rather than going blind if a runtime drops labels
+// the suite, but a pod carrying no run id at all is still ours -- the namespace is
+// dedicated -- so we accept it rather than going blind if a runtime drops labels
 // and annotations.
 //
 // This is the right rule for deciding what to filter and what to report, and the
@@ -68,8 +68,8 @@ func (s *Scope) Matches(namespace string, labels, annotations map[string]string)
 // the pod carrying exactly that run id. So there are three tiers inside one of
 // our own namespaces, and only the third is removable:
 //
-//  1. A pod with no run id at all was created by something else — only an
-//     nri-test run sets RunIDLabel — and must never be destroyed, even though
+//  1. A pod with no run id at all was created by something else -- only an
+//     nri-test run sets RunIDLabel -- and must never be destroyed, even though
 //     Matches deliberately counts it as in scope so the plugin filter and the leak
 //     guard do not go blind when a runtime drops labels. Reporting an unrelated
 //     pod is noise someone reads; destroying it cannot be undone.
@@ -79,7 +79,7 @@ func (s *Scope) Matches(namespace string, labels, annotations map[string]string)
 //     Reaping by foreign run id would therefore break a live peer at its own
 //     Setup. Since Matches excludes a foreign run id, such a pod is invisible to
 //     the leak guard too, so it is named in the stale-pod notice instead and left
-//     on the node to be removed by hand — see MatchesOtherRun. Stale-run reaping
+//     on the node to be removed by hand -- see MatchesOtherRun. Stale-run reaping
 //     needs liveness or age as its evidence, not a label, and is not attempted.
 //  3. A pod carrying our own run id is ours by construction and is removed.
 //
@@ -109,7 +109,7 @@ func (s *Scope) MatchesForRemoval(namespace string, labels, annotations map[stri
 // because that tier would otherwise be handled by nothing at all. Such a pod is
 // excluded from removal, since a run id cannot distinguish a crashed run from a
 // live one, and excluded from the leak guard, since Matches rejects a foreign run
-// id — so before this predicate existed the suite neither acted on it nor said a
+// id -- so before this predicate existed the suite neither acted on it nor said a
 // word about it. This is the predicate behind the stale-pod notice, and reporting
 // is all it is for: it describes a workload rather than touching it.
 func (s *Scope) MatchesOtherRun(namespace string, labels, annotations map[string]string) bool {
@@ -136,8 +136,8 @@ func (s *Scope) inNamespace(namespace string) bool {
 	}
 
 	// A pod with no namespace at all is never ours, and rejecting it here means a
-	// Scope built as Namespaces: []string{""} — which slices.Contains would
-	// otherwise match — cannot fail open.
+	// Scope built as Namespaces: []string{""} -- which slices.Contains would
+	// otherwise match -- cannot fail open.
 	if namespace == "" {
 		return false
 	}

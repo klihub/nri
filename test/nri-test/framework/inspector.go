@@ -42,7 +42,7 @@ type Inspector interface {
 
 // Executor runs a command inside a running container and returns its output.
 // Because exec joins the container's cgroups and namespaces, what the command
-// observes is what the container actually got — which is why this is the
+// observes is what the container actually got -- which is why this is the
 // authoritative surface for anything the kernel exposes about itself.
 //
 // Keyed by a bare container id for the same reason Inspector is.

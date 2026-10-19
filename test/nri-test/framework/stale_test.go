@@ -137,7 +137,7 @@ func TestStalePodsDoNotChangeTheRunsOutcome(t *testing.T) {
 	// The notice is information, not a fault: a stale peer's pod must not fail a
 	// case, must not fail cleanup, and must not reach the leak guard's verdict. The
 	// guard's own listing is what decides that verdict, and a stale pod is absent
-	// from it by construction — Scope.Matches excludes another run's id — which the
+	// from it by construction -- Scope.Matches excludes another run's id -- which the
 	// driver's own tests pin. Here we assert the suite-level consequence.
 	ft := &fakeT{}
 	d := &staleDriver{stale: []StalePod{{ID: "abc123", Name: "pod0", RunID: "other"}}}

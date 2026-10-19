@@ -20,7 +20,7 @@ import "strings"
 
 // ProcStatus parses the key/value lines of a /proc/<pid>/status file.
 //
-// Every line is "Key:" followed by whitespace and a value — the separator is a
+// Every line is "Key:" followed by whitespace and a value -- the separator is a
 // tab for most fields and a space for a few, so the value is split off at the
 // colon and trimmed rather than matched against any particular whitespace. Keys
 // keep their names without the trailing colon, so a caller asks for

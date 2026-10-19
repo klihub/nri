@@ -400,8 +400,8 @@ func TestScopeMatchesOtherRun(t *testing.T) {
 //
 // The interesting row is the unlabelled pod: in scope, so the plugin filter and
 // the leak guard both see it, and never removable, which is the defect the split
-// fixes. Another run's pod is out of scope and unremovable — we cannot tell a
-// crashed peer from a live one — which is why it needs a notice of its own rather
+// fixes. Another run's pod is out of scope and unremovable -- we cannot tell a
+// crashed peer from a live one -- which is why it needs a notice of its own rather
 // than silence.
 func TestScopeRemovalIsNotMatches(t *testing.T) {
 	var (

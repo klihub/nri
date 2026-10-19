@@ -106,7 +106,7 @@ func (f *fakeRuntime) ExecSync(_ context.Context, containerID string, cmd []stri
 // The suite must filter client-side: a runtime that does not round-trip labels
 // makes a selector match nothing, and a leak guard that matches nothing reports no
 // leak. That is the fatal direction, and it was previously honoured by convention
-// alone — the fakes discarded their filter argument, so a driver that grew a
+// alone -- the fakes discarded their filter argument, so a driver that grew a
 // selector left every test green.
 //
 // A loud error rather than an empty result, deliberately. Returning nothing would
@@ -211,7 +211,7 @@ func criPod(id, namespace string, labels, annotations map[string]string) *runtim
 }
 
 // criCtr returns a listed container. Unlike a pod sandbox it carries no
-// namespace of its own — only the id of the sandbox it belongs to — which is
+// namespace of its own -- only the id of the sandbox it belongs to -- which is
 // what listOurContainers' union rule exists to work around.
 func criCtr(id, podID string, labels, annotations map[string]string) *runtimeapi.Container {
 	return &runtimeapi.Container{
@@ -337,8 +337,8 @@ func TestDriverCleanup(t *testing.T) {
 	theirs := map[string]string{framework.RunIDLabel: "other"}
 
 	t.Run("should stop and remove a pod carrying our run id", func(t *testing.T) {
-		// This subtest used to assert that an unlabelled pod in our namespace —
-		// criPod("p1", "nri-test", nil, nil) — was stopped and removed as well,
+		// This subtest used to assert that an unlabelled pod in our namespace --
+		// criPod("p1", "nri-test", nil, nil) -- was stopped and removed as well,
 		// because Cleanup listed with Scope.Matches, which treats an absent run id
 		// as ours. That was a real defect, not a preference: on a node where a pod
 		// namespace called nri-test happens to exist, or with
@@ -364,8 +364,8 @@ func TestDriverCleanup(t *testing.T) {
 		//     absent run id as ours so the guard does not go blind when a runtime
 		//     drops labels; over-reporting is noise an operator reads.
 		//   - Cleanup must not touch it. Only an nri-test run sets RunIDLabel, so a
-		//     pod carrying none was created by something else — even inside our own
-		//     namespace — and destroying it is unrecoverable.
+		//     pod carrying none was created by something else -- even inside our own
+		//     namespace -- and destroying it is unrecoverable.
 		rt := &fakeRuntime{pods: []*runtimeapi.PodSandbox{criPod("p1", "nri-test", nil, nil)}}
 		d := testDriver(scopedConfig(), rt)
 
@@ -387,8 +387,8 @@ func TestDriverCleanup(t *testing.T) {
 		// sandboxes at Setup. Garbage left for someone to sweep is the cheaper
 		// failure, so removal now requires our own run id.
 		//
-		// The pod is not reported either — Scope.Matches excludes a foreign run id
-		// from the leak guard — which is the accepted cost of that choice.
+		// The pod is not reported either -- Scope.Matches excludes a foreign run id
+		// from the leak guard -- which is the accepted cost of that choice.
 		rt := &fakeRuntime{pods: []*runtimeapi.PodSandbox{criPod("p1", "nri-test", theirs, nil)}}
 		d := testDriver(scopedConfig(), rt)
 
@@ -526,7 +526,7 @@ func TestDriverStalePods(t *testing.T) {
 	t.Run("should name another run's pod that cleanup refused to remove", func(t *testing.T) {
 		// The pair that closes the gap the removal predicate opened: a pod carrying
 		// another run's id is destroyed by nothing and reported by nothing else, so
-		// without this notice it is invisible. Reporting only — asserted here as the
+		// without this notice it is invisible. Reporting only -- asserted here as the
 		// same subtest, so nobody can turn the notice into a removal and stay green.
 		rt := &fakeRuntime{pods: []*runtimeapi.PodSandbox{criPod("p1", "nri-test", theirs, nil)}}
 		d := testDriver(scopedConfig(), rt)
@@ -894,7 +894,7 @@ func TestDriverListRunContainers(t *testing.T) {
 	})
 
 	t.Run("should list with no server-side label selector", func(t *testing.T) {
-		// ContainerFilter does have a LabelSelector, unlike PodSandboxFilter — and it
+		// ContainerFilter does have a LabelSelector, unlike PodSandboxFilter -- and it
 		// is still not used, for the reason the pod path documents. Asserted on the
 		// filter the runtime was handed, so nothing but this test stands between the
 		// guard and a selector that silently matches nothing. See errLabelSelector.

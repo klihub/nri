@@ -81,7 +81,7 @@ var nonHookEventTypes = []EventType{
 // IsHook reports whether t records an NRI hook invocation, as opposed to one of
 // the plugin lifecycle events the framework records for itself.
 //
-// A negative assertion — "the plugin received nothing it did not subscribe to" —
+// A negative assertion -- "the plugin received nothing it did not subscribe to" --
 // must exempt the lifecycle events, because they are not subscribable. Listing
 // them by hand in each such assertion is what left Shutdown and Disconnected out
 // of the one in TestEventSubscriptions. Disconnected is the dangerous omission:

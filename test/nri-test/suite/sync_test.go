@@ -67,7 +67,7 @@ func TestPluginSynchronization(t *testing.T) {
 		// The fields measured below are the fields the scope filter keys on, so the
 		// filtered view would be circular: a runtime reporting a wrong namespace
 		// would be filtered out and reported as a pod the runtime never mentioned,
-		// which is a different — and wrong — conformance finding.
+		// which is a different -- and wrong -- conformance finding.
 		synced := plugin.RawSyncedPods()
 
 		idx := slices.IndexFunc(synced, func(p *api.PodSandbox) bool {

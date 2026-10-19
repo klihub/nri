@@ -811,7 +811,7 @@ func TestTestPluginFiltersEveryExit(t *testing.T) {
 	t.Run("Synchronize", func(t *testing.T) {
 		// Synchronize's input is filtered, so a Fn that maps over what it is handed
 		// cannot name a foreign container. The output filter still has to hold for
-		// an id the Fn names itself — a typo, or an id captured elsewhere.
+		// an id the Fn names itself -- a typo, or an id captured elsewhere.
 		p, q := newPlugin()
 
 		var (
@@ -873,7 +873,7 @@ func TestTestPluginFiltersEveryExit(t *testing.T) {
 		// The assertion that stops the asymmetry being "tidied up". The raw
 		// accessors are for fidelity measurement: the pod fields a fidelity test
 		// measures are the fields the filter keys on, so measuring them through the
-		// filtered callback would be circular — a wrong namespace would look like an
+		// filtered callback would be circular -- a wrong namespace would look like an
 		// absent pod. Exposing the unfiltered view is safe because filterUpdates
 		// still guards every exit: a test can look at a foreign workload, not act on
 		// one.
@@ -1048,7 +1048,7 @@ func TestTestPluginFiltersEveryExit(t *testing.T) {
 // TestTestPluginNotesTheContainerOfEveryCallback pins the noteContainer call in
 // every container callback, not just the three whose return value is filtered.
 //
-// Without this, removing the call from — say — StartContainer fails no test, and a
+// Without this, removing the call from -- say -- StartContainer fails no test, and a
 // case subscribed only to StartContainer would have its UpdateContainers request
 // silently emptied: the update is dropped because the container was never noted,
 // and the case does nothing and passes.
@@ -1103,7 +1103,7 @@ func TestTestPluginNotesTheContainerOfEveryCallback(t *testing.T) {
 //
 // The shared fixtures set Name equal to Id, so recording ctr.GetName() instead of
 // ctr.GetId(), or keying the derivation on pod.GetName(), passes every other test
-// here — while against a real runtime, where a container id is a hash and its name
+// here -- while against a real runtime, where a container id is a hash and its name
 // is the Kubernetes container name, it would drop every single update.
 func TestTestPluginKeysOnIdsNotNames(t *testing.T) {
 	ctx := context.Background()

@@ -992,7 +992,7 @@ func TestSuiteStartPluginsRecordsAPluginBeforeAssertingOnItsStart(t *testing.T) 
 
 func TestSuiteStartPluginExpectingErrorStillRecordsThePlugin(t *testing.T) {
 	// A plugin whose Start failed part way may still hold a connection and still be
-	// recording into this case's queue, so cleanup must get to stop it — and
+	// recording into this case's queue, so cleanup must get to stop it -- and
 	// cleanup's dropped-update guard runs after those stops, on the promise that
 	// nothing can still be appending to the queue. Recording only on success broke
 	// that promise for exactly the plugins most likely to be in a half-state.

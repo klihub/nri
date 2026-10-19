@@ -26,8 +26,8 @@ import (
 // different nri-test run's id.
 //
 // It is a report, never a work item. Scope.MatchesForRemoval deliberately refuses
-// to destroy such a pod — a run id cannot distinguish a crashed run's leftovers
-// from a live run's workloads — and Scope.Matches keeps it out of the leak guard,
+// to destroy such a pod -- a run id cannot distinguish a crashed run's leftovers
+// from a live run's workloads -- and Scope.Matches keeps it out of the leak guard,
 // so this description is the only thing the suite has to say about it. Every field
 // is here because an operator acting by hand needs it.
 type StalePod struct {
@@ -58,7 +58,7 @@ type stalePodLister interface {
 //
 // Reporting only, and deliberately so. This is NOT the "reap other runs' pods"
 // flag that was refused: that would have destroyed a live peer's workload, this
-// only describes one, which is a different risk class entirely — and unlike the
+// only describes one, which is a different risk class entirely -- and unlike the
 // flag it has a real caller. Do not "simplify" it into a removal: the pods it
 // names are exactly the ones the suite has decided it cannot prove are dead.
 //

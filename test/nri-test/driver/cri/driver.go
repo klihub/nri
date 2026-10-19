@@ -239,8 +239,8 @@ type scopeFilter func(namespace string, labels, annotations map[string]string) b
 // the runtime whichever listing happens to run. Recording rather than acting is the
 // whole point: these are the pods removal refuses to touch.
 //
-// CRI's PodSandboxFilter has no namespace field — only Id, State and
-// LabelSelector — so the namespace guard has to be applied client-side. We
+// CRI's PodSandboxFilter has no namespace field -- only Id, State and
+// LabelSelector -- so the namespace guard has to be applied client-side. We
 // deliberately do NOT filter by run-id label server-side either: if a runtime
 // does not round-trip labels, a label selector would silently match nothing and
 // the leak guard would report no leak.
@@ -248,7 +248,7 @@ type scopeFilter func(namespace string, labels, annotations map[string]string) b
 // The decision itself is framework.Scope's, not ours, so the driver can never
 // disagree with the plugins about what belongs to this run. The predicate is a
 // parameter rather than a second copy of this loop because the two callers need
-// different rules — see listOurPods and listPodsToRemove — and one listing loop
+// different rules -- see listOurPods and listPodsToRemove -- and one listing loop
 // keeps the CRI-shape knowledge in one place. Note that in the CRI type the
 // namespace lives under Metadata while the labels are top-level.
 func (d *Driver) listPods(ctx context.Context, matches scopeFilter) ([]*runtimeapi.PodSandbox, error) {
@@ -343,7 +343,7 @@ func (d *Driver) listPodsToRemove(ctx context.Context) ([]*runtimeapi.PodSandbox
 // behind, which the driver no longer tracks. The driver's own record covers the
 // opposite failure: if a runtime under-reports Metadata.Namespace in
 // ListPodSandbox, no scope predicate can recognise our own pods and only d.pods
-// still knows their ids. The tracked arm is therefore unconditional — those pods
+// still knows their ids. The tracked arm is therefore unconditional -- those pods
 // are ours by construction, whatever the listing says about them.
 //
 // A listing error is returned alongside the ids it could still gather, so the
@@ -411,7 +411,7 @@ func (d *Driver) Cleanup(ctx context.Context) error {
 
 		// Attempt the removal even if the stop failed. Both containerd and CRI-O
 		// force-stop a sandbox from inside RemovePodSandbox, so removal can
-		// succeed where the explicit stop did not — and removal is what actually
+		// succeed where the explicit stop did not -- and removal is what actually
 		// prevents the leak.
 		if err := d.client.Runtime.RemovePodSandbox(ctx, id); err != nil {
 			errs = append(errs, fmt.Errorf("failed to remove pod %s: %w", id, err))
@@ -455,19 +455,19 @@ func containerRunID(c *runtimeapi.Container) string {
 //
 // A CRI Container carries PodSandboxId, Labels and Annotations, but no namespace
 // of its own, so Scope.Matches cannot be applied to it directly. A container is
-// ours if EITHER of the following holds — a union, in this order:
+// ours if EITHER of the following holds -- a union, in this order:
 //
 //  1. its PodSandboxId is a pod we already know is ours, which is exactly the
 //     tracked-plus-listed set ourPodIDs builds. That inherits both of
 //     ourPodIDs' sources, so a container survives a runtime under-reporting
-//     Metadata.Namespace as long as the driver still tracks its pod — RemovePod
+//     Metadata.Namespace as long as the driver still tracks its pod -- RemovePod
 //     forgets a pod once RemovePodSandbox has returned success, so "we created
 //     it" is not enough.
 //  2. its own labels or annotations carry this run's id. This catches a container
 //     whose pod the listing somehow missed.
 //
-// Resolving the namespace as d.cfg.Namespace instead — assuming every listed
-// container sits in our namespace — would be wrong in the fatal direction's
+// Resolving the namespace as d.cfg.Namespace instead -- assuming every listed
+// container sits in our namespace -- would be wrong in the fatal direction's
 // mirror image: an unlabelled foreign container would look like our leak, so on
 // any busy node every run would fail its own leak guard, and a guard that always
 // fires is a guard nobody reads.

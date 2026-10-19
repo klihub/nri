@@ -144,7 +144,7 @@ func Setup(cfg *Config, newDriver DriverFactory) error {
 	// cleanup happens in Teardown and per-case, where the driver's tracked pods
 	// carry it. Do not read the call as dead code: it is what cleans up after a
 	// re-used -nri-test.run-id, and it catches a pod an earlier phase of this run
-	// created and stopped tracking. Reaping other runs' leftovers is not its job —
+	// created and stopped tracking. Reaping other runs' leftovers is not its job --
 	// a label cannot tell a crashed run from a live one.
 	if err := withTimeout(cfg.Timeout, driver.Cleanup); err != nil {
 		return fmt.Errorf("failed to clean up stale workloads before starting: %w", err)
@@ -333,8 +333,8 @@ func RuntimeHandler() string { return TestConfig.RuntimeHandler }
 // imagePuller is implemented by a driver that can pre-pull the test image.
 //
 // Optional, and discovered by type assertion exactly as preflight discovers
-// versioner: a future driver that has no image service of its own — a Kubernetes
-// driver, say, where the kubelet does the pulling — should not have to implement
+// versioner: a future driver that has no image service of its own -- a Kubernetes
+// driver, say, where the kubelet does the pulling -- should not have to implement
 // it to be usable.
 type imagePuller interface {
 	PullImage(ctx context.Context, image string) error
@@ -345,7 +345,7 @@ type imagePuller interface {
 //
 // Nothing else pulls it. CRI's CreateContainer does not pull, so on a node where
 // the image is absent every container-creating test fails with "failed to create
-// container ... in pod ..." wrapping a not-found — a message that mentions
+// container ... in pod ..." wrapping a not-found -- a message that mentions
 // neither the image nor pulling, and that arrives once per test instead of once.
 func pullImage(ctx context.Context, cfg *Config) error {
 	if cfg.NoPull {
@@ -509,8 +509,8 @@ type suiteT interface {
 //
 // Declaring the plugin list as this interface rather than as []*TestPlugin is
 // what lets a unit test put a fake in it and observe the plugin context at the
-// moment Stop is called. That ordering — plugins stopped first, plugin context
-// cancelled after — is what commit 409e62c fixed, and nothing else can pin it.
+// moment Stop is called. That ordering -- plugins stopped first, plugin context
+// cancelled after -- is what commit 409e62c fixed, and nothing else can pin it.
 type pluginStopper interface {
 	Stop()
 }
@@ -522,7 +522,7 @@ type pluginStopper interface {
 // which is duplicated across rows of more than one table. containerd reserves a
 // sandbox name for a live (name, namespace, uid, attempt) tuple, so a duplicate
 // name plus a removal that has not completed yet makes the *next* subtest fail
-// with "sandbox name is reserved" — a failure attributed to the wrong test.
+// with "sandbox name is reserved" -- a failure attributed to the wrong test.
 var podSeq atomic.Uint64
 
 // Suite is one test case's view of the runtime. It names every workload it
@@ -736,15 +736,15 @@ func (s *Suite) CreatePod(spec *PodSpec) *Pod {
 	s.t.Helper()
 
 	// PodSpec.Containers exists for drivers that lack CapContainerLifecycle, which
-	// is where it is the only path there is — the future Kubernetes driver, where
+	// is where it is the only path there is -- the future Kubernetes driver, where
 	// every container arrives with its pod. For a driver that has the capability it
 	// is strictly worse than the lazy path: the CRI driver creates those containers
 	// inside CreatePod and discards each *Container it gets back, so the suite never
 	// learns their ids and the leak guard can only report them as pre-existing rather
 	// than as this case's.
 	//
-	// Not a leak that goes unreported — the driver finds such a container through its
-	// pod, and through the run-id label CtrSpec stamps on it — but a leak reported
+	// Not a leak that goes unreported -- the driver finds such a container through its
+	// pod, and through the run-id label CtrSpec stamps on it -- but a leak reported
 	// with the wrong attribution, which sends its reader looking for an earlier case
 	// that never existed.
 	if driver.Capabilities().Has(CapContainerLifecycle) {
@@ -778,7 +778,7 @@ func (s *Suite) CreateContainer(pod *Pod, spec *ContainerSpec) *Container {
 
 	ctr, err := driver.CreateContainer(ctx, pod, spec)
 	// Record before asserting, for the reason CreatePod documents: fatalf does not
-	// return, so a container appended after it would never reach the leak guard —
+	// return, so a container appended after it would never reach the leak guard --
 	// and a creation that failed part way is exactly the case the container guard
 	// exists for.
 	if ctr != nil {
@@ -1160,15 +1160,15 @@ func (s *Suite) cleanup() {
 
 	// A dropped update means one of this case's plugins returned an update naming a
 	// container outside the run, and the filter refused it. Recording the drop is
-	// not enough on its own: nothing else in the suite reads UpdateDropped — the
+	// not enough on its own: nothing else in the suite reads UpdateDropped -- the
 	// wholesale event scan skips non-hooks, correctly, since a drop is not an
-	// unsubscribed hook — so the queue entry would be a record no assertion looks
+	// unsubscribed hook -- so the queue entry would be a record no assertion looks
 	// at, and a case whose request was silently emptied would still pass. That is
 	// the failure the event exists to prevent, so it is failed here.
 	//
 	// Unconditional, with no way to opt out. A per-case latch muted the guard for
 	// every later drop in the case, across all its plugins, since they share one
-	// queue — the same shape of hole the guard exists to close. A case that
+	// queue -- the same shape of hole the guard exists to close. A case that
 	// legitimately trips the filter will need an exception naming the container ids
 	// it expects to be dropped, and that belongs with the first case that wants one.
 	//
@@ -1222,8 +1222,8 @@ func (s *Suite) cleanup() {
 	})
 
 	// The removal failures are the direct cause of any leak, so report them before
-	// the leak itself. On their own they are only a note — the case may
-	// legitimately have removed the pod already — but if either guard did find
+	// the leak itself. On their own they are only a note -- the case may
+	// legitimately have removed the pod already -- but if either guard did find
 	// something, or could not look, they are the diagnosis.
 	if len(removeErrs) > 0 {
 		report := s.t.Logf
@@ -1307,8 +1307,8 @@ func (s *Suite) removePods() []string {
 //
 // The distinction matters because a pod in the run's namespace that carries no run
 // id is treated as ours by design (see Scope.Matches), so a stray from a killed
-// earlier run — or a user's own pod in a namespace that happens to be called
-// nri-test — is reported by every single case. Saying which ids are this case's
+// earlier run -- or a user's own pod in a namespace that happens to be called
+// nri-test -- is reported by every single case. Saying which ids are this case's
 // turns that cascade into a message an operator can act on.
 func (s *Suite) reportLeak(leaked []string) {
 	// The namespace is a checked fact here: it is how the pod matched at all, since
@@ -1330,13 +1330,13 @@ func (s *Suite) reportLeak(leaked []string) {
 //
 // One gap, deliberate for now: a container created as part of a PodSpec is not on
 // s.ctrs, because Driver.CreatePod returns only the pod and the suite never learns
-// those container ids. Such a container is still reported as a leak — the driver's
-// listing finds it through its pod — only as a pre-existing one rather than as
+// those container ids. Such a container is still reported as a leak -- the driver's
+// listing finds it through its pod -- only as a pre-existing one rather than as
 // this case's. A case that wants the attribution creates its containers through
 // Suite.CreateContainer.
 // The container message deliberately names no namespace, unlike the pod one. A
 // container has no namespace of its own, and the driver's second arm matches one on
-// its run-id label alone, in a pod it knows nothing about — which is the whole
+// its run-id label alone, in a pod it knows nothing about -- which is the whole
 // point of that arm. Printing the run's namespace for such a container would state
 // something nobody checked and send its reader looking in the wrong place.
 func (s *Suite) reportContainerLeak(leaked []string) {
