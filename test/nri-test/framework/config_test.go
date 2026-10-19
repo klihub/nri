@@ -17,12 +17,39 @@
 package framework
 
 import (
+	"flag"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
+
+// The two delay flags have to land in one list, in the order they were given:
+// that is what makes "later wins" hold across them. Appending the file flag to
+// a list of its own would satisfy every ScalePlan test and still lose the
+// ordering, which no other test here would notice.
+//
+// This is the one test that registers the real flags, so nothing else in this
+// package may: a second RegisterFlags call panics on the duplicate names.
+func TestScaleDelayFlagsShareOneOrderedList(t *testing.T) {
+	RegisterFlags()
+
+	saved := TestConfig.ScaleDelays
+	t.Cleanup(func() { TestConfig.ScaleDelays = saved })
+
+	TestConfig.ScaleDelays = nil
+
+	require.NoError(t, flag.Set("nri-test.scale-delay", "50ms"))
+	require.NoError(t, flag.Set("nri-test.scale-delay-file", "/tmp/profiles.yaml"))
+	require.NoError(t, flag.Set("nri-test.scale-delay", "1/CreateContainer=5ms"))
+
+	require.Equal(t, []DelaySource{
+		{Spec: "50ms"},
+		{Path: "/tmp/profiles.yaml"},
+		{Spec: "1/CreateContainer=5ms"},
+	}, TestConfig.ScaleDelays)
+}
 
 func TestConfigComplete(t *testing.T) {
 	t.Run("should generate a run id", func(t *testing.T) {

@@ -94,8 +94,7 @@ func runK8sBurst(t *testing.T, iteration int) {
 	q.Grow(n * scaleEventsPerPod)
 	q.TrackCost(true, n*scaleEventsPerPod)
 
-	recorder := s.NewPlugin("scale-recorder", "00", scaleMask)
-	s.StartPlugins(recorder)
+	startScalePlugins(t, s)
 
 	require.NoError(t, scaler.Scale(ctx, int32(n)), "failed to scale up")
 
@@ -221,14 +220,16 @@ func writeScaleReports(t *testing.T, path string, iteration int,
 	}
 
 	out := struct {
-		Iteration int     `json:"iteration"`
-		Replicas  int     `json:"replicas"`
-		Driver    string  `json:"driver"`
-		Phases    []phase `json:"phases"`
+		Iteration int      `json:"iteration"`
+		Replicas  int      `json:"replicas"`
+		Driver    string   `json:"driver"`
+		Plugins   []string `json:"plugins"`
+		Phases    []phase  `json:"phases"`
 	}{
 		Iteration: iteration,
 		Replicas:  framework.TestConfig.ScaleReplicas,
 		Driver:    framework.TestConfig.ScaleDriver,
+		Plugins:   framework.TestConfig.ScalePlan.Describe(),
 	}
 
 	for _, r := range reports {
