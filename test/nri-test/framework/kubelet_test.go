@@ -105,3 +105,80 @@ func TestKubeletRunning(t *testing.T) {
 		})
 	}
 }
+
+// scaleConflictDriver conflicts with kubelet, like the CRI driver. Scalability
+// mode must ignore that and demand a kubelet anyway, so the fake has to say
+// yes for the inversion to be worth testing.
+type scaleConflictDriver struct{ noOpDriver }
+
+func (d *scaleConflictDriver) ConflictsWithKubelet() bool { return true }
+
+func TestCheckKubeletInvertsForScalabilityMode(t *testing.T) {
+	withKubelet := t.TempDir()
+	writeComm(t, withKubelet, "4242", "kubelet\n")
+
+	withoutKubelet := t.TempDir()
+	writeComm(t, withoutKubelet, "4242", "containerd\n")
+
+	d := &scaleConflictDriver{}
+
+	t.Run("a ReplicaSet burst requires a kubelet", func(t *testing.T) {
+		cfg := &Config{ScaleReplicas: 10, ScaleDriver: ScaleDriverK8s, procDir: withoutKubelet}
+
+		err := checkKubelet(cfg, d)
+
+		require.Error(t, err, "a burst is a ReplicaSet, which needs kubelet")
+		require.ErrorContains(t, err, "-nri-test.scale-replicas",
+			"the message names the flag that put the run in this mode")
+		require.ErrorContains(t, err, "10",
+			"and the replica count, so the reader knows which run this was")
+	})
+
+	t.Run("a ReplicaSet burst accepts a kubelet", func(t *testing.T) {
+		cfg := &Config{ScaleReplicas: 10, ScaleDriver: ScaleDriverK8s, procDir: withKubelet}
+
+		require.NoError(t, checkKubelet(cfg, d),
+			"kubelet is the prerequisite here, not the hazard")
+	})
+
+	t.Run("a conformance run still refuses a kubelet", func(t *testing.T) {
+		cfg := &Config{procDir: withKubelet}
+
+		err := checkKubelet(cfg, d)
+
+		require.Error(t, err, "the original refusal is unchanged outside scale mode")
+		require.ErrorContains(t, err, "-nri-test.allow-kubelet")
+	})
+
+	t.Run("a ReplicaSet burst does not need the allow flag", func(t *testing.T) {
+		// If the inversion were implemented as "skip when AllowKubelet", a
+		// ReplicaSet burst would still have to pass the flag, and a run on a
+		// node with no kubelet would get an empty burst instead of a reason.
+		cfg := &Config{
+			ScaleReplicas: 10, ScaleDriver: ScaleDriverK8s,
+			procDir: withKubelet, AllowKubelet: false,
+		}
+
+		require.NoError(t, checkKubelet(cfg, d))
+	})
+
+	t.Run("a CRI burst still refuses a kubelet", func(t *testing.T) {
+		// The two drivers are opposite here, and this is the half that is easy
+		// to get wrong: a CRI burst creates sandboxes over CRI like every
+		// other test, so kubelet would collect them mid-measurement.
+		cfg := &Config{ScaleReplicas: 10, ScaleDriver: ScaleDriverCRI, procDir: withKubelet}
+
+		err := checkKubelet(cfg, d)
+
+		require.Error(t, err)
+		require.ErrorContains(t, err, "-nri-test.allow-kubelet",
+			"a CRI burst gets the ordinary refusal, not the inversion")
+	})
+
+	t.Run("a CRI burst does not require a kubelet", func(t *testing.T) {
+		cfg := &Config{ScaleReplicas: 10, ScaleDriver: ScaleDriverCRI, procDir: withoutKubelet}
+
+		require.NoError(t, checkKubelet(cfg, d),
+			"the inversion must not leak across to the CRI driver")
+	})
+}
