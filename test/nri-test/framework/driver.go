@@ -1,0 +1,132 @@
+/*
+   Copyright The containerd Authors.
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
+package framework
+
+import (
+	"context"
+	"strings"
+)
+
+// Capability describes what a Driver is able to express.
+type Capability uint
+
+const (
+	// CapContainerLifecycle means containers can be created, started, stopped
+	// and removed individually, rather than only as part of a pod.
+	CapContainerLifecycle Capability = 1 << iota
+	// CapObserveOpError means an operation's error is surfaced verbatim to the
+	// caller, so a test can assert that an operation failed.
+	CapObserveOpError
+	// CapUpdateContainerResources means a running container's resources can be
+	// updated.
+	CapUpdateContainerResources
+	// CapUpdatePodResources means a pod's resources can be updated.
+	CapUpdatePodResources
+	// CapExec means a command can be run inside a running container and its
+	// output collected, so a test can verify what the kernel actually applied
+	// rather than only what the runtime recorded. See Executor.
+	//
+	// New bits go at the END of this list. The values come from 1 << iota and are
+	// depended on; renumbering an existing one silently changes what a stored or
+	// logged capability set means.
+	CapExec
+)
+
+var capabilityNames = []struct {
+	cap  Capability
+	name string
+}{
+	{CapContainerLifecycle, "ContainerLifecycle"},
+	{CapObserveOpError, "ObserveOpError"},
+	{CapUpdateContainerResources, "UpdateContainerResources"},
+	{CapUpdatePodResources, "UpdatePodResources"},
+	{CapExec, "Exec"},
+}
+
+// Has reports whether all capabilities in o are present in c.
+func (c Capability) Has(o Capability) bool {
+	return c&o == o
+}
+
+func (c Capability) String() string {
+	var names []string
+	for _, e := range capabilityNames {
+		if c.Has(e.cap) {
+			names = append(names, e.name)
+		}
+	}
+
+	if len(names) == 0 {
+		return "none"
+	}
+
+	return strings.Join(names, ",")
+}
+
+// Driver creates and mutates test workloads. The CRI driver implements it over
+// CRI; a future Kubernetes driver will implement it over client-go.
+type Driver interface {
+	// Name identifies the driver in test output and skip messages.
+	Name() string
+	// Capabilities returns what this driver can express.
+	Capabilities() Capability
+
+	// CreatePod creates a pod, and any containers p.Containers carries. A
+	// driver with CapContainerLifecycle may instead be handed containers one
+	// at a time via CreateContainer.
+	CreatePod(ctx context.Context, p *PodSpec) (*Pod, error)
+	// UpdatePodResources updates a pod's resources.
+	UpdatePodResources(ctx context.Context, p *Pod, r *Resources) error
+	// StopPod stops a pod.
+	StopPod(ctx context.Context, p *Pod) error
+	// RemovePod removes a stopped pod.
+	RemovePod(ctx context.Context, p *Pod) error
+
+	// CreateContainer creates a container in a pod.
+	CreateContainer(ctx context.Context, p *Pod, c *ContainerSpec) (*Container, error)
+	// StartContainer starts a created container.
+	StartContainer(ctx context.Context, c *Container) error
+	// UpdateContainerResources updates a container's resources.
+	UpdateContainerResources(ctx context.Context, c *Container, r *Resources) error
+	// StopContainer stops a running container.
+	StopContainer(ctx context.Context, c *Container) error
+	// RemoveContainer removes a stopped container.
+	RemoveContainer(ctx context.Context, c *Container) error
+
+	// ListRunPods returns the ids of the pods this run created that still
+	// exist. It is the leak guard: the suite calls it after Cleanup to notice
+	// that cleanup missed something. It is part of this interface rather than
+	// discovered by an optional type assertion, because a driver that did not
+	// implement it would disable the one mechanism whose job is noticing a
+	// missed cleanup, and would do so silently.
+	ListRunPods(ctx context.Context) ([]string, error)
+
+	// ListRunContainers returns the ids of the containers this run created that
+	// still exist. Required, not optional, for the same reason ListRunPods is: a
+	// leak guard a driver can silently opt out of is not a leak guard.
+	//
+	// It is a separate method rather than part of ListRunPods because a pod-level
+	// guard cannot express "this rejected creation leaked no container": the
+	// container's pod is one the case created on purpose, so the pod guard is
+	// silent about it either way.
+	ListRunContainers(ctx context.Context) ([]string, error)
+
+	// Cleanup removes everything this driver created.
+	Cleanup(ctx context.Context) error
+	// Close releases the driver's resources.
+	Close(ctx context.Context) error
+}
