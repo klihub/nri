@@ -331,7 +331,7 @@ func mountPoints(procMounts string) []string {
 // the spec and failed to apply it looks correct on the spec and wrong here,
 // which is the whole point of reading it.
 //
-// /proc/self, never /proc/1: under CRI's default pod PID namespace, PID 1 is the
+// /proc/self, never /proc/1: in a pod-wide PID namespace, PID 1 is the
 // sandbox's pause process, which is not subject to this container's cpuset.
 // Measured on this host, /proc/1/status reported 0-43 -- every CPU -- while
 // /proc/self/status reported 0-1, matching the requested CpusetCpus of "0-1".

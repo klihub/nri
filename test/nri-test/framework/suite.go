@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -62,10 +63,36 @@ type DriverFactory func(ctx context.Context, cfg *Config) (Driver, Inspector, er
 // and the next one would fail with its own diagnostic for a reason that has
 // nothing to do with it.
 func withTimeout(timeout time.Duration, fn func(context.Context) error) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	return withTimeoutOf(context.Background(), timeout, fn)
+}
+
+// withTimeoutOf is withTimeout under a parent context, for a phase that is
+// itself a loop of independently bounded steps: each step gets a full budget
+// of its own, while cancelling the parent still stops the whole loop.
+func withTimeoutOf(parent context.Context, timeout time.Duration,
+	fn func(context.Context) error) error {
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 
 	return fn(ctx)
+}
+
+// cgroupRoot is where the cgroup hierarchy is mounted, a variable for tests.
+var cgroupRoot = "/sys/fs/cgroup"
+
+// checkCgroupV2 refuses to run on a host without the unified cgroup hierarchy.
+// The suite's expectations about cpuset and memory placement, and its measured
+// facts, are for cgroup v2 only; cgroup v1 is obsolete and unsupported. The
+// file is present at the root of a v2 mount only: a v1 or hybrid host has a tmpfs
+// there.
+func checkCgroupV2() error {
+	if _, err := os.Stat(filepath.Join(cgroupRoot, "cgroup.controllers")); err != nil {
+		return fmt.Errorf("%s is not a cgroup v2 (unified) hierarchy: %w\n"+
+			"The suite supports cgroup v2 only. Boot the node with "+
+			"systemd.unified_cgroup_hierarchy=1", cgroupRoot, err)
+	}
+
+	return nil
 }
 
 // Setup connects to the runtime, probes it, and verifies that NRI plugins can
@@ -78,6 +105,10 @@ func withTimeout(timeout time.Duration, fn func(context.Context) error) error {
 // job is legibility -- and would equally let it eat the stale-workload cleanup's,
 // so cleanup could fail for a reason that has nothing to do with cleanup.
 func Setup(cfg *Config, newDriver DriverFactory) error {
+	if err := checkCgroupV2(); err != nil {
+		return err
+	}
+
 	err := withTimeout(cfg.Timeout, func(ctx context.Context) error {
 		d, i, err := newDriver(ctx, cfg)
 		if err != nil {
@@ -132,9 +163,11 @@ func Setup(cfg *Config, newDriver DriverFactory) error {
 		return err
 	}
 
-	if err := withTimeout(cfg.Timeout, func(ctx context.Context) error {
-		return pullImage(ctx, cfg)
-	}); err != nil {
+	// Deliberately not wrapped in a budget of its own: pullImage bounds each
+	// image separately, and a cap here would put them all back on one shared
+	// deadline, which is the thing it exists to avoid. This is the one phase
+	// whose budget is per step rather than per phase, as PullImages is.
+	if err := pullImage(context.Background(), cfg); err != nil {
 		return err
 	}
 
@@ -340,7 +373,7 @@ type imagePuller interface {
 	PullImage(ctx context.Context, image string) error
 }
 
-// pullImage makes sure the test image is in the node's image store before any
+// pullImage makes sure every test image (see Images) is in the node's image store before any
 // test tries to create a container from it.
 //
 // Nothing else pulls it. CRI's CreateContainer does not pull, so on a node where
@@ -357,12 +390,23 @@ func pullImage(ctx context.Context, cfg *Config) error {
 		return nil
 	}
 
-	if err := puller.PullImage(ctx, cfg.Image); err != nil {
-		return fmt.Errorf("failed to pull the test image %s: %w\n"+
-			"Every test that creates a container needs it. Either make the image "+
-			"pullable from this node, or pull it by hand and pass "+
-			"-nri-test.no-pull, or select another image with -nri-test.image",
-			cfg.Image, err)
+	// A budget per image, not one shared across them, for the reason
+	// withTimeout documents and which PullImages already follows. Images may
+	// be large and they are pulled from a registry, so one slow or absent
+	// image would otherwise spend the budget of every image after it -- and
+	// those would then fail on a deadline something else used up, with a
+	// message naming the wrong image.
+	for _, image := range Images(cfg) {
+		err := withTimeoutOf(ctx, cfg.Timeout, func(ictx context.Context) error {
+			return puller.PullImage(ictx, image)
+		})
+		if err != nil {
+			return fmt.Errorf("failed to pull the test image %s: %w\n"+
+				"Tests that create a container need it. Either make the image "+
+				"pullable from this node, or pull it by hand and pass "+
+				"-nri-test.no-pull, or select another image with -nri-test.image",
+				image, err)
+		}
 	}
 
 	return nil
@@ -665,6 +709,17 @@ func (s *Suite) PodSpec(name string, ctrs ...*ContainerSpec) *PodSpec {
 	}
 }
 
+// KeepAliveCommand returns the command that keeps a test container running. It
+// is a shell with a TERM trap rather than a bare `sleep`: in a container's own
+// PID namespace (kubelet's default) the command is PID 1, for which the kernel
+// drops signals that have no handler, so a bare `sleep` ignores SIGTERM and
+// every stop waits out the whole grace period. The loop sleeps one second at a
+// time because a trap only runs between foreground commands. busybox has sh,
+// and `sleep 1` needs no GNU extension.
+func KeepAliveCommand() []string {
+	return []string{"/bin/sh", "-c", "trap 'exit 0' TERM; while true; do sleep 1; done"}
+}
+
 // CtrSpec returns a container spec named within this case, carrying a keep-alive
 // command.
 func (s *Suite) CtrSpec(name string) *ContainerSpec {
@@ -679,13 +734,8 @@ func (s *Suite) CtrSpec(name string) *ContainerSpec {
 		// such command because blocking forever is the only thing it does; a real
 		// image has to be told.
 		//
-		// `sleep` with a long interval, because busybox certainly has it and it
-		// needs no shell, no redirection and no signal handling. Not `sleep
-		// infinity`: that is a GNU coreutils extension, and busybox's sleep parses
-		// its argument as a number. 600s is two orders of magnitude beyond
-		// DefaultTimeout, so no test outlives it, and the container is force-killed
-		// at cleanup regardless.
-		Command:     []string{"sleep", "600"},
+		// A shell loop that traps TERM, see KeepAliveCommand.
+		Command:     KeepAliveCommand(),
 		Labels:      s.caseLabels(),
 		Annotations: s.caseLabels(),
 	}
@@ -730,30 +780,10 @@ func labelValue(s string) string {
 
 // CreatePod creates a pod, failing the case if it cannot.
 //
-// A driver that can create containers individually must not be handed them in the
-// pod spec; see the guard below.
+// The containers in the spec are created with the pod and recorded with it, so the
+// leak guard attributes them to this case.
 func (s *Suite) CreatePod(spec *PodSpec) *Pod {
 	s.t.Helper()
-
-	// PodSpec.Containers exists for drivers that lack CapContainerLifecycle, which
-	// is where it is the only path there is -- the future Kubernetes driver, where
-	// every container arrives with its pod. For a driver that has the capability it
-	// is strictly worse than the lazy path: the CRI driver creates those containers
-	// inside CreatePod and discards each *Container it gets back, so the suite never
-	// learns their ids and the leak guard can only report them as pre-existing rather
-	// than as this case's.
-	//
-	// Not a leak that goes unreported -- the driver finds such a container through its
-	// pod, and through the run-id label CtrSpec stamps on it -- but a leak reported
-	// with the wrong attribution, which sends its reader looking for an earlier case
-	// that never existed.
-	if driver.Capabilities().Has(CapContainerLifecycle) {
-		require.Empty(s.t, spec.Containers,
-			"pod %s carries %d container(s) in its spec, but driver %s creates "+
-				"containers individually: create them with Suite.CreateContainer, which "+
-				"is the path the leak guard can attribute to this case",
-			spec.Name, len(spec.Containers), driver.Name())
-	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), TestConfig.Timeout)
 	defer cancel()
@@ -763,13 +793,31 @@ func (s *Suite) CreatePod(spec *PodSpec) *Pod {
 	// and fatalf does not return.
 	if pod != nil {
 		s.pods = append(s.pods, pod)
+		s.ctrs = append(s.ctrs, pod.Containers...)
 	}
 	s.fatalf("CreatePod", err, "failed to create pod %s", spec.Name)
 
 	return pod
 }
 
+// CreatePodWithContainer creates a pod named name that carries the one
+// container ctr, failing the case if it cannot. It is the usual way to get a
+// workload: it works with every driver, and the leak guard attributes the
+// container to this case.
+func (s *Suite) CreatePodWithContainer(name string, ctr *ContainerSpec) (*Pod, *Container) {
+	s.t.Helper()
+
+	pod := s.CreatePod(s.PodSpec(name, ctr))
+	require.Len(s.t, pod.Containers, 1,
+		"the driver must report the container it created with pod %s", pod.Spec.Name)
+
+	return pod, pod.Containers[0]
+}
+
 // CreateContainer creates a container, failing the case if it cannot.
+//
+// It needs CapContainerLifecycle. Prefer CreatePodWithContainer unless the test
+// is about creating a container apart from its pod.
 func (s *Suite) CreateContainer(pod *Pod, spec *ContainerSpec) *Container {
 	s.t.Helper()
 
@@ -863,18 +911,28 @@ func (s *Suite) TryExec(ctr *Container, cmd ...string) (string, string, error) {
 // ProcSelfStatus returns the parsed /proc/self/status of a command run inside a
 // container, failing the case if it cannot be read.
 //
-// /proc/self, never /proc/1. CRI's default NamespaceOption.Pid is POD, so a
-// container shares its sandbox's PID namespace and PID 1 is the sandbox's pause
-// process -- whose affinity is the sandbox's, not this container's. Measured on
+// /proc/self, never /proc/1. With a pod-wide PID namespace -- cri-api's default
+// NamespaceOption.Pid of POD, selected by -nri-test.cri-namespaces=cri, or a pod
+// that shares its process namespace -- PID 1 is the sandbox's pause process,
+// whose affinity is the sandbox's, not this container's. Measured on
 // containerd v2.3.3 with CpusetCpus "0-1": /proc/self/status reported
 // Cpus_allowed_list 0-1 while /proc/1/status reported 0-43, the host's every CPU.
 // /proc/self is correct whether or not a test sets Pid=CONTAINER, so it is the
-// only form to use. (oom_score_adj is the exception, being a property of the
-// sandbox's init process, and is read from /proc/1/oom_score_adj.)
+// only form to use. -nri-test.proc-view=init reads /proc/1 instead, as a
+// cross-check that is valid only with a per-container PID namespace. By default the suite sends kubelet's namespace options, a
+// PID namespace per container, where PID 1 is the container's own init and
+// agrees with /proc/self; the choice of /proc/self does not depend on it.
+// (oom_score_adj is the exception, and is read from /proc/1/oom_score_adj only
+// where PID 1 is the container's init.)
 func (s *Suite) ProcSelfStatus(ctr *Container) map[string]string {
 	s.t.Helper()
 
-	return ProcStatus(s.Exec(ctr, "cat", "/proc/self/status"))
+	path := "/proc/self/status"
+	if TestConfig.ProcView == ProcViewInit {
+		path = "/proc/1/status"
+	}
+
+	return ProcStatus(s.Exec(ctr, "cat", path))
 }
 
 // expect records an unmet expectation and reports it, ending the case unless
@@ -1328,12 +1386,6 @@ func (s *Suite) reportLeak(leaked []string) {
 // created and which it did not. Same rule as reportLeak, and same reason: a
 // container in the run's namespace carrying no run id is ours by design.
 //
-// One gap, deliberate for now: a container created as part of a PodSpec is not on
-// s.ctrs, because Driver.CreatePod returns only the pod and the suite never learns
-// those container ids. Such a container is still reported as a leak -- the driver's
-// listing finds it through its pod -- only as a pre-existing one rather than as
-// this case's. A case that wants the attribution creates its containers through
-// Suite.CreateContainer.
 // The container message deliberately names no namespace, unlike the pod one. A
 // container has no namespace of its own, and the driver's second arm matches one on
 // its run-id label alone, in a pod it knows nothing about -- which is the whole

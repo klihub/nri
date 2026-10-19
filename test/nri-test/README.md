@@ -10,10 +10,12 @@ in-process: they assert on the `CreateContainerResponse` the `Adaptation`
 object returns. They cannot tell whether a runtime embedding NRI honours that
 response. This closes that gap.
 
-Two operating modes. **CRI mode** creates pods and containers directly over
-CRI, and is what exists today. **Kubernetes mode** will create them through a
-cluster with `client-go`; it is not built, but the architecture below is shaped
-so that it reuses the entire assertion layer unchanged.
+Two operating modes, selected by `-nri-test.driver`. **CRI mode** creates pods
+and containers directly over CRI. **Kubernetes mode** creates them through a
+cluster with `client-go`, so kubelet makes them the way it does a user's. Both
+reuse the entire assertion layer unchanged, which is what the architecture
+below is shaped for: a Kubernetes driver pairs with the *unchanged* CRI
+inspector, because the suite runs on the node it observes.
 
 ## Contents
 
@@ -79,6 +81,9 @@ selectable, so a failure can be located rather than merely observed. See
 - The default suite assumes only that NRI is enabled and that external plugin
   connections are allowed. Anything needing more specific runtime
   configuration is opt-in.
+- **cgroup v2 only.** `Setup` refuses to run on a host without the unified
+  hierarchy (no `cgroup.controllers` at the cgroup root). cgroup v1 is obsolete
+  and was never measured.
 - **Never disturbs workloads it did not create.** The suite may legitimately
   be pointed at a node running other things.
 - **Every skip states its reason**, and the reason reaches the end-of-run
@@ -115,7 +120,15 @@ regression. Listing is the exception and works anywhere:
 
 ```
 ./build/bin/nri-test -test.list '.*'
+./build/bin/nri-test -nri-test.list-images
 ```
+
+`-nri-test.list-images` prints the images the suite uses, one per line, and
+likewise needs no runtime. A test that creates containers from an image other
+than `-nri-test.image` must declare it with `framework.UseImage` in an `init`
+function, so that it is listed and pre-pulled. `-nri-test.pull-images` pulls
+all of them into the node's image store through the selected driver and exits
+without running a test, for warming a node before an air-gapped or timed run.
 
 ## Running against a node
 
@@ -170,12 +183,17 @@ test/nri-test/
 |   |-- gate.go               capability / version / environment / CPU / NUMA / handler gates
 |   |-- report.go             Finding, Skip, Report, the end-of-run summary
 |   |-- kubelet.go            kubelet detection and the CRI-mode refusal
-|   `-- listing.go            -test.list detection, so listing needs no runtime
+|   |-- listing.go            -test.list detection, so listing needs no runtime
+|   `-- images.go             the images the suite uses: UseImage, Images, PullImages
 |-- driver/cri/               Driver + Inspector over CRI
 |   |-- client.go             cri-api dial for runtime and image services
 |   |-- driver.go             Driver implementation
 |   |-- convert.go            PodSpec/ContainerSpec -> CRI configs
 |   `-- inspector.go          ContainerStatus(verbose) -> runtimeSpec decode
+|-- driver/k8s/               Driver over the API server, observing over CRI
+|   |-- client.go             kubeconfig -> clientset and rest config
+|   |-- driver.go             pods through the API server, wrapping driver/cri
+|   `-- exec.go               exec through pods/exec, and the kubelet policy check
 `-- suite/                    package suite -- all *_test.go, one test binary
     |-- main_test.go          TestMain, flag registration, exit code
     |-- smoke_test.go         one end-to-end lifecycle + OCI-spec check
@@ -196,7 +214,7 @@ observing them. `Driver` creates and mutates; `Inspector` observes.
 `Inspector.Inspect` is keyed by a **bare container id**, not a driver-specific
 handle. That is deliberate: the id is available in every mode, from the NRI
 events our own plugins receive and, in Kubernetes mode, from
-`pod.Status.ContainerStatuses[].ContainerID`. So a future `k8s.Driver` pairs
+`pod.Status.ContainerStatuses[].ContainerID`. So `k8s.Driver` pairs
 with the *unchanged* `cri.Inspector`, and the assertion layer -- where nearly
 all the code and all the maintenance lives -- never learns which mode it is in.
 
@@ -222,17 +240,53 @@ is pinned by a test.
 
 ### Capability matrix
 
-| Capability | CRI mode | Kubernetes mode (expected) |
+| Capability | CRI mode | Kubernetes mode |
 |---|---|---|
 | `CapContainerLifecycle` | yes | no -- pods are created as a unit |
-| `CapObserveOpError` | yes | partial, via pod status and events |
-| `CapUpdateContainerResources` | yes | partial, via in-place resize |
+| `CapObserveOpError` | yes | no (pod status and events could be read) |
+| `CapUpdateContainerResources` | yes | no (in-place resize could be added) |
 | `CapUpdatePodResources` | never advertised | never advertised |
-| `CapExec` | yes | via the CRI inspector |
+| `CapExec` | yes | yes, through the API server |
+| `CapRawResources` | yes | no -- a pod cannot state a cpuset; the exec smoke test expects the node's full online sets instead |
+| `CapContainerMetadata` | yes | no -- a container has its pod's metadata |
 
 A test declares what it needs through `RequireCaps`; the framework skips it,
-with a reason, when the active driver lacks them. The gates exist and have
-never been exercised, because the only driver so far has every capability.
+with a reason, when the active driver lacks them. The CRI driver has every
+capability, so the gates do nothing there; the Kubernetes driver advertises
+`CapExec` alone, which is what exercises them.
+
+`CapContainerLifecycle` means containers can be made in an existing pod and
+started, stopped and removed apart from it. No test needs that: they create
+a pod with its container through `Suite.CreatePodWithContainer`, which every
+driver can do, and `StopContainer` and `RemoveContainer` reach a plugin when
+the pod is removed (`TestSmoke`, pod teardown). The capability stays for a
+future test whose subject is the gap between those steps.
+
+### Kubernetes mode
+
+`-nri-test.driver=k8s` creates the workloads as pods through the API
+server, so kubelet makes them the way it does a user's. Kubelet must be
+running, which is the reverse of CRI mode; `hack/run-nri-test.sh` leaves it
+alone when `DRIVER=k8s`. The suite still runs on the node and observes
+through that node's runtime, so the cluster's kubelet must drive the runtime
+under test.
+
+Pods are placed with `spec.nodeName` (`-nri-test.k8s-node`, default this
+host's name), `restartPolicy: Never` and no grace period. A handler becomes
+a `RuntimeClass` the run creates and deletes. A spec with no container gets
+a `sleep` keep-alive, since a pod cannot be empty. The driver writes the API
+server's pod UID and the DNS-safe pod name back into the spec. The test
+namespace is created on first use and deleted by `Cleanup` only if the
+driver created it. Tests whose subject is an update event or a container's
+own annotations skip, with the capability named.
+
+Exec goes through the API server (pods/exec), as kubectl exec does;
+inspection of the realized OCI spec and the leak sweeps stay on the node's
+CRI runtime. At start the driver reads the kubelet's configz and refuses
+to run unless cpuManagerPolicy and memoryManagerPolicy are none (the
+default). Containers then start with the node's full cpuset and memory
+nodes, which is what the exec smoke test expects; its memory-node check
+runs only on a node with two or more NUMA nodes.
 
 ### Mode-neutral workload description
 
@@ -240,9 +294,10 @@ never been exercised, because the only driver so far has every capability.
 runtime handler and an optional container list. `ContainerSpec` carries name,
 image, command, args, env, mounts, resources, labels and annotations. The CRI
 driver maps these onto `runtimeapi.PodSandboxConfig` and
-`runtimeapi.ContainerConfig`; a Kubernetes driver will map them onto
-`corev1.Pod`. `PodSpec.Containers` exists so a driver without
-`CapContainerLifecycle` can be handed a complete pod up front.
+`runtimeapi.ContainerConfig`; the Kubernetes driver maps them onto
+`corev1.Pod`. `PodSpec.Containers` is the path tests use, and `Pod.Containers`
+lists what the driver created, so the leak guard attributes it. A driver whose
+containers start on their own makes `StartContainer` wait for running.
 
 `framework.Resources` carries only the fields the suite currently sets. The
 update phases will need the rest.
@@ -329,7 +384,7 @@ exposes about itself:
 | CPU quota, period, weight | `/sys/fs/cgroup/cpu.max`, `cpu.weight` |
 | cpuset | `/sys/fs/cgroup/cpuset.cpus.effective` |
 | memory limits | `/sys/fs/cgroup/memory.max`, `memory.high` |
-| OOM score adjustment | `/proc/1/oom_score_adj` |
+| OOM score adjustment | `/proc/1/oom_score_adj`, only with a PID namespace per container |
 | environment an exec'd process is given | `/proc/self/environ`, with the caveat below |
 | mounts actually present | `/proc/self/mounts` |
 | sysctls actually applied | the relevant `/proc/sys/...` path |
@@ -424,19 +479,17 @@ version, the runtime handler and the run id; then expectation failures with the
 test, the feature and the surface read; then failed operations; then every skip
 with its reason; then a count of both failure kinds.
 
-**Four things the summary does not see**, which matters when you read one:
+**Three things the summary does not see**, which matters when you read one:
 
-1. `Suite.CreatePod`'s guard against a pod spec carrying containers for a
-   driver that creates them individually. Deliberate: a suite bug, not a
-   runtime result.
-2. The gates' own inability-to-evaluate aborts. Deliberate, same reason.
-3. Every bare `require.*` and `t.Errorf` in the `suite` package. Only
+1. The gates' own inability-to-evaluate aborts. Deliberate: a suite bug,
+   not a runtime result.
+2. Every bare `require.*` and `t.Errorf` in the `suite` package. Only
    `adjust_test.go` calls `Suite.Expect*` at all, so most tests still fail at
    their first assertion in both modes. Unconverted, not deliberate.
-4. The per-case cleanup and leak guards, including the pod and container leak
+3. The per-case cleanup and leak guards, including the pod and container leak
    reports. Unconverted.
 
-Because of 3 and 4 a run can fail entirely through paths the summary cannot
+Because of 2 and 3 a run can fail entirely through paths the summary cannot
 see. It says so when that happens: a failing run with nothing collected prints
 that it failed through assertions the summary does not see, and that the test
 output is the only account of what. Converting the leak and cleanup guards to
@@ -463,8 +516,8 @@ the suite could not previously produce at all: it took whatever handler the
 runtime defaulted to and never said which.
 
 `PodSpec.RuntimeHandler` is mode-neutral: CRI mode maps it onto
-`RunPodSandboxRequest.RuntimeHandler`, and a Kubernetes driver will map it onto
-`pod.spec.runtimeClassName`. `Suite.PodSpec` stamps the configured handler on
+`RunPodSandboxRequest.RuntimeHandler`, and the Kubernetes driver maps it onto
+a `RuntimeClass` it owns, named in `pod.spec.runtimeClassName`. `Suite.PodSpec` stamps the configured handler on
 every spec it builds, so no test has to remember to.
 
 Discovery reads `StatusResponse.RuntimeHandlers` through the optional
@@ -686,11 +739,19 @@ flags, which follow `critest` naming:
 | `-nri-test.namespace` | `nri-test` | pod namespace for test workloads; anything outside it is ignored |
 | `-nri-test.image` | `registry.k8s.io/e2e-test-images/busybox:1.36.1-1` | image for created containers; must have a shell |
 | `-nri-test.config` | empty | opt-in configuration-dependent suite |
+| `-nri-test.proc-view` | self | `self` reads `/proc/self/status` of the exec'd process; `init` reads `/proc/1/status`, valid only with a per-container PID namespace |
+| `-nri-test.stop-grace` | 2s | grace for stopping test containers and pods (CRI stop timeout, pod termination grace and deletion grace); 0 kills at once |
+| `-nri-test.list-images` | false | print the images the suite uses and exit; needs no runtime |
+| `-nri-test.pull-images` | false | pull the images the suite uses and exit, running no test |
 | `-nri-test.no-pull` | false | skip the image pull in `Setup`, for an air-gapped node |
 | `-nri-test.run-id` | generated | this run's id, stamped into every workload; override only to reproduce a run |
 | `-nri-test.keep-artifacts` | false | skip cleanup for debugging |
 | `-nri-test.timeout` | 30s | per-operation timeout |
 | `-nri-test.collect-failures` | false | collect expectation failures into an end-of-run summary instead of failing at the first; the run still exits non-zero if anything was collected |
+| `-nri-test.driver` | cri | what creates the tests' workloads: `cri` (needs kubelet stopped) or `k8s` (pods through the API server, needs kubelet running) |
+| `-nri-test.cri-namespaces` | k8s | namespace options the `cri` driver creates pods with: `k8s` sends what kubelet sends (network and IPC per pod, a PID namespace per container), `cri` sends none, so cri-api's zero values share one PID namespace per pod. The `k8s` driver is not affected |
+| `-nri-test.k8s-node` | this host | node the k8s driver places pods on |
+| `-nri-test.kubeconfig` | client-go rules | kubeconfig for the k8s driver |
 | `-nri-test.allow-kubelet` | false | run even though a kubelet process is present; its sandbox garbage collection may remove this run's pods mid-test |
 | `-nri-test.runtime-handler` | empty | CRI runtime handler, and so the low-level runtime, to create pods with; empty means the runtime's own default. One handler per run |
 
@@ -700,7 +761,7 @@ In order: dial CRI and probe capabilities; refuse to run if a kubelet process
 is present, unless `-nri-test.allow-kubelet`; discover the runtime's installed
 runtime handlers and refuse if the one `-nri-test.runtime-handler` names is not
 among them; check that an advertised `CapExec` matches an actual `Executor`;
-connect a preflight plugin to prove NRI answers; pull the test image unless
+connect a preflight plugin to prove NRI answers; pull every test image unless
 `-nri-test.no-pull`, because a suite that fails every case on
 `ImagePullBackOff` is reporting the wrong defect; remove stale workloads left
 by a previous run; report other runs' leftovers. Every phase has its own
@@ -795,19 +856,44 @@ against them before anything else.
 
 So they are not re-derived.
 
-- **Read `/proc/self/status`, never `/proc/1/status`.** Under CRI's default pod
-  PID namespace, PID 1 is the sandbox's infra process, whose affinity is not
-  the container's. Measured on containerd v2.3.3 with `CpusetCpus: "0-1"`:
-  `/proc/self` reported `0-1` while `/proc/1` reported `0-43`. `/proc/self` is
-  correct whether or not a test sets `Pid=CONTAINER`. `oom_score_adj` is the
-  exception, being a property of the sandbox's init process.
+- **Read `/proc/self/status`, never `/proc/1/status`.** With a pod-wide PID
+  namespace -- cri-api's default, `-nri-test.cri-namespaces=cri`, or a pod
+  with `shareProcessNamespace` -- PID 1 is the sandbox's pause process, which
+  is not in the container's cgroup. Measured on containerd v2.3.3 with
+  `CpusetCpus: "0-1"`: `/proc/self` reported `0-1` while `/proc/1` reported
+  `0-43`. With a PID namespace per container, which is kubelet's default and
+  the suite's, PID 1 is the container's own init and agrees with `/proc/self`
+  in every case measured. `/proc/self` is correct in both, so it is the only
+  form the suite uses. `oom_score_adj` is the exception: read it from PID 1
+  only in a per-container PID namespace, where that is the container's init.
+- **`/proc/self` and the cgroup agree in every combination measured.** On the
+  test node (cgroup v2, 16 CPUs, 4 NUMA nodes), with CRI-O 1.37.2 and containerd
+  2.3.3, each with runc and crun, a pod PID namespace and a container one, and
+  the cpuset set at creation (CRI config or an NRI adjustment) or by an update
+  after start: the exec'd `cat /proc/self/status` matched the container's
+  `cpuset.cpus.effective` and `cpuset.mems.effective` every time, and the same
+  held for pods made through kubelet. `/proc/1` matched only in a per-container
+  PID namespace; in a pod-wide one it reported every CPU and NUMA node. No
+  difference between runc and crun was seen. cgroup v1 is refused by `Setup`.
+- **The k8s driver passes on containerd too.** With the node's kubelet pointed
+  at containerd 2.3.3 (containerd's runc and crun handlers set to
+  `SystemdCgroup = true` to match the kubelet's systemd cgroup driver), the
+  whole suite passed with runc and with crun: 54 passed, 8 skipped, none
+  failed, each.
+- **A pod's termination grace and its deletion grace must agree.** The k8s
+  driver once created pods with a 2 s `terminationGracePeriodSeconds` but
+  deleted them with grace 0, and then removed the sandbox over CRI itself; about
+  half the runs lost a race with kubelet's own teardown (CRI-O: `no such id`)
+  and leaked a pod. One `-nri-test.stop-grace` now feeds both, and 12 of 12
+  runs passed. The removal retry alone also cured the old mismatch (3 of 6 runs
+  retried, all passed), so it stays as a logged safety net.
 - **`drop_infra_ctr = true` drops the infra container for every pod, but the
   infra process only where the pod's PID namespace mode permits.** The suite
-  sets no `NamespaceOptions`, and cri-api's `NamespaceMode` has `POD = 0`, so
-  the suite's pods request a shared pod PID namespace and something must hold
-  it. The `kube-system` pods on the test node ask `pid: CONTAINER` and have no
-  sandbox pid at all. A PID-1 assertion must set the namespace options or gate
-  on the mode.
+  sets no `NamespaceOptions` under `-nri-test.cri-namespaces=cri`, and
+  cri-api's `NamespaceMode` has `POD = 0`, so those pods request a shared pod
+  PID namespace and something must hold it. By default the suite sends what
+  kubelet does, `pid: CONTAINER`, as the `kube-system` pods on the test node
+  do; those have no sandbox pid at all.
 - **A created-but-not-started container has no cgroup yet**, so any assertion
   about what the kernel applied needs a running container.
 - **CRI pod and container annotations do not reach a container's OCI spec**
@@ -909,16 +995,6 @@ injected into the runtime's own sync function; and all 15 tests in
 ## Known gaps and remaining work
 
 - Roughly twenty creation-adjustment subjects beyond the five built.
-- `Driver.CreatePod` does not return the containers it created, so containers
-  made through `PodSpec.Containers` are reported when they leak but attributed
-  as pre-existing. Closing this is a prerequisite for a Kubernetes driver,
-  where *every* container arrives that way and the leak guard would otherwise
-  be blind in exactly the new mode.
-- The capability gates have never been exercised, because the only driver so
-  far has every capability. A Kubernetes driver has no `CapContainerLifecycle`,
-  so every test that creates a container individually must skip with a reason
-  rather than fail. Audit before that driver lands, or its first run produces a
-  wall of failures that say nothing.
 - `CapObserveOpError` wants splitting in two: conflict detection, validator
   rejection and the hook-error tests all assert that an operation failed, and
   some want to assert *what* the error said. In Kubernetes mode the failure is
@@ -957,6 +1033,7 @@ injected into the runtime's own sync function; and all 15 tests in
   well measured. If fidelity turns out to be poor, the synchronization
   assertions narrow to the fields that are reliably populated and the gap is
   reported upstream.
-- **Kubernetes mode observation.** The plan is `k8s.Driver` plus the unchanged
-  `cri.Inspector`, which requires the suite to run on the node. If that is
-  unacceptable, the fallback is a node-local inspector deployed as a DaemonSet.
+- **Kubernetes mode observation.** `k8s.Driver` observes through the unchanged
+  `cri.Inspector`, which requires the suite to run on the node whose runtime
+  kubelet drives. If that turns out to be unacceptable, the fallback is a
+  node-local inspector deployed as a DaemonSet.

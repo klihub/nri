@@ -23,7 +23,7 @@ import (
 )
 
 // PodSandboxConfig converts a PodSpec into a CRI pod sandbox configuration.
-func PodSandboxConfig(p *framework.PodSpec) *runtimeapi.PodSandboxConfig {
+func PodSandboxConfig(cfg *framework.Config, p *framework.PodSpec) *runtimeapi.PodSandboxConfig {
 	c := &runtimeapi.PodSandboxConfig{
 		Metadata: &runtimeapi.PodSandboxMetadata{
 			Name:      p.Name,
@@ -41,7 +41,30 @@ func PodSandboxConfig(p *framework.PodSpec) *runtimeapi.PodSandboxConfig {
 		}
 	}
 
+	if opts := namespaceOptions(cfg); opts != nil {
+		if c.Linux == nil {
+			c.Linux = &runtimeapi.LinuxPodSandboxConfig{}
+		}
+		c.Linux.SecurityContext = &runtimeapi.LinuxSandboxSecurityContext{NamespaceOptions: opts}
+	}
+
 	return c
+}
+
+// namespaceOptions returns the namespace options for the configured mode, or nil
+// for cri-api's own defaults. The k8s mode is what kubelet sends for a pod with
+// no host namespaces and no shareProcessNamespace: network and IPC shared by the
+// pod, and a PID namespace per container.
+func namespaceOptions(cfg *framework.Config) *runtimeapi.NamespaceOption {
+	if cfg.CRINamespaces != framework.NamespacesK8s {
+		return nil
+	}
+
+	return &runtimeapi.NamespaceOption{
+		Network: runtimeapi.NamespaceMode_POD,
+		Pid:     runtimeapi.NamespaceMode_CONTAINER,
+		Ipc:     runtimeapi.NamespaceMode_POD,
+	}
 }
 
 // ContainerConfig converts a ContainerSpec into a CRI container configuration.
@@ -88,9 +111,12 @@ func ContainerConfig(cfg *framework.Config, c *framework.ContainerSpec) *runtime
 		})
 	}
 
-	if c.Resources != nil {
+	if c.Resources != nil || namespaceOptions(cfg) != nil {
 		config.Linux = &runtimeapi.LinuxContainerConfig{
 			Resources: linuxResources(c.Resources),
+		}
+		if opts := namespaceOptions(cfg); opts != nil {
+			config.Linux.SecurityContext = &runtimeapi.LinuxContainerSecurityContext{NamespaceOptions: opts}
 		}
 	}
 
