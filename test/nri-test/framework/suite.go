@@ -850,6 +850,25 @@ func (s *Suite) Inspect(id string) *Observed {
 	return o
 }
 
+// InspectPod returns the pod sandbox's realized state, ending the case if it
+// cannot be observed.
+//
+// Through fatalf rather than expect, as Inspect is: a failed observation is a
+// failed operation, since nothing about the runtime's NRI behaviour was
+// measured by it, and counting it as an unmet expectation would overstate what
+// the run found.
+func (s *Suite) InspectPod(pod *Pod) *ObservedPod {
+	s.t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), TestConfig.Timeout)
+	defer cancel()
+
+	o, err := inspector.InspectPod(ctx, pod.ID)
+	s.fatalf("InspectPod", err, "failed to inspect pod %s", pod.ID)
+
+	return o
+}
+
 // Exec runs cmd inside a running container and returns its trimmed standard
 // output, failing the case if the command cannot be run or exits non-zero.
 //

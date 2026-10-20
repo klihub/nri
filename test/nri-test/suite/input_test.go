@@ -17,6 +17,7 @@
 package suite
 
 import (
+	"fmt"
 	"strconv"
 	"testing"
 
@@ -362,5 +363,307 @@ func TestInputFidelity(t *testing.T) {
 
 		s.ExpectShown("user", framework.ExpectShownStrings(
 			"user.additional_gids", []string{"4321"}, additional))
+	})
+}
+
+// The agreement tier. The plugin's view is compared against what the runtime
+// realized -- the OCI spec it wrote, or CRI's own status -- so a failure is a
+// runtime whose report and whose container disagree.
+//
+// Every check is a subset plus a non-vacuity guard. Subset alone cannot fail
+// for a runtime that reports nothing, since the empty set is a subset of
+// anything, and reporting nothing is the defect this tier exists to catch.
+// Where a field may legitimately be empty, the subtest says so and omits the
+// guard: the omission is a claim that has to be argued, not a default.
+
+func TestInputAgreement(t *testing.T) {
+	t.Run("should report rlimits matching the realized spec", func(t *testing.T) {
+		// CRI has no rlimit field at all, so this can only be agreement: the
+		// values are the runtime's own defaults, and the question is whether a
+		// plugin is told the same ones the container got.
+		s := framework.NewSuite(t, "agree-rlimits")
+
+		plugin := inputPlugin(s)
+		_, ctr := s.CreatePodWithContainer("pod0", s.CtrSpec("ctr0"))
+
+		got := s.CapturedAt(plugin, framework.CreateContainer, ctr)
+		if got == nil {
+			return
+		}
+
+		spec := s.Inspect(ctr.ID).Spec
+
+		var shown, realized []string
+		for _, r := range got.Ctr.GetRlimits() {
+			shown = append(shown, fmt.Sprintf("%s=%d:%d", r.GetType(), r.GetSoft(), r.GetHard()))
+		}
+
+		if spec != nil && spec.Process != nil {
+			for _, r := range spec.Process.Rlimits {
+				realized = append(realized, fmt.Sprintf("%s=%d:%d", r.Type, r.Soft, r.Hard))
+			}
+		}
+
+		s.ExpectAgrees("rlimits", "realized OCI spec",
+			framework.ExpectStringsSubset("rlimits", shown, realized))
+		s.ExpectAgrees("rlimits", "realized OCI spec",
+			framework.ExpectPopulated("rlimits", len(shown), len(realized)))
+	})
+
+	t.Run("should report namespaces matching the realized spec", func(t *testing.T) {
+		s := framework.NewSuite(t, "agree-namespaces")
+
+		plugin := inputPlugin(s)
+		_, ctr := s.CreatePodWithContainer("pod0", s.CtrSpec("ctr0"))
+
+		got := s.CapturedAt(plugin, framework.CreateContainer, ctr)
+		if got == nil {
+			return
+		}
+
+		spec := s.Inspect(ctr.ID).Spec
+
+		var shown, realized []string
+		for _, n := range got.Ctr.GetLinux().GetNamespaces() {
+			shown = append(shown, n.GetType())
+		}
+
+		if spec != nil && spec.Linux != nil {
+			for _, n := range spec.Linux.Namespaces {
+				realized = append(realized, string(n.Type))
+			}
+		}
+
+		s.ExpectAgrees("namespaces", "realized OCI spec",
+			framework.ExpectStringsSubset("namespaces", shown, realized))
+		s.ExpectAgrees("namespaces", "realized OCI spec",
+			framework.ExpectPopulated("namespaces", len(shown), len(realized)))
+	})
+
+	t.Run("should report the cgroups path matching the realized spec", func(t *testing.T) {
+		s := framework.NewSuite(t, "agree-cgroups-path")
+
+		plugin := inputPlugin(s)
+		_, ctr := s.CreatePodWithContainer("pod0", s.CtrSpec("ctr0"))
+
+		got := s.CapturedAt(plugin, framework.CreateContainer, ctr)
+		if got == nil {
+			return
+		}
+
+		var realized string
+		if spec := s.Inspect(ctr.ID).Spec; spec != nil && spec.Linux != nil {
+			realized = spec.Linux.CgroupsPath
+		}
+
+		s.ExpectAgrees("cgroups_path", "realized OCI spec",
+			framework.ExpectScalarEqual("cgroups_path",
+				got.Ctr.GetLinux().GetCgroupsPath(), realized))
+	})
+
+	t.Run("should report the seccomp policy matching the realized spec", func(t *testing.T) {
+		// Paired with the fidelity check on seccomp_profile. A runtime can apply
+		// a profile and not report it, or report one it did not apply, and only
+		// running both says which happened.
+		s := framework.NewSuite(t, "agree-seccomp")
+		framework.RequireCaps(t, framework.CapSecurityContext)
+
+		plugin := inputPlugin(s)
+		ctrSpec := s.CtrSpec("ctr0")
+		// The runtime's own profile, deliberately, NOT unconfined. Unconfined
+		// means the realized spec carries no seccomp section at all, so the
+		// only assertion that could hold is "neither side has one" -- and the
+		// direction that matters, a runtime applying a policy and showing the
+		// plugin nothing, would be undetectable. That is the omission case this
+		// tier exists for, and arranging the state that hides it is a test that
+		// cannot fail. The paired fidelity check covers unconfined.
+		ctrSpec.SeccompProfile = &framework.SeccompProfile{
+			Type: framework.SeccompRuntimeDefault,
+		}
+		_, ctr := s.CreatePodWithContainer("pod0", ctrSpec)
+
+		got := s.CapturedAt(plugin, framework.CreateContainer, ctr)
+		if got == nil {
+			return
+		}
+
+		realizedHasSeccomp := false
+		if spec := s.Inspect(ctr.ID).Spec; spec != nil && spec.Linux != nil {
+			realizedHasSeccomp = spec.Linux.Seccomp != nil
+		}
+
+		shown := got.Ctr.GetLinux().GetSeccompPolicy()
+
+		s.ExpectAgrees("seccomp_policy", "realized OCI spec",
+			framework.ExpectScalarEqual("seccomp_policy carries a policy",
+				shown != nil, realizedHasSeccomp))
+
+		// And it has to say something rather than merely exist: an empty policy
+		// message is one a presence check cannot tell from a real one.
+		if realizedHasSeccomp {
+			s.ExpectAgrees("seccomp_policy", "realized OCI spec",
+				framework.ExpectPopulated("seccomp_policy.syscalls",
+					len(shown.GetSyscalls()), 1))
+		}
+	})
+
+	t.Run("should report the container pid at PostStartContainer", func(t *testing.T) {
+		s := framework.NewSuite(t, "agree-pid")
+
+		plugin := inputPlugin(s)
+		_, ctr := s.CreatePodWithContainer("pod0", s.CtrSpec("ctr0"))
+		s.StartContainer(ctr)
+
+		got := s.CapturedAt(plugin, framework.PostStartContainer, ctr)
+		if got == nil {
+			return
+		}
+
+		s.ExpectAgrees("pid", "CRI status",
+			framework.ExpectScalarEqual("pid", got.Ctr.GetPid(), s.Inspect(ctr.ID).Pid))
+		// Inspect leaves Pid at zero when the runtime reports none, so equality
+		// alone passes on 0 == 0. A running container always has a pid, which
+		// makes that the omission case rather than a corner.
+		s.ExpectAgrees("pid", "CRI status",
+			framework.ExpectPopulated("pid", int(min(got.Ctr.GetPid(), 1)), 1))
+	})
+
+	t.Run("should report created_at at PostCreateContainer", func(t *testing.T) {
+		s := framework.NewSuite(t, "agree-created-at")
+
+		plugin := inputPlugin(s)
+		_, ctr := s.CreatePodWithContainer("pod0", s.CtrSpec("ctr0"))
+
+		got := s.CapturedAt(plugin, framework.PostCreateContainer, ctr)
+		if got == nil {
+			return
+		}
+
+		// Non-zero rather than equal to CRI's own timestamp: the two are read at
+		// different moments and CRI reports nanoseconds since the epoch, so an
+		// equality check would be comparing one clock reading against another.
+		// What is in question is whether the field is populated at all.
+		s.ExpectAgrees("created_at", "hook request",
+			framework.ExpectPopulated("created_at", int(min(got.Ctr.GetCreatedAt(), 1)), 1))
+	})
+
+	t.Run("should report started_at at PostStartContainer", func(t *testing.T) {
+		s := framework.NewSuite(t, "agree-started-at")
+
+		plugin := inputPlugin(s)
+		_, ctr := s.CreatePodWithContainer("pod0", s.CtrSpec("ctr0"))
+		s.StartContainer(ctr)
+
+		got := s.CapturedAt(plugin, framework.PostStartContainer, ctr)
+		if got == nil {
+			return
+		}
+
+		s.ExpectAgrees("started_at", "hook request",
+			framework.ExpectPopulated("started_at", int(min(got.Ctr.GetStartedAt(), 1)), 1))
+	})
+
+	t.Run("should report pod ips at RunPodSandbox", func(t *testing.T) {
+		s := framework.NewSuite(t, "agree-pod-ips")
+
+		plugin := inputPlugin(s)
+		pod := s.CreatePod(s.PodSpec("pod0"))
+
+		got := s.CapturedPodAt(plugin, framework.RunPodSandbox, pod)
+		if got == nil {
+			return
+		}
+
+		realized := s.InspectPod(pod).IPs
+
+		s.ExpectAgrees("ips", "CRI status",
+			framework.ExpectStringsSubset("ips", got.Pod.GetIps(), realized))
+		// No non-vacuity guard where the sandbox has no address of its own: a
+		// host-network pod is correct with none, and this suite does not pin the
+		// node's network mode.
+		if len(realized) > 0 {
+			s.ExpectAgrees("ips", "CRI status",
+				framework.ExpectPopulated("ips", len(got.Pod.GetIps()), len(realized)))
+		}
+	})
+
+	t.Run("should report the pod pid at RunPodSandbox", func(t *testing.T) {
+		s := framework.NewSuite(t, "agree-pod-pid")
+
+		plugin := inputPlugin(s)
+		pod := s.CreatePod(s.PodSpec("pod0"))
+
+		got := s.CapturedPodAt(plugin, framework.RunPodSandbox, pod)
+		if got == nil {
+			return
+		}
+
+		s.ExpectAgrees("pid", "CRI status",
+			framework.ExpectScalarEqual("pid", got.Pod.GetPid(), s.InspectPod(pod).Pid))
+		// The guard the container pid needs, for the same reason.
+		s.ExpectAgrees("pid", "CRI status",
+			framework.ExpectPopulated("pid", int(min(got.Pod.GetPid(), 1)), 1))
+	})
+
+	t.Run("should report exit status at RemoveContainer", func(t *testing.T) {
+		s := framework.NewSuite(t, "agree-exit")
+		framework.RequireCaps(t, framework.CapContainerLifecycle)
+
+		plugin := inputPlugin(s)
+		ctrSpec := s.CtrSpec("ctr0")
+		// A command that exits with a code of its own, so the reported code is
+		// one this test chose rather than whatever a killed process yields.
+		ctrSpec.Command = []string{"/bin/sh", "-c", "exit 3"}
+		pod, ctr := s.CreatePodWithContainer("pod0", ctrSpec)
+
+		s.StartContainer(ctr)
+		s.StopContainer(ctr)
+		s.RemoveContainer(ctr)
+		s.StopPod(pod)
+		s.RemovePod(pod)
+
+		got := s.CapturedAt(plugin, framework.RemoveContainer, ctr)
+		if got == nil {
+			return
+		}
+
+		s.ExpectAgrees("exit_code", "hook request",
+			framework.ExpectScalarEqual("exit_code", int32(3), got.Ctr.GetExitCode()))
+		s.ExpectAgrees("finished_at", "hook request",
+			framework.ExpectPopulated("finished_at", int(min(got.Ctr.GetFinishedAt(), 1)), 1))
+	})
+}
+
+func TestInputStateLadder(t *testing.T) {
+	t.Run("should report the state each hook implies", func(t *testing.T) {
+		// Container.state is populated at every hook, so a presence check proves
+		// nothing. What carries information is whether the value tracks the
+		// lifecycle -- and CONTAINER_UNKNOWN is the enum's zero value, so the
+		// ladder is also the check that the field was set at all.
+		s := framework.NewSuite(t, "input-state-ladder")
+		framework.RequireCaps(t, framework.CapContainerLifecycle)
+
+		plugin := inputPlugin(s)
+		pod, ctr := s.CreatePodWithContainer("pod0", s.CtrSpec("ctr0"))
+
+		s.StartContainer(ctr)
+		s.StopContainer(ctr)
+		s.RemoveContainer(ctr)
+		s.StopPod(pod)
+		s.RemovePod(pod)
+
+		for _, hook := range []framework.EventType{
+			framework.PostCreateContainer,
+			framework.PostStartContainer,
+			framework.RemoveContainer,
+		} {
+			got := s.CapturedAt(plugin, hook, ctr)
+			if got == nil {
+				continue
+			}
+
+			s.ExpectAgrees("state", "hook request",
+				framework.ExpectStateAt(hook, got.Ctr.GetState()))
+		}
 	})
 }

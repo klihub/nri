@@ -2046,3 +2046,53 @@ func TestSuiteCapturedAtSeparatesSuiteBugsFromRuntimeFindings(t *testing.T) {
 		require.Positive(t, kinds[KindOperation])
 	})
 }
+func TestSuiteInspectPod(t *testing.T) {
+	useConfig(t, &Config{Timeout: time.Minute, Namespace: "nri-test"})
+	useDriver(t, &fakeDriver{})
+
+	t.Run("should return what the inspector observed", func(t *testing.T) {
+		useInspector(t, &podInspector{pod: &ObservedPod{IPs: []string{"10.0.0.1"}, Pid: 99}})
+
+		s := newFakeSuite(&fakeT{})
+
+		got := s.InspectPod(&Pod{ID: "pod0"})
+		require.Equal(t, []string{"10.0.0.1"}, got.IPs)
+		require.Equal(t, uint32(99), got.Pid)
+	})
+
+	t.Run("should end the case when the pod cannot be observed", func(t *testing.T) {
+		// A failed observation is a failed operation, not an unmet expectation:
+		// nothing about the runtime's NRI behaviour was measured by it, and the
+		// report counts the two separately on purpose.
+		useInspector(t, &podInspector{err: errors.New("sandbox not found")})
+
+		ft := &fakeT{}
+		s := newFakeSuite(ft)
+
+		require.Panics(t, func() { s.InspectPod(&Pod{ID: "pod0"}) },
+			"fatalf must not return")
+		require.Contains(t, ft.allErrors(), "pod0")
+	})
+}
+
+// podInspector is an Inspector that answers only about pods.
+type podInspector struct {
+	fakeExecutor
+
+	pod *ObservedPod
+	err error
+}
+
+func (i *podInspector) Inspect(context.Context, string) (*Observed, error) {
+	return nil, errors.New("podInspector does not observe containers")
+}
+
+func (i *podInspector) InspectPod(context.Context, string) (*ObservedPod, error) {
+	if i.err != nil {
+		return nil, i.err
+	}
+
+	return i.pod, nil
+}
+
+var _ Inspector = &podInspector{}
