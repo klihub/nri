@@ -157,3 +157,41 @@ func TestExpectStateAt(t *testing.T) {
 		require.Error(t, ExpectStateAt(RunPodSandbox, api.ContainerState_CONTAINER_RUNNING))
 	})
 }
+
+func TestExpectShownStrings(t *testing.T) {
+	t.Run("should accept a view carrying what the test set", func(t *testing.T) {
+		require.NoError(t, ExpectShownStrings("CDI_devices",
+			[]string{"v/d=null"}, []string{"v/d=null", "v/d=zero"}))
+	})
+
+	t.Run("should reject a value the plugin was never shown", func(t *testing.T) {
+		err := ExpectShownStrings("CDI_devices",
+			[]string{"v/d=null"}, nil)
+		require.ErrorContains(t, err, "v/d=null")
+		require.ErrorContains(t, err, "the test set",
+			"a fidelity failure must not read as the runtime failing to apply something")
+	})
+}
+
+func TestExpectShownMap(t *testing.T) {
+	t.Run("should reject a sysctl shown with the wrong value", func(t *testing.T) {
+		err := ExpectShownMap("sysctl",
+			map[string]string{"net.ipv4.ip_forward": "1"},
+			map[string]string{"net.ipv4.ip_forward": "0"})
+		require.ErrorContains(t, err, "net.ipv4.ip_forward")
+	})
+
+	t.Run("should accept entries the runtime added", func(t *testing.T) {
+		require.NoError(t, ExpectShownMap("annotations",
+			map[string]string{"a": "1"},
+			map[string]string{"a": "1", "added": "2"}))
+	})
+}
+
+func TestExpectShownScalar(t *testing.T) {
+	t.Run("should reject a mismatch naming both sides", func(t *testing.T) {
+		err := ExpectShownScalar("oom_score_adj", int64(-17), int64(0))
+		require.ErrorContains(t, err, "-17")
+		require.ErrorContains(t, err, "oom_score_adj")
+	})
+}

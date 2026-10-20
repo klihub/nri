@@ -1014,6 +1014,100 @@ func (s *Suite) fatalf(op string, err error, format string, args ...any) {
 	require.NoError(s.t, err, msg)
 }
 
+// CapturedAt waits for a container hook to arrive and returns the payload the
+// plugin was given, or nil after recording a finding if it never arrived.
+//
+// The wait is what makes this safe to call straight after a driver operation:
+// the hooks run on the plugin's own goroutine, so a test reading the capture
+// directly would race the callback and read nothing on a fast node.
+//
+// A missing hook is a finding here rather than a nil for the caller to check.
+// A test that went on to read a field off a nil capture would panic, and the
+// panic would bury the finding in a stack trace; and the hook not arriving is
+// itself a conformance statement worth reporting under its own name.
+func (s *Suite) CapturedAt(p *TestPlugin, hook EventType, ctr *Container) *Captured {
+	s.t.Helper()
+
+	return s.capturedAt(p, hook, ctr.PodID, ctr.ID)
+}
+
+// CapturedPodAt is CapturedAt for a pod hook, which carries no container.
+func (s *Suite) CapturedPodAt(p *TestPlugin, hook EventType, pod *Pod) *Captured {
+	s.t.Helper()
+
+	return s.capturedAt(p, hook, pod.ID, "")
+}
+
+func (s *Suite) capturedAt(p *TestPlugin, hook EventType, podID, ctrID string) *Captured {
+	s.t.Helper()
+
+	_, err := s.Q().WaitFor(&Event{
+		Type:   hook,
+		Plugin: p.FullName(),
+		PodID:  podID,
+		CtrID:  ctrID,
+	}, s.Timeout())
+	if err != nil {
+		s.expect(string(hook), "hook request",
+			fmt.Errorf("plugin %s was never invoked for %s on pod %s container %q: %w",
+				p.FullName(), hook, podID, ctrID, err))
+
+		return nil
+	}
+
+	got := p.Captured(hook, podID, ctrID)
+	if got == nil {
+		// The event arrived and the payload did not. That is this suite looking
+		// in the wrong place -- capture was never turned on, or a hook recorded
+		// its event without retaining anything -- and not the runtime failing
+		// to report something.
+		//
+		// So fatalf, not expect. An expectation is a statement about the
+		// runtime, and recording a harness bug as one would put a conformance
+		// finding about our own defect into a summary somebody quotes. A failed
+		// operation is the right channel: nothing about the runtime's NRI
+		// behaviour was measured here.
+		s.fatalf("Captured",
+			fmt.Errorf("plugin %s received %s but retained no payload; was "+
+				"Capture(true) called before StartPlugins?", p.FullName(), hook),
+			"cannot read the %s payload for pod %s container %q", hook, podID, ctrID)
+	}
+
+	return got
+}
+
+// expectInput records an input conformance finding under the field's own name.
+//
+// A thin wrapper over expect so that every input assertion names the field as
+// its Feature and where the answer was read as its Surface. Those two are what
+// make a finding readable in a summary long after the test output scrolled
+// past: "CDI_devices missing from the hook request" and "CDI_devices named in
+// the request but absent from the container" are different findings about a
+// runtime, and only Surface separates them.
+func (s *Suite) expectInput(field, surface string, err error) {
+	s.t.Helper()
+
+	s.expect(field, surface, err)
+}
+
+// ExpectShown records a fidelity finding: the plugin was not shown what the
+// test set. The surface is the hook request, because that is the only thing
+// such a check read.
+func (s *Suite) ExpectShown(field string, err error) {
+	s.t.Helper()
+
+	s.expectInput(field, "hook request", err)
+}
+
+// ExpectAgrees records an agreement finding: the plugin's view and what the
+// runtime realized disagree. The surface names where the second read came
+// from -- the realized OCI spec, CRI status, or the container's own kernel.
+func (s *Suite) ExpectAgrees(field, surface string, err error) {
+	s.t.Helper()
+
+	s.expectInput(field, surface, err)
+}
+
 // ExpectAnnotation fails the case unless the container's OCI spec carries the
 // annotation. See ExpectAnnotation for which surface this reads and why -- in
 // particular, that it verifies an NRI adjustment rather than a CRI annotation.

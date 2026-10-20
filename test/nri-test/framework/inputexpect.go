@@ -43,6 +43,44 @@ import (
 // set is a subset of anything. Omission is the defect class this suite was
 // built for, so an agreement check is a subset check AND a non-vacuity guard.
 
+// missingStrings returns the values of want that from does not contain.
+//
+// The counting behind both the agreement and the fidelity check, shared rather
+// than written twice: two copies could drift apart, and the looser one would
+// then admit a comparison the other would have caught.
+func missingStrings(want, from []string) []string {
+	var missing []string
+
+	for _, w := range want {
+		if !slices.Contains(from, w) {
+			missing = append(missing, w)
+		}
+	}
+
+	return missing
+}
+
+// wrongMapEntries returns a description of every entry of want that from does
+// not carry with the same value. Shared for the reason missingStrings is.
+func wrongMapEntries(want, from map[string]string) []string {
+	var wrong []string
+
+	for _, k := range slices.Sorted(maps.Keys(want)) {
+		got, ok := from[k]
+		if !ok {
+			wrong = append(wrong, fmt.Sprintf("%s=%q is absent", k, want[k]))
+
+			continue
+		}
+
+		if got != want[k] {
+			wrong = append(wrong, fmt.Sprintf("%s is %q, wanted %q", k, got, want[k]))
+		}
+	}
+
+	return wrong
+}
+
 // ExpectStringsSubset checks that every value the plugin was shown appears in
 // what the runtime realized.
 //
@@ -50,14 +88,7 @@ import (
 // fixes what the message lists, and a message that stopped at the first would
 // send them back for the second.
 func ExpectStringsSubset(field string, shown, realized []string) error {
-	var missing []string
-
-	for _, s := range shown {
-		if !slices.Contains(realized, s) {
-			missing = append(missing, s)
-		}
-	}
-
+	missing := missingStrings(shown, realized)
 	if len(missing) == 0 {
 		return nil
 	}
@@ -67,27 +98,53 @@ func ExpectStringsSubset(field string, shown, realized []string) error {
 		field, missing, shown, realized)
 }
 
+// The fidelity checks. Separate from the agreement ones because the question
+// is the other way round -- the test chose the value, so what is in doubt is
+// whether the runtime reported it, not whether it applied it -- and because a
+// finding has to say which it was. Reusing the agreement functions with the
+// arguments swapped would produce a message claiming the runtime failed to
+// realize a value the test never asked it to realize.
+
+// ExpectShownStrings checks that the plugin was shown every value the test set.
+func ExpectShownStrings(field string, want, shown []string) error {
+	missing := missingStrings(want, shown)
+	if len(missing) == 0 {
+		return nil
+	}
+
+	return fmt.Errorf("%s: the test set %v, which the plugin was not shown; "+
+		"the plugin was shown %v", field, missing, shown)
+}
+
+// ExpectShownMap checks that the plugin was shown every entry the test set,
+// with the value it set.
+func ExpectShownMap(field string, want, shown map[string]string) error {
+	wrong := wrongMapEntries(want, shown)
+	if len(wrong) == 0 {
+		return nil
+	}
+
+	return fmt.Errorf("%s: the test set %v; the plugin was shown %v",
+		field, wrong, slices.Sorted(maps.Keys(shown)))
+}
+
+// ExpectShownScalar checks that the plugin was shown the value the test set.
+func ExpectShownScalar[T comparable](field string, want, shown T) error {
+	if want == shown {
+		return nil
+	}
+
+	return fmt.Errorf("%s: the test set %v, the plugin was shown %v",
+		field, want, shown)
+}
+
 // ExpectMapSubset checks that every key the plugin was shown is realized with
 // the same value.
 //
 // A present key with a different value is not a subset. Checking only that the
 // key exists is the version of this that cannot fail.
 func ExpectMapSubset(field string, shown, realized map[string]string) error {
-	var wrong []string
-
-	for _, k := range slices.Sorted(maps.Keys(shown)) {
-		got, ok := realized[k]
-		if !ok {
-			wrong = append(wrong, fmt.Sprintf("%s=%q is not realized at all", k, shown[k]))
-
-			continue
-		}
-
-		if got != shown[k] {
-			wrong = append(wrong, fmt.Sprintf("%s is %q, shown as %q", k, got, shown[k]))
-		}
-	}
-
+	wrong := wrongMapEntries(shown, realized)
 	if len(wrong) == 0 {
 		return nil
 	}
