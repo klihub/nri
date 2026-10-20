@@ -89,6 +89,38 @@ type fakeRuntime struct {
 	execIDs      []string
 	execCmds     [][]string
 	execTimeouts []time.Duration
+
+	// ctrStatus and podStatus are what the two status calls answer with, and the
+	// verbose slices are every flag they were asked with: the inspector has to
+	// ask verbosely or the runtime renders no spec at all, and a caller that
+	// forgot would read an empty one rather than fail.
+	ctrStatus        *runtimeapi.ContainerStatusResponse
+	ctrStatusErr     error
+	ctrStatusVerbose []bool
+
+	podStatus        *runtimeapi.PodSandboxStatusResponse
+	podStatusErr     error
+	podStatusVerbose []bool
+}
+
+func (f *fakeRuntime) ContainerStatus(_ context.Context, _ string, verbose bool) (*runtimeapi.ContainerStatusResponse, error) {
+	f.ctrStatusVerbose = append(f.ctrStatusVerbose, verbose)
+
+	if f.ctrStatusErr != nil {
+		return nil, f.ctrStatusErr
+	}
+
+	return f.ctrStatus, nil
+}
+
+func (f *fakeRuntime) PodSandboxStatus(_ context.Context, _ string, verbose bool) (*runtimeapi.PodSandboxStatusResponse, error) {
+	f.podStatusVerbose = append(f.podStatusVerbose, verbose)
+
+	if f.podStatusErr != nil {
+		return nil, f.podStatusErr
+	}
+
+	return f.podStatus, nil
 }
 
 // ExecSync models the real one: it returns both streams whether the command

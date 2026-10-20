@@ -1233,6 +1233,10 @@ type fakeInspector struct{}
 
 func (*fakeInspector) Inspect(context.Context, string) (*Observed, error) { return nil, nil }
 
+func (*fakeInspector) InspectPod(context.Context, string) (*ObservedPod, error) {
+	return nil, nil
+}
+
 var _ Inspector = &fakeInspector{}
 
 // execInspector is an Inspector that is also an Executor, as the CRI one is.

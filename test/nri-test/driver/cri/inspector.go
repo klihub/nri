@@ -34,6 +34,9 @@ import (
 // top level; their other fields differ and are ignored.
 type verboseInfo struct {
 	RuntimeSpec *rspec.Spec `json:"runtimeSpec"`
+	// Pid is the workload's own process. Both runtimes report it under this key,
+	// for containers and for sandboxes alike.
+	Pid uint32 `json:"pid"`
 }
 
 // ParseVerboseInfo extracts a container's OCI spec from a verbose
@@ -55,6 +58,48 @@ func ParseVerboseInfo(info map[string]string) (*rspec.Spec, error) {
 	}
 
 	return v.RuntimeSpec, nil
+}
+
+// ParseVerbosePid extracts a workload's init process from a verbose status
+// response's Info map.
+//
+// Separate from ParseVerboseInfo rather than a second return value from it, so
+// that a caller wanting only one of the two does not have to say what it means
+// for the other to be missing. They fail independently: a sandbox status
+// carries a pid and no runtimeSpec at all.
+//
+// A pid of zero is an error, not a pid. No process has it, so a zero is the
+// field absent -- a workload inspected before it is started -- and a caller
+// that took it for an answer would compare a runtime's honest silence against
+// a number we invented.
+func ParseVerbosePid(info map[string]string) (uint32, error) {
+	v, err := parseVerboseInfo(info)
+	if err != nil {
+		return 0, err
+	}
+
+	if v.Pid == 0 {
+		return 0, errors.New("verbose status reports no pid")
+	}
+
+	return v.Pid, nil
+}
+
+// parseVerboseInfo decodes the Info map's "info" value, which is where both
+// runtimes put everything they will say about a workload beyond its status.
+func parseVerboseInfo(info map[string]string) (*verboseInfo, error) {
+	raw, ok := info["info"]
+	if !ok {
+		return nil, fmt.Errorf("verbose status has no %q key; got keys %v",
+			"info", keysOf(info))
+	}
+
+	v := &verboseInfo{}
+	if err := json.Unmarshal([]byte(raw), v); err != nil {
+		return nil, fmt.Errorf("failed to decode verbose info: %w", err)
+	}
+
+	return v, nil
 }
 
 func keysOf(m map[string]string) []string {
@@ -101,12 +146,46 @@ func (i *Inspector) Inspect(ctx context.Context, containerID string) (*framework
 		return nil, fmt.Errorf("container %s: %w", containerID, err)
 	}
 
+	// A missing pid is not an error here. See framework.Observed.Pid: this call
+	// is on the path of every test that reads a realized spec, including for
+	// containers that have not been started, and refusing those would turn an
+	// addition into a regression of the whole adjustment suite.
+	pid, _ := ParseVerbosePid(rpl.GetInfo())
+
 	o := &framework.Observed{
 		Spec:  spec,
 		State: containerState(rpl.GetStatus()),
+		Pid:   pid,
 	}
 
 	return o, nil
+}
+
+// InspectPod returns the pod sandbox's realized state.
+func (i *Inspector) InspectPod(ctx context.Context, podID string) (*framework.ObservedPod, error) {
+	rpl, err := i.client.Runtime.PodSandboxStatus(ctx, podID, true)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get status of pod %s: %w", podID, err)
+	}
+
+	// Primary first, then the additional ones, which CRI defines as not
+	// including the primary. NRI's PodSandbox.ips is one list, so the order is
+	// the only thing that says which address the runtime considers the pod's.
+	var ips []string
+	if ip := rpl.GetStatus().GetNetwork().GetIp(); ip != "" {
+		ips = append(ips, ip)
+	}
+
+	for _, extra := range rpl.GetStatus().GetNetwork().GetAdditionalIps() {
+		if ip := extra.GetIp(); ip != "" {
+			ips = append(ips, ip)
+		}
+	}
+
+	// As in Inspect, a missing pid is not an error.
+	pid, _ := ParseVerbosePid(rpl.GetInfo())
+
+	return &framework.ObservedPod{IPs: ips, Pid: pid}, nil
 }
 
 // Exec runs a command inside a running container and returns its output.
