@@ -334,6 +334,37 @@ func TestScaleReportPrintCarriesTheCaveats(t *testing.T) {
 	require.Contains(t, out, "Kubelet and the control plane are inside the window")
 }
 
+func TestScaleReportPrintClientBurstNoteNamesTheAnchorOnlyWhenThereIsOne(t *testing.T) {
+	events := []*Event{ev(StopPodSandbox, "a", 100), ev(RemovePodSandbox, "a", 150)}
+
+	down := NewScaleReport(1, 1, NewTimeline(events, []string{"a"}, TeardownPhase(), ""))
+	down.ClientBurst = time.Second
+
+	var b strings.Builder
+	down.Print(&b)
+	require.NotContains(t, b.String(), "first  callback",
+		"a phase with no anchor stage has no stage to name")
+	require.Contains(t, b.String(), "starts at each pod's first callback")
+
+	up := NewScaleReport(1, 1, NewTimeline(podEvents("a", 100, 10), []string{"a"}, StartupPhase(), ""))
+	up.ClientBurst = time.Second
+
+	b.Reset()
+	up.Print(&b)
+	require.Contains(t, b.String(), "starts at the first RunPodSandbox callback")
+}
+
+func TestScaleReportPrintSaysWhenItWasMeasuredFromSpans(t *testing.T) {
+	tl := NewTimeline(podEvents("a", 100, 10), []string{"a"}, StartupPhase(), "")
+	r := NewScaleReport(1, 1, tl)
+	r.Traced = true
+
+	var b strings.Builder
+	r.Print(&b)
+	require.Contains(t, b.String(), "OpenTelemetry spans")
+	require.NotContains(t, b.String(), "when our plugin's callback ran, so NRI")
+}
+
 func TestScaleReportPrintSaysWhenADistributionWasNotMeasured(t *testing.T) {
 	// A single pod has no arrival gaps, so that distribution is empty.
 	tl := NewTimeline(podEvents("a", 100, 10), []string{"a"}, StartupPhase(), PostStartContainer)

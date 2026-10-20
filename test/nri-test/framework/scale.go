@@ -652,6 +652,11 @@ type ScaleReport struct {
 	// starting to the last terminal stage arriving. Zero when there is no
 	// client-side clock. See ClientBurst.
 	ClientBurst time.Duration
+	// Traced is set when the timeline was built from the runtime's spans
+	// rather than from a recorder plugin, and Hooks are then the runtime's own
+	// per-hook timings.
+	Traced bool
+	Hooks  []HookStat
 }
 
 // NewScaleReport summarizes a burst.
@@ -806,15 +811,26 @@ func (r *ScaleReport) Print(w io.Writer) {
 	if r.ClientBurst > 0 {
 		fmt.Fprintf(&b, "\n  client-side burst, first call to last %s: %s\n",
 			r.Timeline.Terminal, r.ClientBurst)
-		fmt.Fprintf(&b, "  (the ladder above starts at the first %s callback, which a\n",
-			r.Timeline.Phase.Anchor)
-		fmt.Fprintf(&b, "  runtime fires after its own sandbox work, so this is wider)\n")
+		if r.Timeline.Phase.Anchor != "" {
+			fmt.Fprintf(&b, "  (the ladder above starts at the first %s callback, which a\n",
+				r.Timeline.Phase.Anchor)
+			fmt.Fprintf(&b, "  runtime fires after its own sandbox work, so this is wider)\n")
+		} else {
+			fmt.Fprintf(&b, "  (the ladder above starts at each pod's first callback, so this\n")
+			fmt.Fprintf(&b, "  is wider)\n")
+		}
 	}
 
 	WriteOpStats(&b, r.OpStats)
+	WriteHookStats(&b, r.Hooks)
 
 	fmt.Fprintf(&b, "\n  How to read this:\n")
-	if len(r.OpStats) == 0 {
+	if r.Traced {
+		fmt.Fprintf(&b, "    - Measured from the runtime's OpenTelemetry spans, not from a\n")
+		fmt.Fprintf(&b, "      recorder plugin. A stage's time is when the runtime started\n")
+		fmt.Fprintf(&b, "      its first plugin call for it. Tracing at full sampling slows\n")
+		fmt.Fprintf(&b, "      the runtime, so these are traced timings.\n")
+	} else if len(r.OpStats) == 0 {
 		fmt.Fprintf(&b, "    - Every timestamp is when our plugin's callback ran, so NRI\n")
 		fmt.Fprintf(&b, "      transport and the runtime's scheduling of plugin calls are\n")
 		fmt.Fprintf(&b, "      inside it. It is not runtime latency on its own.\n")

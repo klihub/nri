@@ -90,11 +90,7 @@ func runK8sBurst(t *testing.T, iteration int) {
 
 	s := framework.NewSuite(t, "scale-k8s")
 
-	q := s.Q()
-	q.Grow(n * scaleEventsPerPod)
-	q.TrackCost(true, n*scaleEventsPerPod)
-
-	startScalePlugins(t, s)
+	q := startScalePlugins(t, s)
 
 	require.NoError(t, scaler.Scale(ctx, int32(n)), "failed to scale up")
 
@@ -102,9 +98,9 @@ func runK8sBurst(t *testing.T, iteration int) {
 		cfg.ScaleTerminal())
 
 	up := framework.NewPhaseTimeline(cfg, q.Events(), newPods, framework.StartupPhase())
-	up.RecorderCost = q.Costs()
+	up.RecorderCost = q.costs()
 
-	upReport := framework.NewScaleReport(iteration, n, up)
+	upReport := q.report(iteration, n, up, newPods)
 	upReport.Print(os.Stdout)
 
 	// Down to zero, so the teardown covers every pod including the original.
@@ -118,11 +114,21 @@ func runK8sBurst(t *testing.T, iteration int) {
 	waitForStage(q, all, framework.RemovePodSandbox, len(all), cfg.ScaleSettle)
 
 	down := framework.NewPhaseTimeline(cfg, q.Events(), all, framework.TeardownPhase())
-	downReport := framework.NewScaleReport(iteration, n, down)
+	downReport := q.report(iteration, n, down, all)
 	downReport.Print(os.Stdout)
 
 	if cfg.ScaleReportPath != "" {
 		writeScaleReports(t, cfg.ScaleReportPath, iteration, upReport, downReport)
+	}
+
+	// Before the assertions below, as the CRI burst does it: a traced run that
+	// received nothing has to say so, or it fails on "no RunPodSandbox
+	// callback" instead -- which describes the symptom and not the cause, and
+	// sends its reader looking at the recorder rather than at the runtime's
+	// exporter configuration. This is also what honours
+	// -nri-test.scale-trace-dump, which was silently ignored here.
+	if q.traced() {
+		q.summarize(t)
 	}
 
 	require.NotEmpty(t, newPods, "the burst produced no new pods to measure")
@@ -144,7 +150,7 @@ func runK8sBurst(t *testing.T, iteration int) {
 // measurement is made of, so the window closes when the data is complete
 // rather than when Kubernetes says the pods are ready.
 func waitForNewPods(t *testing.T, ctx context.Context, scaler *k8s.Scaler,
-	q *framework.EventQ, before []string, wantNew int,
+	q eventSource, before []string, wantNew int,
 	stage framework.EventType) []string {
 	t.Helper()
 
@@ -208,6 +214,15 @@ func writeScaleReports(t *testing.T, path string, iteration int,
 		Stages map[string]string `json:"stages"`
 	}
 
+	type hook struct {
+		Hook  string `json:"hook"`
+		Calls int    `json:"calls"`
+		P50   string `json:"callP50"`
+		P90   string `json:"callP90"`
+		Max   string `json:"callMax"`
+		Chain string `json:"chainP50"`
+	}
+
 	type phase struct {
 		Phase    string   `json:"phase"`
 		Terminal string   `json:"terminal"`
@@ -217,15 +232,18 @@ func writeScaleReports(t *testing.T, path string, iteration int,
 		Lost     int      `json:"lost"`
 		Pods     []row    `json:"pods"`
 		Cost     []string `json:"recorderQueueCost,omitempty"`
+		Hooks    []hook   `json:"hooks,omitempty"`
 	}
 
 	out := struct {
 		Iteration int      `json:"iteration"`
 		Replicas  int      `json:"replicas"`
 		Driver    string   `json:"driver"`
+		Source    string   `json:"source"`
 		Plugins   []string `json:"plugins"`
 		Phases    []phase  `json:"phases"`
 	}{
+		Source:    "recorder",
 		Iteration: iteration,
 		Replicas:  framework.TestConfig.ScaleReplicas,
 		Driver:    framework.TestConfig.ScaleDriver,
@@ -253,6 +271,18 @@ func writeScaleReports(t *testing.T, path string, iteration int,
 			}
 
 			ph.Pods = append(ph.Pods, row{Pod: p.PodName, PodID: p.PodID, Stages: stages})
+		}
+
+		if r.Traced {
+			out.Source = "trace"
+		}
+
+		for _, h := range r.Hooks {
+			ph.Hooks = append(ph.Hooks, hook{
+				Hook: string(h.Hook), Calls: h.Call.N,
+				P50: h.Call.P50.String(), P90: h.Call.P90.String(), Max: h.Call.Max.String(),
+				Chain: h.Chain.P50.String(),
+			})
 		}
 
 		for _, d := range r.Timeline.RecorderCost {

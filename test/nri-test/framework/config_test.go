@@ -190,29 +190,6 @@ func TestScaleTerminalDefaultsToTheLaterEvent(t *testing.T) {
 			"TestCompleteRefusesAnUnknownScaleTerminal")
 }
 
-func TestCompleteRefusesAnUnknownScaleTerminal(t *testing.T) {
-	c := &Config{RuntimeEndpoint: "unix:///dev/null", ScaleTerminalEvent: "nonsense"}
-
-	err := c.Complete()
-
-	require.Error(t, err, "a typo must not silently measure to another stage")
-	require.ErrorContains(t, err, "nonsense")
-	require.ErrorContains(t, err, string(StartContainer))
-	require.ErrorContains(t, err, string(PostStartContainer))
-}
-
-func TestCompleteAcceptsBothScaleTerminals(t *testing.T) {
-	for _, stage := range []EventType{StartContainer, PostStartContainer} {
-		c := &Config{RuntimeEndpoint: "unix:///dev/null", ScaleTerminalEvent: string(stage)}
-		require.NoError(t, c.Complete())
-		require.Equal(t, stage, c.ScaleTerminal())
-	}
-
-	c := &Config{RuntimeEndpoint: "unix:///dev/null"}
-	require.NoError(t, c.Complete(), "an unset terminal is the default, not an error")
-	require.Equal(t, PostStartContainer, c.ScaleTerminal())
-}
-
 func TestCompleteOverridesTheNamespaceForAReplicaSetBurst(t *testing.T) {
 	c := &Config{
 		RunID:              "abc123",
@@ -292,10 +269,48 @@ func TestScaleViaK8sNeedsBothFlags(t *testing.T) {
 	require.False(t, (&Config{ScaleReplicas: 2, ScaleDriver: ScaleDriverCRI}).ScaleViaK8s())
 }
 
-// One direction of one burst gets its own budget. The CRI burst creates a
-// context per phase rather than sharing one: the grace wait between them
-// spends part of the first, so a shared context would leave the teardown calls
-// expired, failing the moment they were issued.
+func TestCompleteSpanSettings(t *testing.T) {
+	c := &Config{RuntimeEndpoint: "unix:///dev/null"}
+	require.NoError(t, c.Complete())
+	require.Equal(t, TraceHTTP, c.ScaleTraceProtocol)
+	require.False(t, c.ScalePlan.Traced, "without an address the recorder measures")
+
+	c = &Config{RuntimeEndpoint: "unix:///dev/null", ScaleTrace: "127.0.0.1:4318"}
+	require.NoError(t, c.Complete())
+	require.True(t, c.ScalePlan.Traced)
+
+	c = &Config{RuntimeEndpoint: "unix:///dev/null", ScaleTraceProtocol: "smoke"}
+	require.Error(t, c.Complete(), "an unknown protocol is refused rather than defaulted")
+}
+
+func TestCompleteRefusesAnUnknownScaleTerminal(t *testing.T) {
+	c := &Config{RuntimeEndpoint: "unix:///dev/null", ScaleTerminalEvent: "nonsense"}
+
+	err := c.Complete()
+
+	require.Error(t, err, "a typo must not silently measure to another stage")
+	require.ErrorContains(t, err, "nonsense")
+	require.ErrorContains(t, err, string(StartContainer))
+	require.ErrorContains(t, err, string(PostStartContainer))
+}
+
+func TestCompleteAcceptsBothScaleTerminals(t *testing.T) {
+	for _, stage := range []EventType{StartContainer, PostStartContainer} {
+		c := &Config{RuntimeEndpoint: "unix:///dev/null", ScaleTerminalEvent: string(stage)}
+		require.NoError(t, c.Complete())
+		require.Equal(t, stage, c.ScaleTerminal())
+	}
+
+	c := &Config{RuntimeEndpoint: "unix:///dev/null"}
+	require.NoError(t, c.Complete(), "an unset terminal is the default, not an error")
+	require.Equal(t, PostStartContainer, c.ScaleTerminal())
+}
+
+// One direction of one burst gets its own budget. The CRI burst used to create
+// a single ScaleSettle context and hand the same one to the teardown, after the
+// grace wait had already spent part of it, so a slow burst left the teardown
+// calls with an expired context -- they failed instantly, their errors were
+// discarded, and the teardown report was noise shaped like data.
 func TestScalePhaseBudgetIsNeverZero(t *testing.T) {
 	require.Equal(t, DefaultScaleSettle, (&Config{}).ScalePhaseBudget(),
 		"a zero budget is an already-expired context, which is the failure "+
