@@ -17,6 +17,8 @@
 package cri
 
 import (
+	"fmt"
+
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
 
 	"github.com/containerd/nri/test/nri-test/framework"
@@ -35,17 +37,35 @@ func PodSandboxConfig(cfg *framework.Config, p *framework.PodSpec) *runtimeapi.P
 		Annotations: p.Annotations,
 	}
 
-	if p.CgroupParent != "" {
-		c.Linux = &runtimeapi.LinuxPodSandboxConfig{
-			CgroupParent: p.CgroupParent,
-		}
-	}
-
-	if opts := namespaceOptions(cfg); opts != nil {
+	// Every field below lives under Linux, which stays absent when nothing asks
+	// for it: a pod spec that sets none of these must reach the runtime exactly
+	// as it did before any of them existed.
+	linux := func() *runtimeapi.LinuxPodSandboxConfig {
 		if c.Linux == nil {
 			c.Linux = &runtimeapi.LinuxPodSandboxConfig{}
 		}
-		c.Linux.SecurityContext = &runtimeapi.LinuxSandboxSecurityContext{NamespaceOptions: opts}
+
+		return c.Linux
+	}
+
+	if p.CgroupParent != "" {
+		linux().CgroupParent = p.CgroupParent
+	}
+
+	if len(p.Sysctls) > 0 {
+		linux().Sysctls = p.Sysctls
+	}
+
+	if p.PodOverhead != nil {
+		linux().Overhead = linuxResources(p.PodOverhead)
+	}
+
+	if p.PodResources != nil {
+		linux().Resources = linuxResources(p.PodResources)
+	}
+
+	if opts := namespaceOptions(cfg); opts != nil {
+		linux().SecurityContext = &runtimeapi.LinuxSandboxSecurityContext{NamespaceOptions: opts}
 	}
 
 	return c
@@ -111,16 +131,97 @@ func ContainerConfig(cfg *framework.Config, c *framework.ContainerSpec) *runtime
 		})
 	}
 
-	if c.Resources != nil || namespaceOptions(cfg) != nil {
-		config.Linux = &runtimeapi.LinuxContainerConfig{
-			Resources: linuxResources(c.Resources),
+	for _, name := range c.CDIDevices {
+		config.CDIDevices = append(config.CDIDevices, &runtimeapi.CDIDevice{Name: name})
+	}
+
+	for _, d := range c.Devices {
+		config.Devices = append(config.Devices, &runtimeapi.Device{
+			HostPath:      d.HostPath,
+			ContainerPath: d.ContainerPath,
+			Permissions:   d.Permissions,
+		})
+	}
+
+	// As in PodSandboxConfig: the Linux section and the security context under
+	// it are created on demand, so a container spec that sets none of these
+	// produces what it produced before they existed. The guard used to be
+	// Resources-or-namespaces, and a field added without widening it would be
+	// built here and silently dropped.
+	linux := func() *runtimeapi.LinuxContainerConfig {
+		if config.Linux == nil {
+			config.Linux = &runtimeapi.LinuxContainerConfig{}
 		}
-		if opts := namespaceOptions(cfg); opts != nil {
-			config.Linux.SecurityContext = &runtimeapi.LinuxContainerSecurityContext{NamespaceOptions: opts}
+
+		return config.Linux
+	}
+
+	securityContext := func() *runtimeapi.LinuxContainerSecurityContext {
+		if linux().SecurityContext == nil {
+			linux().SecurityContext = &runtimeapi.LinuxContainerSecurityContext{}
 		}
+
+		return linux().SecurityContext
+	}
+
+	if c.Resources != nil {
+		linux().Resources = linuxResources(c.Resources)
+	}
+
+	if c.OOMScoreAdj != nil {
+		if linux().Resources == nil {
+			linux().Resources = &runtimeapi.LinuxContainerResources{}
+		}
+		linux().Resources.OomScoreAdj = *c.OOMScoreAdj
+	}
+
+	if c.RunAsUser != nil {
+		securityContext().RunAsUser = &runtimeapi.Int64Value{Value: *c.RunAsUser}
+	}
+
+	if c.RunAsGroup != nil {
+		securityContext().RunAsGroup = &runtimeapi.Int64Value{Value: *c.RunAsGroup}
+	}
+
+	if len(c.SupplementalGroups) > 0 {
+		securityContext().SupplementalGroups = c.SupplementalGroups
+	}
+
+	if c.SeccompProfile != nil {
+		securityContext().Seccomp = seccompProfile(c.SeccompProfile)
+	}
+
+	if opts := namespaceOptions(cfg); opts != nil {
+		securityContext().NamespaceOptions = opts
 	}
 
 	return config
+}
+
+// seccompProfile converts a SeccompProfile into CRI's security profile.
+//
+// An unknown type is an error, not a default. CRI's RUNTIME_DEFAULT is the
+// zero value, so a typo'd type silently becoming the default is the one
+// outcome this must not have: the runtime would then be sent RUNTIME_DEFAULT,
+// the fidelity test would still expect UNCONFINED, and the suite would publish
+// "this runtime misreports seccomp_profile" about a runtime that reported
+// faithfully.
+func seccompProfile(p *framework.SeccompProfile) *runtimeapi.SecurityProfile {
+	switch p.Type {
+	case framework.SeccompUnconfined:
+		return &runtimeapi.SecurityProfile{
+			ProfileType: runtimeapi.SecurityProfile_Unconfined,
+		}
+	case framework.SeccompRuntimeDefault:
+		return &runtimeapi.SecurityProfile{
+			ProfileType: runtimeapi.SecurityProfile_RuntimeDefault,
+		}
+	}
+
+	// Loud, because the only way here is a test naming a type that does not
+	// exist, and the quiet alternative is the defect described above.
+	panic(fmt.Sprintf("unknown seccomp profile type %q; use SeccompUnconfined "+
+		"or SeccompRuntimeDefault", p.Type))
 }
 
 // ContainerResources converts Resources into a CRI container resource update.

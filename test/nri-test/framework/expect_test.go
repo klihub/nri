@@ -18,6 +18,7 @@ package framework
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"testing"
 	"time"
@@ -519,6 +520,12 @@ func (i *specInspector) Inspect(_ context.Context, id string) (*Observed, error)
 	}
 
 	return &Observed{Spec: i.spec, State: StateRunning}, nil
+}
+
+// InspectPod is unused by the expectations under test here, which all read a
+// container's spec. It satisfies the interface without pretending to answer.
+func (i *specInspector) InspectPod(context.Context, string) (*ObservedPod, error) {
+	return nil, errors.New("specInspector does not observe pods")
 }
 
 var _ Inspector = &specInspector{}

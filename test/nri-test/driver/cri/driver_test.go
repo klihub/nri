@@ -89,6 +89,38 @@ type fakeRuntime struct {
 	execIDs      []string
 	execCmds     [][]string
 	execTimeouts []time.Duration
+
+	// ctrStatus and podStatus are what the two status calls answer with, and the
+	// verbose slices are every flag they were asked with: the inspector has to
+	// ask verbosely or the runtime renders no spec at all, and a caller that
+	// forgot would read an empty one rather than fail.
+	ctrStatus        *runtimeapi.ContainerStatusResponse
+	ctrStatusErr     error
+	ctrStatusVerbose []bool
+
+	podStatus        *runtimeapi.PodSandboxStatusResponse
+	podStatusErr     error
+	podStatusVerbose []bool
+}
+
+func (f *fakeRuntime) ContainerStatus(_ context.Context, _ string, verbose bool) (*runtimeapi.ContainerStatusResponse, error) {
+	f.ctrStatusVerbose = append(f.ctrStatusVerbose, verbose)
+
+	if f.ctrStatusErr != nil {
+		return nil, f.ctrStatusErr
+	}
+
+	return f.ctrStatus, nil
+}
+
+func (f *fakeRuntime) PodSandboxStatus(_ context.Context, _ string, verbose bool) (*runtimeapi.PodSandboxStatusResponse, error) {
+	f.podStatusVerbose = append(f.podStatusVerbose, verbose)
+
+	if f.podStatusErr != nil {
+		return nil, f.podStatusErr
+	}
+
+	return f.podStatus, nil
 }
 
 // ExecSync models the real one: it returns both streams whether the command
@@ -1013,6 +1045,19 @@ func TestDriverProbeCapabilities(t *testing.T) {
 		caps := testDriver(scopedConfig(), &fakeRuntime{}).probeCapabilities()
 
 		require.False(t, caps.Has(framework.CapUpdatePodResources), "caps were %s", caps)
+	})
+
+	t.Run("should advertise the CRI-level input capabilities", func(t *testing.T) {
+		// CRI takes CDI device names, sysctls and the security context
+		// verbatim, so the input fidelity tests can choose their values here.
+		// Without these bits every one of those tests skips, and a suite of
+		// skips reads to its reader as a suite that measured something.
+		caps := testDriver(scopedConfig(), &fakeRuntime{}).probeCapabilities()
+
+		require.True(t, caps.Has(framework.CapCDIDevices|
+			framework.CapSysctls|
+			framework.CapSecurityContext|
+			framework.CapDevices), "caps were %s", caps)
 	})
 }
 

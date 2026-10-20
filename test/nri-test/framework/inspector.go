@@ -28,6 +28,33 @@ type Observed struct {
 	Spec *rspec.Spec
 	// State is the container's lifecycle state.
 	State ContainerState
+	// Pid is the container's init process, or zero when the runtime reports
+	// none. A container inspected before it is started has no process yet, so
+	// zero is an ordinary answer here and not an error -- a test that needs a
+	// pid asserts on it rather than assuming Inspect refused.
+	Pid uint32
+	// Reason and Message are why the container terminated, as CRI reports it.
+	// Both are empty for a container that has not terminated, and a runtime
+	// may leave them empty for one that has.
+	Reason  string
+	Message string
+}
+
+// ObservedPod is a pod sandbox's realized state.
+//
+// Separate from Observed rather than a nullable half of it: the two are read
+// from different CRI calls, and a type that could hold either would let a
+// caller read the half that was never filled in.
+type ObservedPod struct {
+	// IPs are the sandbox's addresses, the primary one first. Empty for a
+	// host-network sandbox, which has no network status of its own.
+	IPs []string
+	// Pid is the sandbox's own process, or zero when the runtime reports none.
+	Pid uint32
+	// Spec is the sandbox's OCI runtime spec, or nil when the runtime reports
+	// none. It is the only oracle for what the runtime realized for the pod
+	// itself, as opposed to for a container in it.
+	Spec *rspec.Spec
 }
 
 // Inspector observes a container's realized state.
@@ -38,6 +65,12 @@ type Observed struct {
 type Inspector interface {
 	// Inspect returns the container's realized state.
 	Inspect(ctx context.Context, containerID string) (*Observed, error)
+	// InspectPod returns the pod sandbox's realized state.
+	//
+	// Here rather than on Driver for the reason the whole type is: this is
+	// observation, and a pod's addresses are what an input test compares the
+	// PodSandbox a plugin was shown against.
+	InspectPod(ctx context.Context, podID string) (*ObservedPod, error)
 }
 
 // Executor runs a command inside a running container and returns its output.

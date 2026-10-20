@@ -27,6 +27,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/containerd/nri/pkg/api"
 )
 
 func TestWithTimeoutGivesEachCallAnIndependentBudget(t *testing.T) {
@@ -1233,6 +1235,10 @@ type fakeInspector struct{}
 
 func (*fakeInspector) Inspect(context.Context, string) (*Observed, error) { return nil, nil }
 
+func (*fakeInspector) InspectPod(context.Context, string) (*ObservedPod, error) {
+	return nil, nil
+}
+
 var _ Inspector = &fakeInspector{}
 
 // execInspector is an Inspector that is also an Executor, as the CRI one is.
@@ -1936,4 +1942,194 @@ func TestSuiteProcStatusInitView(t *testing.T) {
 	newFakeSuite(&fakeT{}).ProcSelfStatus(&Container{ID: "ctr0"})
 
 	require.Equal(t, [][]string{{"cat", "/proc/1/status"}}, e.cmds)
+}
+
+func TestSuiteCapturedAt(t *testing.T) {
+	useConfig(t, &Config{Timeout: 200 * time.Millisecond, Namespace: "nri-test",
+		CollectFailures: true})
+
+	newSuite := func() (*Suite, *fakeT, *TestPlugin) {
+		ft := &fakeT{}
+		s := newFakeSuite(ft)
+		// A real scope: an empty one deliberately matches nothing, so the hooks
+		// below would be filtered out and the helper would be tested against a
+		// plugin that was never invoked.
+		s.scope = &Scope{Namespaces: []string{"nri-test"}}
+
+		p := NewTestPlugin("input", "00", 0, s.q, s.scope)
+		p.Capture(true)
+
+		return s, ft, p
+	}
+
+	ctr := &Container{ID: "ctr0", PodID: "pod0"}
+
+	t.Run("should return the payload once the hook has arrived", func(t *testing.T) {
+		s, ft, p := newSuite()
+
+		_, _, err := p.CreateContainer(context.Background(),
+			&api.PodSandbox{Id: "pod0", Name: "pod0", Namespace: "nri-test"},
+			&api.Container{Id: "ctr0", PodSandboxId: "pod0", Name: "ctr0"})
+		require.NoError(t, err)
+
+		got := s.CapturedAt(p, CreateContainer, ctr)
+		require.NotNil(t, got)
+		require.Equal(t, "ctr0", got.Ctr.GetName())
+		require.Empty(t, ft.allErrors())
+	})
+
+	t.Run("should record a finding when the hook never arrives", func(t *testing.T) {
+		// Not a nil return for the caller to check: a test that read a field off
+		// a nil capture would panic, and the panic would bury the finding. The
+		// hook not arriving is itself the thing to report.
+		s, ft, p := newSuite()
+
+		require.Nil(t, s.CapturedAt(p, CreateContainer, ctr))
+		require.Contains(t, ft.allErrors(), "CreateContainer")
+	})
+
+	t.Run("should return a pod payload for a pod hook", func(t *testing.T) {
+		s, ft, p := newSuite()
+
+		require.NoError(t, p.RunPodSandbox(context.Background(),
+			&api.PodSandbox{Id: "pod0", Name: "pod0", Namespace: "nri-test"}))
+
+		got := s.CapturedPodAt(p, RunPodSandbox, &Pod{ID: "pod0"})
+		require.NotNil(t, got)
+		require.Equal(t, "pod0", got.Pod.GetName())
+		require.Nil(t, got.Ctr)
+		require.Empty(t, ft.allErrors())
+	})
+}
+
+func TestSuiteCapturedAtSeparatesSuiteBugsFromRuntimeFindings(t *testing.T) {
+	useConfig(t, &Config{Timeout: 200 * time.Millisecond, Namespace: "nri-test",
+		CollectFailures: true})
+
+	t.Run("should end the case when the hook arrived but nothing was retained", func(t *testing.T) {
+		// Capture was never turned on, so the event is there and the payload is
+		// not. That is this suite looking in the wrong place, not the runtime
+		// failing to report something -- and the report counts the two
+		// separately so a reader can tell a broken harness from a broken
+		// runtime. Recording it as an unmet expectation would publish a
+		// conformance finding about our own bug.
+		// A report of its own: every other test here uses the same fakeT name
+		// and records into the shared TestReport, so a filter by test name
+		// would count their findings too.
+		saved := TestReport
+		TestReport = &Report{}
+
+		t.Cleanup(func() { TestReport = saved })
+
+		ft := &fakeT{}
+		s := newFakeSuite(ft)
+		s.scope = &Scope{Namespaces: []string{"nri-test"}}
+
+		p := NewTestPlugin("input", "00", 0, s.q, s.scope)
+
+		_, _, err := p.CreateContainer(context.Background(),
+			&api.PodSandbox{Id: "pod0", Name: "pod0", Namespace: "nri-test"},
+			&api.Container{Id: "ctr0", PodSandboxId: "pod0", Name: "ctr0"})
+		require.NoError(t, err)
+
+		require.Panics(t, func() {
+			s.CapturedAt(p, CreateContainer, &Container{ID: "ctr0", PodID: "pod0"})
+		}, "fatalf must not return")
+
+		kinds := map[Kind]int{}
+		for _, f := range TestReport.Findings() {
+			kinds[f.Kind]++
+		}
+
+		require.Zero(t, kinds[KindExpectation],
+			"a harness bug must not be recorded as an expectation about the runtime")
+		require.Positive(t, kinds[KindOperation])
+	})
+}
+func TestSuiteInspectPod(t *testing.T) {
+	useConfig(t, &Config{Timeout: time.Minute, Namespace: "nri-test"})
+	useDriver(t, &fakeDriver{})
+
+	t.Run("should return what the inspector observed", func(t *testing.T) {
+		useInspector(t, &podInspector{pod: &ObservedPod{IPs: []string{"10.0.0.1"}, Pid: 99}})
+
+		s := newFakeSuite(&fakeT{})
+
+		got := s.InspectPod(&Pod{ID: "pod0"})
+		require.Equal(t, []string{"10.0.0.1"}, got.IPs)
+		require.Equal(t, uint32(99), got.Pid)
+	})
+
+	t.Run("should end the case when the pod cannot be observed", func(t *testing.T) {
+		// A failed observation is a failed operation, not an unmet expectation:
+		// nothing about the runtime's NRI behaviour was measured by it, and the
+		// report counts the two separately on purpose.
+		useInspector(t, &podInspector{err: errors.New("sandbox not found")})
+
+		ft := &fakeT{}
+		s := newFakeSuite(ft)
+
+		require.Panics(t, func() { s.InspectPod(&Pod{ID: "pod0"}) },
+			"fatalf must not return")
+		require.Contains(t, ft.allErrors(), "pod0")
+	})
+}
+
+// podInspector is an Inspector that answers only about pods.
+type podInspector struct {
+	fakeExecutor
+
+	pod *ObservedPod
+	err error
+}
+
+func (i *podInspector) Inspect(context.Context, string) (*Observed, error) {
+	return nil, errors.New("podInspector does not observe containers")
+}
+
+func (i *podInspector) InspectPod(context.Context, string) (*ObservedPod, error) {
+	if i.err != nil {
+		return nil, i.err
+	}
+
+	return i.pod, nil
+}
+
+var _ Inspector = &podInspector{}
+
+func TestSuiteCovered(t *testing.T) {
+	useConfig(t, &Config{Timeout: time.Minute, Namespace: "nri-test"})
+
+	t.Run("should record each field against its hook", func(t *testing.T) {
+		saved := TestReport
+		TestReport = &Report{}
+
+		t.Cleanup(func() { TestReport = saved })
+
+		s := newFakeSuite(&fakeT{})
+		s.Covered(CreateContainer, "Container.CDI_devices", "LinuxContainer.sysctl")
+
+		got := TestReport.CoverageOf()
+		require.Len(t, got, 2)
+		require.Equal(t, "Container.CDI_devices", got[0].Field)
+		require.Equal(t, CreateContainer, got[0].Hook)
+		require.Equal(t, "LinuxContainer.sysctl", got[1].Field)
+	})
+
+	t.Run("should reject a field the table does not name", func(t *testing.T) {
+		// A typo here would be reported forever as a field no run exercises,
+		// while the field it meant would also read as unexercised. Two wrong
+		// lines from one mistake, and neither of them loud.
+		saved := TestReport
+		TestReport = &Report{}
+
+		t.Cleanup(func() { TestReport = saved })
+
+		ft := &fakeT{}
+		s := newFakeSuite(ft)
+
+		require.Panics(t, func() { s.Covered(CreateContainer, "Container.nonesuch") },
+			"fatalf must not return")
+		require.Contains(t, ft.allErrors(), "Container.nonesuch")
+	})
 }

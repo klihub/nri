@@ -189,6 +189,15 @@ func Setup(cfg *Config, newDriver DriverFactory) error {
 	// fail Setup: another run's pods are the node's business, not this run's fault.
 	reportStalePods(os.Stdout, driver, cfg.Namespace)
 
+	// The test CDI spec, which Teardown removes. Not fatal: it is needed by one
+	// test, which gates on it, and a node where /var/run/cdi cannot be written
+	// is a node where that one test is unmeasured rather than a node the whole
+	// suite must refuse. The warning says what went unmeasured.
+	if err := WriteCDISpec(cfg.RunID); err != nil {
+		fmt.Printf("WARNING: the test CDI spec could not be written, so CDI "+
+			"device input is unmeasured in this run: %v\n", err)
+	}
+
 	return nil
 }
 
@@ -484,6 +493,17 @@ func Teardown(code int) {
 	defer func() {
 		TestReport.Print(os.Stdout, summaryHeader(code != 0))
 	}()
+
+	// Before the driver guard, and unconditionally: the spec is written late in
+	// Setup but a Setup that failed after writing it must still take it away,
+	// and a run with no driver is exactly such a run. RemoveCDISpec removes one
+	// path, the run's own, so this cannot touch anything else on the node.
+	if !TestConfig.KeepArtifacts {
+		if err := RemoveCDISpec(TestConfig.RunID); err != nil {
+			fmt.Printf("WARNING: removing the test CDI spec failed, so %s is "+
+				"left on the node: %v\n", CDISpecPath(TestConfig.RunID), err)
+		}
+	}
 
 	if driver == nil {
 		return
@@ -850,6 +870,25 @@ func (s *Suite) Inspect(id string) *Observed {
 	return o
 }
 
+// InspectPod returns the pod sandbox's realized state, ending the case if it
+// cannot be observed.
+//
+// Through fatalf rather than expect, as Inspect is: a failed observation is a
+// failed operation, since nothing about the runtime's NRI behaviour was
+// measured by it, and counting it as an unmet expectation would overstate what
+// the run found.
+func (s *Suite) InspectPod(pod *Pod) *ObservedPod {
+	s.t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), TestConfig.Timeout)
+	defer cancel()
+
+	o, err := inspector.InspectPod(ctx, pod.ID)
+	s.fatalf("InspectPod", err, "failed to inspect pod %s", pod.ID)
+
+	return o
+}
+
 // Exec runs cmd inside a running container and returns its trimmed standard
 // output, failing the case if the command cannot be run or exits non-zero.
 //
@@ -1012,6 +1051,133 @@ func (s *Suite) fatalf(op string, err error, format string, args ...any) {
 	})
 
 	require.NoError(s.t, err, msg)
+}
+
+// CapturedAt waits for a container hook to arrive and returns the payload the
+// plugin was given, or nil after recording a finding if it never arrived.
+//
+// The wait is what makes this safe to call straight after a driver operation:
+// the hooks run on the plugin's own goroutine, so a test reading the capture
+// directly would race the callback and read nothing on a fast node.
+//
+// A missing hook is a finding here rather than a nil for the caller to check.
+// A test that went on to read a field off a nil capture would panic, and the
+// panic would bury the finding in a stack trace; and the hook not arriving is
+// itself a conformance statement worth reporting under its own name.
+func (s *Suite) CapturedAt(p *TestPlugin, hook EventType, ctr *Container) *Captured {
+	s.t.Helper()
+
+	return s.capturedAt(p, hook, ctr.PodID, ctr.ID)
+}
+
+// CapturedPodAt is CapturedAt for a pod hook, which carries no container.
+func (s *Suite) CapturedPodAt(p *TestPlugin, hook EventType, pod *Pod) *Captured {
+	s.t.Helper()
+
+	return s.capturedAt(p, hook, pod.ID, "")
+}
+
+func (s *Suite) capturedAt(p *TestPlugin, hook EventType, podID, ctrID string) *Captured {
+	s.t.Helper()
+
+	_, err := s.Q().WaitFor(&Event{
+		Type:   hook,
+		Plugin: p.FullName(),
+		PodID:  podID,
+		CtrID:  ctrID,
+	}, s.Timeout())
+	if err != nil {
+		s.expect(string(hook), "hook request",
+			fmt.Errorf("plugin %s was never invoked for %s on pod %s container %q: %w",
+				p.FullName(), hook, podID, ctrID, err))
+
+		return nil
+	}
+
+	got := p.Captured(hook, podID, ctrID)
+	if got == nil {
+		// The event arrived and the payload did not. That is this suite looking
+		// in the wrong place -- capture was never turned on, or a hook recorded
+		// its event without retaining anything -- and not the runtime failing
+		// to report something.
+		//
+		// So fatalf, not expect. An expectation is a statement about the
+		// runtime, and recording a harness bug as one would put a conformance
+		// finding about our own defect into a summary somebody quotes. A failed
+		// operation is the right channel: nothing about the runtime's NRI
+		// behaviour was measured here.
+		s.fatalf("Captured",
+			fmt.Errorf("plugin %s received %s but retained no payload; was "+
+				"Capture(true) called before StartPlugins?", p.FullName(), hook),
+			"cannot read the %s payload for pod %s container %q", hook, podID, ctrID)
+	}
+
+	return got
+}
+
+// expectInput records an input conformance finding under the field's own name.
+//
+// A thin wrapper over expect so that every input assertion names the field as
+// its Feature and where the answer was read as its Surface. Those two are what
+// make a finding readable in a summary long after the test output scrolled
+// past: "CDI_devices missing from the hook request" and "CDI_devices named in
+// the request but absent from the container" are different findings about a
+// runtime, and only Surface separates them.
+func (s *Suite) expectInput(field, surface string, err error) {
+	s.t.Helper()
+
+	s.expect(field, surface, err)
+}
+
+// Covered records that this case measured the named input fields at hook, for
+// the summary's coverage section. Names are qualified as InputFields names
+// them: "Container.CDI_devices".
+//
+// Called by a test once it has the hook's payload and is about to assert, so
+// what is recorded is a field this run actually read. Before the assertions
+// rather than after, deliberately: a field whose assertion failed was still
+// measured, and the finding says what was found. A test that skipped never
+// reaches here, which is the whole of how a skip stays out of the count.
+//
+// A name the table does not carry ends the case. A typo would otherwise report
+// the field it meant as unexercised and invent a second unexercised field
+// beside it -- two wrong lines from one mistake, and neither of them loud.
+func (s *Suite) Covered(hook EventType, fields ...string) {
+	s.t.Helper()
+
+	known := map[string]bool{}
+	for _, f := range InputFields {
+		known[f.Message+"."+f.Name] = true
+	}
+
+	for _, name := range fields {
+		if !known[name] {
+			s.fatalf("Covered", fmt.Errorf("%q is not a field in InputFields", name),
+				"a test recorded coverage for an unknown input field")
+
+			return
+		}
+
+		TestReport.AddCoverage(Coverage{Field: name, Hook: hook})
+	}
+}
+
+// ExpectShown records a fidelity finding: the plugin was not shown what the
+// test set. The surface is the hook request, because that is the only thing
+// such a check read.
+func (s *Suite) ExpectShown(field string, err error) {
+	s.t.Helper()
+
+	s.expectInput(field, "hook request", err)
+}
+
+// ExpectAgrees records an agreement finding: the plugin's view and what the
+// runtime realized disagree. The surface names where the second read came
+// from -- the realized OCI spec, CRI status, or the container's own kernel.
+func (s *Suite) ExpectAgrees(field, surface string, err error) {
+	s.t.Helper()
+
+	s.expectInput(field, surface, err)
 }
 
 // ExpectAnnotation fails the case unless the container's OCI spec carries the
