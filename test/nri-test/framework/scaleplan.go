@@ -63,6 +63,9 @@ type delayRule struct {
 type ScalePlan struct {
 	// Plugins is the total plugin count, recorder included.
 	Plugins int
+	// Traced means the run measures from the runtime's spans. There is then no
+	// recorder, and plugin 0 is a simulated plugin like the others.
+	Traced bool
 
 	events map[int][]EventType
 	rules  []delayRule
@@ -79,12 +82,24 @@ type ScalePlan struct {
 // make sense of, rather than running a simulation that differs from what was
 // asked for.
 func NewScalePlan(plugins int, eventSpecs []string, delays []DelaySource) (*ScalePlan, error) {
+	return newScalePlan(false, plugins, eventSpecs, delays)
+}
+
+// NewTracedScalePlan is NewScalePlan for a run measured from the runtime's
+// spans. There is no recorder, so every plugin, index 0 included, is a
+// simulated one whose events can be chosen and whose work can be delayed.
+func NewTracedScalePlan(plugins int, eventSpecs []string, delays []DelaySource) (*ScalePlan, error) {
+	return newScalePlan(true, plugins, eventSpecs, delays)
+}
+
+func newScalePlan(traced bool, plugins int, eventSpecs []string, delays []DelaySource) (*ScalePlan, error) {
 	if plugins < 1 {
 		return nil, fmt.Errorf("-nri-test.scale-plugins must be at least 1, got %d", plugins)
 	}
 
 	p := &ScalePlan{
 		Plugins:  plugins,
+		Traced:   traced,
 		events:   map[int][]EventType{},
 		profiles: map[int]string{},
 	}
@@ -116,9 +131,12 @@ func NewScalePlan(plugins int, eventSpecs []string, delays []DelaySource) (*Scal
 	return p, nil
 }
 
-// firstSimulated is the index of the first plugin whose work can be simulated.
-// Plugin 0 is the recorder, which is the instrument the run measures with.
+// firstSimulated is the index of the first plugin whose events can be chosen.
 func (p *ScalePlan) firstSimulated() int {
+	if p.Traced {
+		return 0
+	}
+
 	return 1
 }
 
@@ -146,10 +164,12 @@ func (p *ScalePlan) addEvents(spec string) error {
 		events = append(events, ev)
 	}
 
+	first := p.firstSimulated()
+
 	targets := []int{idx}
 	if idx < 0 {
 		targets = targets[:0]
-		for i := 1; i < p.Plugins; i++ {
+		for i := first; i < p.Plugins; i++ {
 			targets = append(targets, i)
 		}
 
@@ -166,7 +186,11 @@ func (p *ScalePlan) addEvents(spec string) error {
 	}
 
 	for _, i := range targets {
-		if i < 1 || i >= p.Plugins {
+		if i < first || i >= p.Plugins {
+			if p.Traced {
+				return fmt.Errorf("plugin %d does not exist; indexes run 0..%d", i, p.Plugins-1)
+			}
+
 			return fmt.Errorf("plugin %d is not a simulated plugin; indexes run 1..%d "+
 				"(0 is the recorder, whose events are fixed)", i, p.Plugins-1)
 		}
@@ -227,14 +251,15 @@ func (p *ScalePlan) addDelay(item string) error {
 // addRule records one delay rule, refusing the two ways a rule can ask for
 // something the run must not do.
 //
-// The recorder is the instrument a run measures with, so delaying it distorts
-// the measurement rather than simulating a plugin. Naming it outright is
-// therefore refused rather than quietly zeroed: this constructor promises to
-// refuse rather than run a simulation differing from what was asked for, and a
-// warning is easy to lose in a run's output. A wildcard is not that mistake --
-// it covers the simulated plugins and leaves the recorder alone, which is how
-// -nri-test.scale-events has always read an indexless list -- and a rule
-// asking for no delay at all is not asking to delay anything.
+// The recorder is the instrument a non-traced run measures with, so delaying
+// it distorts the measurement rather than simulating a plugin. Naming it
+// outright is therefore refused rather than quietly zeroed: this constructor
+// promises to refuse rather than run a simulation differing from what was
+// asked for, and a warning is easy to lose in a run's output. A wildcard is
+// not that mistake -- it covers the simulated plugins and leaves the recorder
+// alone, which is how -nri-test.scale-events has always read an indexless
+// list -- and a rule asking for no delay at all is not asking to delay
+// anything.
 func (p *ScalePlan) addRule(r delayRule) error {
 	first := p.firstSimulated()
 
@@ -326,7 +351,7 @@ func (p *ScalePlan) Describe() []string {
 
 	for i := 0; i < p.Plugins; i++ {
 		events := RecorderEvents
-		if i > 0 {
+		if i >= p.firstSimulated() {
 			events = p.Events(i)
 		}
 
@@ -341,7 +366,7 @@ func (p *ScalePlan) Describe() []string {
 		// The profile's name is what a plot keys off, so it leads the
 		// parenthesis when there is one.
 		name := "recorder"
-		if i > 0 {
+		if i >= p.firstSimulated() {
 			name = fmt.Sprintf("%d events", len(events))
 
 			if profile, ok := p.profiles[i]; ok {

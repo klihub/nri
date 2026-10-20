@@ -60,6 +60,15 @@ func TestScalePlanBareDelayAppliesToEverySimulatedPluginAndEvent(t *testing.T) {
 	}
 }
 
+// With no recorder every plugin is simulated, so there is nothing for a
+// wildcard to skip.
+func TestScalePlanBareDelayReachesPluginZeroWhenTraced(t *testing.T) {
+	p, err := NewTracedScalePlan(2, nil, inlineDelays("50ms"))
+	require.NoError(t, err)
+
+	require.Equal(t, 50*time.Millisecond, p.Delay(0, CreateContainer))
+}
+
 // Naming the recorder outright is a mistake worth a refusal rather than a
 // warning: NewScalePlan promises to refuse rather than simulate something
 // other than what was asked for, and these runs produce published numbers.
@@ -241,4 +250,29 @@ func TestScalePlanDescribeSkipsEventsAPluginDoesNotGet(t *testing.T) {
 	require.Contains(t, d[1], "StartContainer=50ms")
 	require.NotContains(t, d[1], "UpdateContainer")
 	require.NotContains(t, d[1], "RunPodSandbox")
+}
+
+func TestScalePlanTracedHasNoRecorder(t *testing.T) {
+	_, err := NewScalePlan(2, []string{"0=CreateContainer"}, nil)
+	require.Error(t, err, "plugin 0 is the recorder, whose events are fixed")
+
+	p, err := NewTracedScalePlan(2, []string{"0=CreateContainer"}, inlineDelays("0/CreateContainer=10ms"))
+	require.NoError(t, err)
+	require.True(t, p.Traced)
+	require.Equal(t, []EventType{CreateContainer}, p.Events(0))
+
+	lines := p.Describe()
+	require.Contains(t, lines[0], "plugin 00 (1 events)", "plugin 0 is a simulated plugin when there is no recorder")
+	require.Contains(t, lines[0], "CreateContainer=10ms")
+
+	_, err = NewTracedScalePlan(2, []string{"2=CreateContainer"}, nil)
+	require.Error(t, err)
+
+	p, err = NewTracedScalePlan(3, []string{"CreateContainer"}, nil)
+	require.NoError(t, err)
+	require.Equal(t, []EventType{CreateContainer}, p.Events(0), "a bare event list reaches plugin 0 too")
+
+	recorded, err := NewScalePlan(2, nil, nil)
+	require.NoError(t, err)
+	require.Contains(t, recorded.Describe()[0], "plugin 00 (recorder)")
 }
