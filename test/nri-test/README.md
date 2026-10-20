@@ -38,6 +38,10 @@ inspector, because the suite runs on the node it observes.
 - [Input conformance](#input-conformance)
 - [Limitations](#limitations)
 
+Results live in a separate document: [`RUNTIME-STATUS.md`](RUNTIME-STATUS.md)
+records what each measured runtime and version actually does with NRI. This
+file describes the suite; that one describes the runtimes.
+
 ## Why a new tool
 
 `cri-tools` already ships an NRI suite, `pkg/validate/nri_linux.go` and
@@ -870,11 +874,6 @@ So they are not re-derived.
   held for pods made through kubelet. `/proc/1` matched only in a per-container
   PID namespace; in a pod-wide one it reported every CPU and NUMA node. No
   difference between runc and crun was seen. cgroup v1 is refused by `Setup`.
-- **The k8s driver passes on containerd too.** With the node's kubelet pointed
-  at containerd 2.3.3 (containerd's runc and crun handlers set to
-  `SystemdCgroup = true` to match the kubelet's systemd cgroup driver), the
-  whole suite passed with runc and with crun: 54 passed, 8 skipped, none
-  failed, each.
 - **A pod's termination grace and its deletion grace must agree.** The k8s
   driver once created pods with a 2 s `terminationGracePeriodSeconds` but
   deleted them with grace 0, and then removed the sandbox over CRI itself; about
@@ -891,34 +890,9 @@ So they are not re-derived.
   do; those have no sandbox pid at all.
 - **A created-but-not-started container has no cgroup yet**, so any assertion
   about what the kernel applied needs a running container.
-- **CRI pod and container annotations do not reach a container's OCI spec**
-  unless the runtime's passthrough allowlist names them, and those are empty by
-  default -- containerd's `PodAnnotations` and `ContainerAnnotations`. A created
-  container's `spec.annotations` holds only the runtime's own keys. So a test
-  must never use an annotation it set through CRI as evidence that it is
-  looking at the right spec; container *environment* is the right evidence,
-  because it is data the test chooses and both runtimes must carry CRI
-  container env into `spec.process.env`.
-- **A runtime's own spec annotation keys are not portable.** CRI-O uses
-  `io.container.manager`, `io.kubernetes.cri-o.*` and
-  `io.kubernetes.container.*`; containerd uses `io.kubernetes.cri.*`.
-- **CRI-O requires `ContainerConfig.Image.UserSpecifiedImage`.** With it empty
-  it refuses every container creation with "user specified image not specified,
-  cannot verify image signature". containerd does not require it, which is why
-  the omission went unnoticed until the first CRI-O run.
-- **An entry with an empty name in `StatusResponse.RuntimeHandlers` is the
-  runtime's default** and is never selectable. CRI-O 1.37.2 reports `crun`,
-  `runc`, and one entry with no name at all.
 - **The suite's pods get cgroup path `system.slice:crio:<id>`**, not a
   `kubepods-...slice` path, because the suite sets no `CgroupParent`. The
   systemd triple form breaks no expectation.
-- **Both runtimes report the container's init pid** in
-  `ContainerStatus(verbose)`'s `Info["info"]`, and `/proc/<pid>/environ` is
-  readable. `ParseVerboseInfo` decodes only `runtimeSpec`, so the suite does
-  not use it yet; it is the genuine second surface `ExpectEnv` lacks.
-- **Both runtimes report container environment and annotations during
-  `Synchronize`**, so the two fidelity hatches in `sync_test.go` have never
-  fired. Two runtimes are not grounds for removing them.
 ## Input conformance
 
 What a runtime tells a plugin about a pod and a container, as opposed to what it
@@ -983,49 +957,41 @@ never a glob and never a sweep, because `/var/run/cdi` is where anything on the
 node may declare a device. The directory is removed too, but only when the run
 created it and only when it is empty.
 
-### Measured, 2026-10-20, CRI-O 1.37.2 / NRI v0.12.2 / runc
+### What the runs found
 
-33 of 41 fields measured, 17 subtests passing, eight findings. *Measured*, not
-*verified*: a field whose test ran and failed was still measured, so the count
-is what the run looked at rather than what it approved. The node was
-byte-identical before and after every run: the same 14 sandboxes, and no
-`/var/run/cdi` left behind.
+Per-runtime results are in [`RUNTIME-STATUS.md`](RUNTIME-STATUS.md), one
+section per measured runtime and version, with the side-by-side input table.
+They are deliberately not inlined here: a finding there is a fact about CRI-O
+1.37.2 or containerd 2.3.3 rather than about the suite, and it changes every
+time a new runtime or version is measured, while this document should not.
 
-| Field | What the runtime does |
-|---|---|
-| `Container.CDI_devices` | **not reported.** The device *is* injected -- `/dev/test-null` is a character device inside the container -- so CRI-O applies the CRI field and does not tell the plugin. Applied but not reported |
-| `Container.image` | not reported at all: `name`, `digest` and `config_digest` are all unset |
-| `LinuxContainer.sysctl` | empty for a pod created with `net.ipv4.ip_forward=1` |
-| `LinuxContainer.seccomp_profile` | reports `RUNTIME_DEFAULT` when `UNCONFINED` was asked for. The realized OCI spec carries no seccomp section, so here too the profile is applied and misreported |
-| `LinuxContainer.seccomp_policy` | not reported, while the realized spec carries a seccomp section. The policy too is applied and not reported |
-| `Container.started_at` | not populated at `PostStartContainer` |
-| `PodSandbox.pid` | not reported, while the sandbox has one. `Container.pid` *is* reported, so the two differ |
-| `Container.state` | `CONTAINER_CREATED` at `PostStartContainer`, not `CONTAINER_RUNNING`. The other two rungs pass |
+One distinction that file states and that any reader of a coverage count
+needs: *measured* is not *verified*. A field whose test ran and failed was
+still measured, so the count is what the run looked at rather than what it
+approved.
 
-Two of those rows exist only because a first version of their test could not
-have found them. The `seccomp_policy` check originally asked for an unconfined
-profile, which means the realized spec carries no seccomp section at all, so
-the only comparison available was "neither side has one" -- omission, the
-defect class the whole tier is for, was undetectable by construction. And both
-`pid` checks compared the reported value against an oracle that is left at zero
-when the runtime reports none, so `0 == 0` passed. A subset check needs its
-non-vacuity guard, and an agreement test must not arrange the state that hides
-what it is looking for.
+Two of the findings there exist only because a first version of their test
+could not have found them, and that is a fact about the suite rather than
+about any runtime. The `seccomp_policy` check originally asked for an
+unconfined profile, which means the realized spec carries no seccomp section
+at all, so the only comparison available was "neither side has one" --
+omission, the defect class the whole tier is for, was undetectable by
+construction. And both `pid` checks compared the reported value against an
+oracle that is left at zero when the runtime reports none, so `0 == 0` passed.
+A subset check needs its non-vacuity guard, and an agreement test must not
+arrange the state that hides what it is looking for.
 
 The two CDI assertions are independent on purpose, and that is what makes the
-first row attributable: a runtime can report a device it did not inject, or
+CDI result attributable: a runtime can report a device it did not inject, or
 inject one it did not report, and only running both says which happened.
 
-The seccomp row contradicts `capbilityVersionMap` on the
-`devel/version-exchange-and-capabilities` branch, which claims
-`INPUT_LINUX_SECURITY_PROFILE` from cri-o v1.34.0. That is the first measured
-instance of the gap between the version-based capability inference and what a
-runtime actually does, and it is the evidence that work needs.
-
-Eight rows in the table have no test yet and the coverage section names them
-every run: `LinuxPodSandbox.{cgroups_path,namespaces,resources}`,
-`Container.{hooks,status_reason,status_message}` and
-`LinuxContainer.{devices,resources}`.
+Two rows in the field table go unexercised and the coverage section names them
+every run: `Container.hooks`, which CRI cannot ask for and no runtime adds on
+its own here, and `Container.status_message`, which no runtime fills in for a
+container that merely exits non-zero. Both subtests skip rather than record the
+field as measured: a comparison where both sides are empty cannot fail, and
+counting it would inflate the coverage number with a check that proved
+nothing.
 
 ## Limitations
 
