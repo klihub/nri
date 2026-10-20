@@ -42,6 +42,17 @@ type PodSpec struct {
 	// -> kernel, and a feature that fails under one low-level runtime and passes
 	// under another is a defect in that runtime, not in NRI.
 	RuntimeHandler string
+	// Sysctls are linux sysctls to set on the pod.
+	//
+	// On the pod and not on a container, because that is where CRI carries
+	// them, while NRI reports them per container in LinuxContainer.sysctl. A
+	// test asserting about them sets them here and reads them there.
+	Sysctls map[string]string
+	// PodOverhead and PodResources are the sandbox's overhead and the sum of
+	// its containers' resources, which CRI carries on the sandbox config and
+	// NRI reports in LinuxPodSandbox.
+	PodOverhead  *Resources
+	PodResources *Resources
 	// Containers are created together with the pod. This is the path every
 	// driver supports, and the one tests should use: a driver whose containers
 	// cannot be created apart from their pod has no other.
@@ -66,6 +77,43 @@ type ContainerSpec struct {
 	// Labels and Annotations are set on the container.
 	Labels      map[string]string
 	Annotations map[string]string
+	// CDIDevices are fully qualified CDI device names to inject, such as
+	// nri-test.containerd.io/device=null. The device has to resolve against a
+	// CDI spec on the node or the runtime refuses the creation; see cdi.go.
+	CDIDevices []string
+	// SeccompProfile is the container's seccomp profile, or nil for the
+	// runtime's own default.
+	SeccompProfile *SeccompProfile
+	// OOMScoreAdj, RunAsUser and RunAsGroup are pointers so that "not set" is
+	// distinguishable from "set to zero". Zero is CRI's default for the first
+	// and root for the other two, so a value type would make the absence of a
+	// choice indistinguishable from the one value that proves nothing.
+	OOMScoreAdj *int64
+	RunAsUser   *int64
+	RunAsGroup  *int64
+	// SupplementalGroups are additional group ids for the container's process.
+	SupplementalGroups []int64
+}
+
+// SeccompProfileType is which kind of seccomp profile a container gets.
+type SeccompProfileType string
+
+const (
+	// SeccompRuntimeDefault is the runtime's own profile.
+	SeccompRuntimeDefault SeccompProfileType = "runtime_default"
+	// SeccompUnconfined is no seccomp sandboxing.
+	SeccompUnconfined SeccompProfileType = "unconfined"
+)
+
+// SeccompProfile is a container's seccomp profile.
+//
+// CRI's third profile type, localhost, is deliberately absent: it names a
+// profile file that would have to exist on the node, and it would tell an input
+// test nothing that unconfined does not. Unconfined is enough to be
+// distinguishable from the runtime default, which is all a fidelity assertion
+// needs.
+type SeccompProfile struct {
+	Type SeccompProfileType
 }
 
 // Mount is a mount to add to a container.

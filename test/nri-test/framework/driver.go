@@ -55,6 +55,19 @@ const (
 	// CapContainerMetadata means a container can carry labels and annotations
 	// of its own. A Kubernetes container cannot: its metadata is its pod's.
 	CapContainerMetadata
+	// CapCDIDevices means a container can be created naming a CDI device. CRI
+	// carries the names verbatim; a Kubernetes pod cannot name one at all,
+	// since those arrive through a device plugin.
+	CapCDIDevices
+	// CapSysctls means a pod can be created with arbitrary sysctls. CRI takes
+	// them verbatim. A Kubernetes pod can only set the ones kubelet considers
+	// safe, and the rest need kubelet's --allowed-unsafe-sysctls, which is node
+	// configuration this suite does not change.
+	CapSysctls
+	// CapSecurityContext means a container's user, groups and seccomp profile
+	// are applied exactly as the test states them. A Kubernetes pod expresses
+	// all three, but through admission and defaulting that can rewrite them.
+	CapSecurityContext
 )
 
 var capabilityNames = []struct {
@@ -68,6 +81,9 @@ var capabilityNames = []struct {
 	{CapExec, "Exec"},
 	{CapRawResources, "RawResources"},
 	{CapContainerMetadata, "ContainerMetadata"},
+	{CapCDIDevices, "CDIDevices"},
+	{CapSysctls, "Sysctls"},
+	{CapSecurityContext, "SecurityContext"},
 }
 
 // Has reports whether all capabilities in o are present in c.

@@ -1046,6 +1046,18 @@ func TestDriverProbeCapabilities(t *testing.T) {
 
 		require.False(t, caps.Has(framework.CapUpdatePodResources), "caps were %s", caps)
 	})
+
+	t.Run("should advertise the CRI-level input capabilities", func(t *testing.T) {
+		// CRI takes CDI device names, sysctls and the security context
+		// verbatim, so the input fidelity tests can choose their values here.
+		// Without these bits every one of those tests skips, and a suite of
+		// skips reads to its reader as a suite that measured something.
+		caps := testDriver(scopedConfig(), &fakeRuntime{}).probeCapabilities()
+
+		require.True(t, caps.Has(framework.CapCDIDevices|
+			framework.CapSysctls|
+			framework.CapSecurityContext), "caps were %s", caps)
+	})
 }
 
 // fakeImages is the part of the CRI image service the driver's pull path uses.

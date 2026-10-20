@@ -263,3 +263,24 @@ func TestInspectorFindsNothingWithoutARunID(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorContains(t, err, "no run id")
 }
+
+func TestK8sDriverWithholdsCRIOnlyCaps(t *testing.T) {
+	t.Run("should advertise none of the CRI-level input capabilities", func(t *testing.T) {
+		// A Kubernetes pod spec cannot name a CDI device at all: those arrive
+		// through a device plugin. It can name sysctls, but only ones kubelet
+		// considers safe -- net.* beyond a short allowlist needs kubelet's
+		// --allowed-unsafe-sysctls, which is node configuration this suite does
+		// not change. So all three bits stay CRI-only, and the input tests that
+		// need them skip here with a stated reason rather than running against a
+		// half-expressible spec.
+		d := &Driver{}
+
+		for _, c := range []framework.Capability{
+			framework.CapCDIDevices,
+			framework.CapSysctls,
+			framework.CapSecurityContext,
+		} {
+			require.False(t, d.Capabilities().Has(c), c.String())
+		}
+	})
+}
