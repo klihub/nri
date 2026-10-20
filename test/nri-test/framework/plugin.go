@@ -92,6 +92,128 @@ type TestPlugin struct {
 	ours      map[string]struct{}
 	ready     chan struct{}
 	readyOnce sync.Once
+	// capture says whether record retains hook payloads, and captured holds
+	// them. See Capture for why the default is off.
+	capture  bool
+	captured []*Captured
+}
+
+// Captured is the payload one NRI hook was given.
+//
+// Ctr is nil for a pod hook. The Event the same hook recorded carries only ids
+// and names, which is all a test asserting about ordering or arrival needs;
+// this is for a test asserting about the data itself.
+type Captured struct {
+	// Hook is the callback this payload arrived in.
+	Hook EventType
+	// Pod and Ctr are clones of what the hook was given. See record.
+	Pod *api.PodSandbox
+	Ctr *api.Container
+}
+
+// Capture turns payload retention on or off. It is off by default, and a test
+// that wants to read a hook's PodSandbox or Container has to ask.
+//
+// Off by default because this type is also the scalability recorder: the scale
+// tests time a burst of pods by the timestamps their hooks produce, and cloning
+// a PodSandbox and a Container on every one of several hundred callbacks would
+// be paid inside the interval being measured. EventQ.TrackCost is off by
+// default for the same reason.
+//
+// Call it before Start. Reading p.capture happens on the runtime's goroutine,
+// so flipping it mid-run is a data race on top of being unanswerable about
+// which hooks it applied to.
+func (p *TestPlugin) Capture(on bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.capture = on
+}
+
+// Captured returns the payload the given hook was given for the given pod and
+// container, or nil if it was not captured.
+//
+// Pass an empty ctrID for a pod hook. The most recent matching capture wins: a
+// hook can fire more than once for the same workload -- UpdateContainer most
+// obviously -- and the latest is what the runtime most recently believed.
+func (p *TestPlugin) Captured(hook EventType, podID, ctrID string) *Captured {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	for i := len(p.captured) - 1; i >= 0; i-- {
+		c := p.captured[i]
+		if c.Hook == hook && c.Pod.GetId() == podID && c.Ctr.GetId() == ctrID {
+			return c
+		}
+	}
+
+	return nil
+}
+
+// AllCaptured returns every captured payload, in arrival order.
+func (p *TestPlugin) AllCaptured() []*Captured {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return append([]*Captured{}, p.captured...)
+}
+
+// record adds a hook's event to the queue and, when capture is on, retains the
+// payload the hook was given.
+//
+// One function for both, so that a hook added later cannot record its event and
+// silently skip the capture. That is the same hazard filterUpdates carries its
+// warning comment for, and the input conformance tests would report such a hook
+// as a runtime that populated nothing rather than as a plugin that looked
+// nowhere.
+//
+// The payloads are cloned, not referenced: they belong to the stub's decoding
+// of the request and nothing in its contract says they outlive the callback, so
+// a capture that aliased them would report whatever they later became.
+//
+// Called after the scope check, from every scope-filtered callback, as
+// noteContainer is. Capturing before it would retain a workload we do not own.
+func (p *TestPlugin) record(hook EventType, pod *api.PodSandbox, ctr *api.Container) {
+	// Retained first, published second, and the order is load-bearing. The
+	// event is the signal Suite.CapturedAt waits on, and EventQ.Add releases
+	// those waiters before it returns -- so retaining the payload afterwards
+	// leaves a window in which a woken test reads p.captured before this
+	// goroutine has appended to it. CapturedAt reports a payload it cannot find
+	// as a finding against the runtime, so that window's symptom is an
+	// intermittent conformance failure blamed on a runtime that behaved
+	// correctly. Publishing last closes it: anything released by the event
+	// necessarily sees everything done before the event existed.
+	p.retain(hook, pod, ctr)
+
+	if ctr != nil {
+		p.q.Add(CtrEvent(p.FullName(), pod, ctr, hook))
+	} else {
+		p.q.Add(PodEvent(p.FullName(), pod, hook))
+	}
+}
+
+// retain stores a clone of a hook's payload, when capture is on.
+//
+// Separate from record only so that record's two steps cannot be reordered by
+// accident: the mutex is released before the event is published, which a single
+// function body with a deferred unlock could not express.
+func (p *TestPlugin) retain(hook EventType, pod *api.PodSandbox, ctr *api.Container) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if !p.capture {
+		return
+	}
+
+	c := &Captured{
+		Hook: hook,
+		Pod:  proto.Clone(pod).(*api.PodSandbox),
+	}
+	if ctr != nil {
+		c.Ctr = proto.Clone(ctr).(*api.Container)
+	}
+
+	p.captured = append(p.captured, c)
 }
 
 // NewTestPlugin returns a plugin named idx-name, subscribed to mask, recording
@@ -539,7 +661,7 @@ func (p *TestPlugin) RunPodSandbox(ctx context.Context, pod *api.PodSandbox) err
 		return nil
 	}
 
-	p.q.Add(PodEvent(p.FullName(), pod, RunPodSandbox))
+	p.record(RunPodSandbox, pod, nil)
 
 	if p.RunPodSandboxFn != nil {
 		return p.RunPodSandboxFn(ctx, pod)
@@ -554,7 +676,7 @@ func (p *TestPlugin) UpdatePodSandbox(ctx context.Context, pod *api.PodSandbox, 
 		return nil
 	}
 
-	p.q.Add(PodEvent(p.FullName(), pod, UpdatePodSandbox))
+	p.record(UpdatePodSandbox, pod, nil)
 
 	if p.UpdatePodSandboxFn != nil {
 		return p.UpdatePodSandboxFn(ctx, pod, overhead, res)
@@ -569,7 +691,7 @@ func (p *TestPlugin) PostUpdatePodSandbox(ctx context.Context, pod *api.PodSandb
 		return nil
 	}
 
-	p.q.Add(PodEvent(p.FullName(), pod, PostUpdatePodSandbox))
+	p.record(PostUpdatePodSandbox, pod, nil)
 
 	if p.PostUpdatePodSandboxFn != nil {
 		return p.PostUpdatePodSandboxFn(ctx, pod)
@@ -584,7 +706,7 @@ func (p *TestPlugin) StopPodSandbox(ctx context.Context, pod *api.PodSandbox) er
 		return nil
 	}
 
-	p.q.Add(PodEvent(p.FullName(), pod, StopPodSandbox))
+	p.record(StopPodSandbox, pod, nil)
 
 	if p.StopPodSandboxFn != nil {
 		return p.StopPodSandboxFn(ctx, pod)
@@ -599,7 +721,7 @@ func (p *TestPlugin) RemovePodSandbox(ctx context.Context, pod *api.PodSandbox) 
 		return nil
 	}
 
-	p.q.Add(PodEvent(p.FullName(), pod, RemovePodSandbox))
+	p.record(RemovePodSandbox, pod, nil)
 
 	if p.RemovePodSandboxFn != nil {
 		return p.RemovePodSandboxFn(ctx, pod)
@@ -618,7 +740,7 @@ func (p *TestPlugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, c
 	}
 
 	p.noteContainer(ctr)
-	p.q.Add(CtrEvent(p.FullName(), pod, ctr, CreateContainer))
+	p.record(CreateContainer, pod, ctr)
 
 	if p.CreateContainerFn != nil {
 		adjust, updates, err := p.CreateContainerFn(ctx, pod, ctr)
@@ -636,7 +758,7 @@ func (p *TestPlugin) PostCreateContainer(ctx context.Context, pod *api.PodSandbo
 	}
 
 	p.noteContainer(ctr)
-	p.q.Add(CtrEvent(p.FullName(), pod, ctr, PostCreateContainer))
+	p.record(PostCreateContainer, pod, ctr)
 
 	if p.PostCreateContainerFn != nil {
 		return p.PostCreateContainerFn(ctx, pod, ctr)
@@ -652,7 +774,7 @@ func (p *TestPlugin) StartContainer(ctx context.Context, pod *api.PodSandbox, ct
 	}
 
 	p.noteContainer(ctr)
-	p.q.Add(CtrEvent(p.FullName(), pod, ctr, StartContainer))
+	p.record(StartContainer, pod, ctr)
 
 	if p.StartContainerFn != nil {
 		return p.StartContainerFn(ctx, pod, ctr)
@@ -668,7 +790,7 @@ func (p *TestPlugin) PostStartContainer(ctx context.Context, pod *api.PodSandbox
 	}
 
 	p.noteContainer(ctr)
-	p.q.Add(CtrEvent(p.FullName(), pod, ctr, PostStartContainer))
+	p.record(PostStartContainer, pod, ctr)
 
 	if p.PostStartContainerFn != nil {
 		return p.PostStartContainerFn(ctx, pod, ctr)
@@ -684,7 +806,7 @@ func (p *TestPlugin) UpdateContainer(ctx context.Context, pod *api.PodSandbox, c
 	}
 
 	p.noteContainer(ctr)
-	p.q.Add(CtrEvent(p.FullName(), pod, ctr, UpdateContainer))
+	p.record(UpdateContainer, pod, ctr)
 
 	if p.UpdateContainerFn != nil {
 		updates, err := p.UpdateContainerFn(ctx, pod, ctr, res)
@@ -702,7 +824,7 @@ func (p *TestPlugin) PostUpdateContainer(ctx context.Context, pod *api.PodSandbo
 	}
 
 	p.noteContainer(ctr)
-	p.q.Add(CtrEvent(p.FullName(), pod, ctr, PostUpdateContainer))
+	p.record(PostUpdateContainer, pod, ctr)
 
 	if p.PostUpdateContainerFn != nil {
 		return p.PostUpdateContainerFn(ctx, pod, ctr)
@@ -718,7 +840,7 @@ func (p *TestPlugin) StopContainer(ctx context.Context, pod *api.PodSandbox, ctr
 	}
 
 	p.noteContainer(ctr)
-	p.q.Add(CtrEvent(p.FullName(), pod, ctr, StopContainer))
+	p.record(StopContainer, pod, ctr)
 
 	if p.StopContainerFn != nil {
 		updates, err := p.StopContainerFn(ctx, pod, ctr)
@@ -738,7 +860,7 @@ func (p *TestPlugin) RemoveContainer(ctx context.Context, pod *api.PodSandbox, c
 	// Noted here too, and never forgotten: a plugin may legitimately return an
 	// update for a container it is being told about at removal time.
 	p.noteContainer(ctr)
-	p.q.Add(CtrEvent(p.FullName(), pod, ctr, RemoveContainer))
+	p.record(RemoveContainer, pod, ctr)
 
 	if p.RemoveContainerFn != nil {
 		return p.RemoveContainerFn(ctx, pod, ctr)
