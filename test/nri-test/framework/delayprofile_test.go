@@ -86,6 +86,23 @@ plugins:
 	require.Equal(t, time.Millisecond, p.Delay(1, StopContainer))
 }
 
+// With no recorder there is no plugin for "*" to skip.
+func TestDelayFileStarCoversPluginZeroWhenTraced(t *testing.T) {
+	path := writeDelayFile(t, `
+profiles:
+  quick:
+    CreateContainer: 1ms
+plugins:
+  "*": quick
+`)
+
+	p, err := NewTracedScalePlan(2, nil, []DelaySource{{Path: path}})
+	require.NoError(t, err)
+
+	require.Equal(t, time.Millisecond, p.Delay(0, CreateContainer))
+	require.Equal(t, time.Millisecond, p.Delay(1, CreateContainer))
+}
+
 // Sources are merged per event, not swapped wholesale: a later one overrides
 // only the pairs it names.
 func TestDelayFileLaterSourceOverridesPerEvent(t *testing.T) {
