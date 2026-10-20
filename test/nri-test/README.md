@@ -36,6 +36,7 @@ inspector, because the suite runs on the node it observes.
 - [Recorded results](#recorded-results)
 - [Invariants a change must not break](#invariants-a-change-must-not-break)
 - [Measured facts](#measured-facts)
+- [Input conformance](#input-conformance)
 - [Coverage](#coverage)
 - [Known gaps and remaining work](#known-gaps-and-remaining-work)
 - [Open questions](#open-questions)
@@ -990,6 +991,114 @@ So they are not re-derived.
   backgrounded run at all; send such a run SIGTERM. In the foreground, INT,
   TERM and HUP all trap.
 
+## Input conformance
+
+What a runtime tells a plugin about a pod and a container, as opposed to what it
+does with what a plugin returns. This is the layer the adjustment tests rest on:
+those inject constants, so they would pass whether or not the `Container` a
+plugin was handed bore any resemblance to the container being created, while a
+real plugin computes its adjustment *from* the input.
+
+`framework/inputspec.go` is the specification. Every field of `PodSandbox`,
+`LinuxPodSandbox`, `Container` and `LinuxContainer` is either in `InputFields`,
+meaning a test verifies it, or in `inputFieldsOutOfScope` with a stated reason.
+A test walks the protocol's own descriptors and fails naming any field in
+neither, so `pkg/api` cannot grow a field that silently goes unlooked-at. The
+same table is what the summary's coverage section is computed from, which is why
+it is data rather than a set of test names.
+
+Each field carries the earliest hook by which the runtime must have populated
+it. Before that hook, absence is not a finding; at or after it, absence is. The
+strictness is a first guess held deliberately -- most fields are expected
+already at `CreateContainer`, and whether a runtime that fills one in only by
+`PostStartContainer` should fail is a question runs against more runtimes will
+answer. `RequiredAt` is one declaration per field so that moving a row costs one
+line.
+
+Two assertion forms, and the difference matters to what a failure means.
+
+**Fidelity** sets the value over CRI and reads it back off the hook request, so
+a failure is a runtime that did not report what it was given. Every value is one
+a stock container would not have: an `oom_score_adj` of zero is CRI's own
+default and would pass without the runtime reading the field at all.
+
+**Agreement** compares the plugin's view against what the runtime realized --
+the OCI spec it wrote, or CRI's own status -- so a failure is a report and a
+container that disagree. The comparison is subset, not equality: NRI projects
+the OCI spec rather than copying it, and a runtime adds defaults of its own, so
+equality would fail every runtime on things that are not defects. Subset alone
+cannot fail for a runtime that reports *nothing*, since the empty set is a
+subset of anything, so every agreement check pairs it with a non-vacuity guard.
+Omission is the defect class this layer exists for. Where a field may
+legitimately be empty the subtest omits the guard and says why; the omission is
+a claim that has to be argued, not a default.
+
+`Container.state` is neither form. It is populated at every hook with a
+different correct value at each, so it gets a ladder -- `CONTAINER_CREATED` at
+`PostCreateContainer`, `CONTAINER_RUNNING` at `PostStartContainer`,
+`CONTAINER_STOPPED` at `RemoveContainer`. `CONTAINER_UNKNOWN` is the enum's zero
+value, so the ladder is also the check that the field was set at all.
+
+### The CDI spec, and the one piece of node state
+
+A CDI device named on a CRI call has to resolve or the runtime refuses the
+creation, so the run writes a CDI spec and removes it again. It is the only node
+state outside a workload that this suite creates, and three conditions make that
+acceptable: the file goes in `/var/run/cdi`, which is transient, never
+`/etc/cdi`; the vendor is `nri-test.containerd.io`, so the devices are
+recognisable as ours on a shared node; and the devices are `/dev/null` and
+`/dev/zero` exposed as `/dev/test-null` and `/dev/test-zero`, so a fixture that
+outlived its run could not hand a container anything that matters.
+
+The file is named for the run and removed by the run that wrote it -- one path,
+never a glob and never a sweep, because `/var/run/cdi` is where anything on the
+node may declare a device. The directory is removed too, but only when the run
+created it and only when it is empty.
+
+### Measured, 2026-10-20, CRI-O 1.37.2 / NRI v0.12.2 / runc
+
+33 of 41 fields measured, 17 subtests passing, eight findings. *Measured*, not
+*verified*: a field whose test ran and failed was still measured, so the count
+is what the run looked at rather than what it approved. The node was
+byte-identical before and after every run: the same 14 sandboxes, and no
+`/var/run/cdi` left behind.
+
+| Field | What the runtime does |
+|---|---|
+| `Container.CDI_devices` | **not reported.** The device *is* injected -- `/dev/test-null` is a character device inside the container -- so CRI-O applies the CRI field and does not tell the plugin. Applied but not reported |
+| `Container.image` | not reported at all: `name`, `digest` and `config_digest` are all unset |
+| `LinuxContainer.sysctl` | empty for a pod created with `net.ipv4.ip_forward=1` |
+| `LinuxContainer.seccomp_profile` | reports `RUNTIME_DEFAULT` when `UNCONFINED` was asked for. The realized OCI spec carries no seccomp section, so here too the profile is applied and misreported |
+| `LinuxContainer.seccomp_policy` | not reported, while the realized spec carries a seccomp section. The policy too is applied and not reported |
+| `Container.started_at` | not populated at `PostStartContainer` |
+| `PodSandbox.pid` | not reported, while the sandbox has one. `Container.pid` *is* reported, so the two differ |
+| `Container.state` | `CONTAINER_CREATED` at `PostStartContainer`, not `CONTAINER_RUNNING`. The other two rungs pass |
+
+Two of those rows exist only because a first version of their test could not
+have found them. The `seccomp_policy` check originally asked for an unconfined
+profile, which means the realized spec carries no seccomp section at all, so
+the only comparison available was "neither side has one" -- omission, the
+defect class the whole tier is for, was undetectable by construction. And both
+`pid` checks compared the reported value against an oracle that is left at zero
+when the runtime reports none, so `0 == 0` passed. A subset check needs its
+non-vacuity guard, and an agreement test must not arrange the state that hides
+what it is looking for.
+
+The two CDI assertions are independent on purpose, and that is what makes the
+first row attributable: a runtime can report a device it did not inject, or
+inject one it did not report, and only running both says which happened.
+
+The seccomp row contradicts `capbilityVersionMap` on the
+`devel/version-exchange-and-capabilities` branch, which claims
+`INPUT_LINUX_SECURITY_PROFILE` from cri-o v1.34.0. That is the first measured
+instance of the gap between the version-based capability inference and what a
+runtime actually does, and it is the evidence that work needs.
+
+Eight rows in the table have no test yet and the coverage section names them
+every run: `LinuxPodSandbox.{cgroups_path,namespaces,resources}`,
+`Container.{hooks,status_reason,status_message}` and
+`LinuxContainer.{devices,resources}`.
+
 ## Coverage
 
 ### Ported from `pkg/adaptation`
@@ -1002,7 +1111,7 @@ So they are not re-derived.
 | `TestPodAndContainerRequestsAndEvents` -- no plugins | a full lifecycle with no plugin connected must succeed |
 | -- honour event subscriptions | one subtest per event mask plus the four combination masks; subscribed events arrive and unsubscribed ones do not |
 | -- multi-plugin invocation order | three plugins at index 00, 20, 99 with a shared ordered recorder |
-| `TestAdjust*` | **built:** annotation, environment, mount, cpuset and NUMA nodes. Annotation is create-only against the realized spec; the other four start the container, and cpuset and NUMA read the kernel. Five of roughly twenty-five subjects |
+| `TestAdjust*` | **built:** annotation, environment, mount, cpuset and NUMA nodes. Annotation is create-only against the realized spec; the other four start the container, and cpuset and NUMA read the kernel. Five of roughly twenty-five subjects. The input layer's coverage is no longer hand-counted: the run prints it, see [Input conformance](#input-conformance) |
 | `TestPluginConfigurationRequest` | runtime name and version non-empty; advertised timeouts sane |
 | `TestNRIVersionExchange` | advertised NRI version is valid semver, cross-checked against `InferVersionFromRuntime` |
 
@@ -1081,12 +1190,13 @@ injected into the runtime's own sync function; and all 15 tests in
 
 - **CRI-to-NRI hook mapping for pod resource updates** is unconfirmed in both
   runtimes. Handled by probing rather than assumption; see the skip above.
-- **`Container` proto fidelity during `Synchronize`.** Both runtimes report
-  environment and annotations, so the two hatches in `sync_test.go` have not
-  fired. How completely mounts, arguments and resources are populated is less
-  well measured. If fidelity turns out to be poor, the synchronization
-  assertions narrow to the fields that are reliably populated and the gap is
-  reported upstream.
+- **`Container` proto fidelity beyond the fields now measured.** Answered for
+  the 33 fields the input layer verifies; see
+  [Input conformance](#input-conformance). What is still open is the eight table
+  rows with no test, and whether the single required hook per field is the right
+  strictness -- `Container.started_at` and `Container.state` both fail against
+  CRI-O at the hook the table names, and whether that is the runtime's defect or
+  the table's expectation is not yet settled.
 - **Kubernetes mode observation.** `k8s.Driver` observes through the unchanged
   `cri.Inspector`, which requires the suite to run on the node whose runtime
   kubelet drives. If that turns out to be unacceptable, the fallback is a
