@@ -189,6 +189,15 @@ func Setup(cfg *Config, newDriver DriverFactory) error {
 	// fail Setup: another run's pods are the node's business, not this run's fault.
 	reportStalePods(os.Stdout, driver, cfg.Namespace)
 
+	// The test CDI spec, which Teardown removes. Not fatal: it is needed by one
+	// test, which gates on it, and a node where /var/run/cdi cannot be written
+	// is a node where that one test is unmeasured rather than a node the whole
+	// suite must refuse. The warning says what went unmeasured.
+	if err := WriteCDISpec(cfg.RunID); err != nil {
+		fmt.Printf("WARNING: the test CDI spec could not be written, so CDI "+
+			"device input is unmeasured in this run: %v\n", err)
+	}
+
 	return nil
 }
 
@@ -484,6 +493,17 @@ func Teardown(code int) {
 	defer func() {
 		TestReport.Print(os.Stdout, summaryHeader(code != 0))
 	}()
+
+	// Before the driver guard, and unconditionally: the spec is written late in
+	// Setup but a Setup that failed after writing it must still take it away,
+	// and a run with no driver is exactly such a run. RemoveCDISpec removes one
+	// path, the run's own, so this cannot touch anything else on the node.
+	if !TestConfig.KeepArtifacts {
+		if err := RemoveCDISpec(TestConfig.RunID); err != nil {
+			fmt.Printf("WARNING: removing the test CDI spec failed, so %s is "+
+				"left on the node: %v\n", CDISpecPath(TestConfig.RunID), err)
+		}
+	}
 
 	if driver == nil {
 		return

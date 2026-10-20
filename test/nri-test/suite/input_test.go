@@ -667,3 +667,53 @@ func TestInputStateLadder(t *testing.T) {
 		}
 	})
 }
+
+// TestInputCDIDevices is the test this whole layer was built for.
+//
+// containerd delivers CRI-injected CDI devices to plugins and CRI-O does not,
+// and the suite ran green against both before this existed. A conformance tool
+// whose central claim is that it finds such divergence cannot be silent about
+// one its maintainer already knows.
+func TestInputCDIDevices(t *testing.T) {
+	t.Run("should report a CRI-injected CDI device", func(t *testing.T) {
+		s := framework.NewSuite(t, "input-cdi")
+		framework.RequireCaps(t, framework.CapCDIDevices)
+
+		device := framework.CDIDeviceName("null")
+
+		plugin := inputPlugin(s)
+		ctrSpec := s.CtrSpec("ctr0")
+		ctrSpec.CDIDevices = []string{device}
+		_, ctr := s.CreatePodWithContainer("pod0", ctrSpec)
+		s.StartContainer(ctr)
+
+		got := s.CapturedAt(plugin, framework.CreateContainer, ctr)
+		if got == nil {
+			return
+		}
+
+		// Two assertions, and they are independent on purpose. A runtime can
+		// report a device it did not inject, or inject one it did not report,
+		// and those are different findings about it. Running only the first
+		// would leave the more interesting half of the second case unsaid.
+		//
+		// A runtime that refuses the creation outright never reaches here: that
+		// is a failed operation, recorded by the driver call above, and counting
+		// it as two unmet expectations would overstate what the run measured.
+		var shown []string
+		for _, d := range got.Ctr.GetCDIDevices() {
+			shown = append(shown, d.GetName())
+		}
+
+		s.ExpectShown("CDI_devices", framework.ExpectShownStrings(
+			"CDI_devices", []string{device}, shown))
+
+		// The second surface: the container's own kernel. /dev/test-null is the
+		// name the test CDI spec gives it, so a device under that name cannot
+		// have come from the image or from the runtime's own defaults.
+		s.ExpectAgrees("CDI_devices", "container kernel",
+			framework.ExpectScalarEqual("/dev/test-null is a character device",
+				"yes", s.Exec(ctr, "sh", "-c",
+					"test -c /dev/test-null && echo yes || echo no")))
+	})
+}
