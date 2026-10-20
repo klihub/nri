@@ -105,7 +105,8 @@ func (d *Driver) probeCapabilities() framework.Capability {
 		framework.CapCDIDevices |
 		framework.CapSysctls |
 		framework.CapSecurityContext |
-		framework.CapDevices
+		framework.CapDevices |
+		framework.CapObservedRuntimeState
 }
 
 // CreatePod creates a pod sandbox and any containers its spec carries.

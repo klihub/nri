@@ -2133,3 +2133,23 @@ func TestSuiteCovered(t *testing.T) {
 		require.Contains(t, ft.allErrors(), "Container.nonesuch")
 	})
 }
+
+// The disclaimers in a mock run's summary hang on one line in summaryHeader,
+// and nothing read it: deleting that line left every test green and every
+// mock run without both sentences. This is the test that notices.
+func TestSummaryHeaderMarksARunWithNoRuntime(t *testing.T) {
+	savedName, savedVersion, savedNRI := runtimeName, runtimeVersion, runtimeNRIVersion
+	t.Cleanup(func() {
+		runtimeName, runtimeVersion, runtimeNRIVersion = savedName, savedVersion, savedNRI
+	})
+
+	runtimeName, runtimeVersion, runtimeNRIVersion = "mock", "0 (no runtime)", "0.9.0"
+
+	useConfig(t, &Config{RunID: "run0", Driver: DriverMock})
+	require.True(t, summaryHeader(false).NoRuntime,
+		"a mock run has no runtime under test and the summary has to say so")
+
+	useConfig(t, &Config{RunID: "run0", Driver: DriverCRI})
+	require.False(t, summaryHeader(false).NoRuntime,
+		"a CRI run does have a runtime, and its summary must read as it always did")
+}

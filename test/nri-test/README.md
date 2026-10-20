@@ -10,12 +10,20 @@ in-process: they assert on the `CreateContainerResponse` the `Adaptation`
 object returns. They cannot tell whether a runtime embedding NRI honours that
 response. This closes that gap.
 
-Two operating modes, selected by `-nri-test.driver`. **CRI mode** creates pods
-and containers directly over CRI. **Kubernetes mode** creates them through a
-cluster with `client-go`, so kubelet makes them the way it does a user's. Both
-reuse the entire assertion layer unchanged, which is what the architecture
-below is shaped for: a Kubernetes driver pairs with the *unchanged* CRI
-inspector, because the suite runs on the node it observes.
+Three operating modes, selected by `-nri-test.driver`. **CRI mode** creates
+pods and containers directly over CRI. **Kubernetes mode** creates them through
+a cluster with `client-go`, so kubelet makes them the way it does a user's. All
+three reuse the entire assertion layer unchanged, which is what the
+architecture below is shaped for: a Kubernetes driver pairs with the
+*unchanged* CRI inspector, because the suite runs on the node it observes.
+
+**Mock mode** creates nothing. It stands up `pkg/adaptation` as the runtime, so
+the suite runs with no node, no root and no container runtime, and what it
+measures is the NRI side of the protocol -- the stub, the proto round trip, the
+merge across plugins, and the in-tree adjustment-to-spec mapping. It is a
+control arm rather than a third runtime: a finding present on a real runtime
+but not here is below NRI, and one present on all three is the suite's own
+expectation. See [`RUNTIME-STATUS.md`](RUNTIME-STATUS.md).
 
 ## Contents
 
@@ -99,6 +107,12 @@ selectable, so a failure can be located rather than merely observed. See
 make nri-test          # from the repository root, writes build/bin/nri-test
 ```
 
+That target depends on `go-generate`, which writes `pkg/version/info/git`.
+The file is generated and not committed, and it is what gives the binary a
+real NRI version to report: a build without it reports `0.0.0-unknown`, and
+every test behind `RequireNRIVersion` skips. So a `make` build measures
+version-gated behaviour and a bare `go test` in a fresh checkout does not.
+
 One binary, packaged like `critest`: `-test.run` selects tests, `-test.v`
 controls verbosity, and the suite's own flags are registered from `init()`.
 
@@ -115,10 +129,30 @@ go test -race ./framework/... ./driver/...
 go vet ./framework/... ./driver/...
 ```
 
-The `suite` package is not unit-testable: its `TestMain` calls
-`framework.Setup`, which needs root and a live runtime, so `go test ./...`
-fails there on any ordinary workstation. That failure is expected and is not a
-regression. Listing is the exception and works anywhere:
+The `suite` package needs a driver, because its `TestMain` calls
+`framework.Setup`. The mock driver is one, and needs nothing else, so the
+whole conformance suite runs on an ordinary workstation in a few seconds:
+
+```
+cd test/nri-test
+go test ./suite/ -v -nri-test.driver=mock -nri-test.collect-failures
+```
+
+Keep the `-v`: without it `go test` swallows the end-of-run summary on
+success, which is where the findings, the skips and the input field coverage
+are printed.
+
+`-nri-socket` needs no value here. This driver listens on a socket of its
+own: the default path is replaced by a temporary one, since a driver that
+creates nothing has no business on a node's socket, and any path something
+already answers on is refused outright. Adaptation's listener unlinks
+whatever sits at the path before binding, so without those two guards a mock
+run pointed at a live runtime would steal its socket and delete it again on
+close.
+
+A plain `go test ./...` still fails, because the default driver is `cri` and
+that one does need root and a live runtime. That failure is expected and is
+not a regression. Listing needs no driver at all:
 
 ```
 ./build/bin/nri-test -test.list '.*'
@@ -259,13 +293,22 @@ is pinned by a test.
 | `CapContainerMetadata` | yes | no -- a container has its pod's metadata |
 | `CapCDIDevices` | yes | no -- a pod cannot name a CDI device; those arrive through a device plugin |
 | `CapDevices` | yes | no -- a pod cannot ask for a host device by path |
+| `CapObservedRuntimeState` | yes | yes, read through the unchanged CRI inspector |
 | `CapSysctls` | yes | no -- only the sysctls kubelet deems safe, and the rest need node configuration |
 | `CapSecurityContext` | yes | no -- expressible, but through admission and defaulting that can rewrite it |
+
+The mock driver is a third column, and a short one: it advertises the
+request-side bits -- lifecycle, resources, metadata, sysctls, security context,
+devices -- and withholds `CapExec`, `CapCDIDevices`,
+`CapObserveOpError`, `CapUpdatePodResources` and `CapObservedRuntimeState`,
+because nothing runs, no CDI registry exists, the errors it would observe are
+its own, and the pids, timestamps, states and termination status it would
+report are its own invention rather than a runtime's.
 
 A test declares what it needs through `RequireCaps`; the framework skips it,
 with a reason, when the active driver lacks them. The CRI driver has every
 capability, so the gates do nothing there; the Kubernetes driver advertises
-`CapExec` alone, which is what exercises them.
+`CapExec` and `CapObservedRuntimeState`, which is what exercises them.
 
 `CapContainerLifecycle` means containers can be made in an existing pod and
 started, stopped and removed apart from it. No test needs that: they create
@@ -763,7 +806,7 @@ flags, which follow `critest` naming:
 | `-nri-test.keep-artifacts` | false | skip cleanup for debugging |
 | `-nri-test.timeout` | 30s | per-operation timeout |
 | `-nri-test.collect-failures` | false | collect expectation failures into an end-of-run summary instead of failing at the first; the run still exits non-zero if anything was collected |
-| `-nri-test.driver` | cri | what creates the tests' workloads: `cri` (needs kubelet stopped) or `k8s` (pods through the API server, needs kubelet running) |
+| `-nri-test.driver` | cri | what creates the tests' workloads: `cri` (needs kubelet stopped), `k8s` (pods through the API server, needs kubelet running) or `mock` (pkg/adaptation, no runtime and no root) |
 | `-nri-test.cri-namespaces` | k8s | namespace options the `cri` driver creates pods with: `k8s` sends what kubelet sends (network and IPC per pod, a PID namespace per container), `cri` sends none, so cri-api's zero values share one PID namespace per pod. The `k8s` driver is not affected |
 | `-nri-test.k8s-node` | this host | node the k8s driver places pods on |
 | `-nri-test.kubeconfig` | client-go rules | kubeconfig for the k8s driver |

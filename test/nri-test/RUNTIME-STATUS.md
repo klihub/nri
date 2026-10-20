@@ -151,6 +151,111 @@ against the container's.
 - Pod resource updates are skipped on both: they are not verified against
   any runtime yet.
 
+## Measured, 2026-10-20: the mock arm, no runtime under test
+
+`-nri-test.driver=mock` runs the conformance suite against
+`pkg/adaptation` with no runtime, no node and no root. It is a control
+arm, not a third runtime: what it measures is the NRI side of the
+protocol -- the stub, the proto round trip, the merge across plugins, and
+the in-tree adjustment-to-spec mapping -- and nothing below it. A clean
+run here says that chain held. It says nothing about CRI-O or containerd,
+and the summary says so twice.
+
+**81 passed, 0 failed. 28 of 41 input fields measured.**
+
+Fourteen skips are capability gates: seven need `ObservedRuntimeState`,
+which this driver withholds because the pids, timestamps, lifecycle
+states, addresses and termination status it would report are its own
+invention; five need `Exec`, which needs a running container; one needs
+`CDIDevices`; and one needs `ContainerLifecycle`. Of the rest, the
+runtime-handler and pod-resource gates skip on any driver, one is
+`Container.hooks`, which no runtime adds here, and **one is inherent to
+the arm**: the second half of `TestNRIVersionExchange` cross-checks the
+advertised NRI version against the one inferred from the runtime
+version, and there is no runtime here to infer from. The arm advertises
+the NRI version it was built from, so `RequireNRIVersion` and every
+other version gate run here -- but only in a build that generated
+`pkg/version/info/git`, which `make nri-test` does and a bare
+`go test` in a fresh checkout does not.
+
+### What the arm settles
+
+| Field | mock | CRI-O 1.37.2 | containerd 2.3.3 | What that means |
+|---|---|---|---|---|
+| `Container.image` | **passes** | not reported | not reported | NRI carries it; the gap is **below NRI** -- the CRI layer, or how both runtimes populate the NRI message from it |
+| `LinuxContainer.sysctl` | **passes** | empty | empty | same: the transport is fine, the gap is below it |
+| `Container.status_reason` | withheld | not reported | not reported | unclassified: this driver decides how a container ends, so it cannot answer |
+
+That is the arm's purpose, discharged on its first run. Two of the three
+fields that fail identically on both runtimes are now located below NRI
+rather than merely "pointing at the protocol or the CRI layer". What it
+cannot do is go further: with no CRI beneath it, the mock cannot say
+whether CRI hands the runtime an image name at all.
+
+### What it cannot cover
+
+- Everything needing a kernel: in-container observation and the cgroup
+  readback. This costs more than it sounds: four of the five adjustment
+  subtests assert the spec half and the kernel half in one case and gate
+  on `Exec`, so they skip **whole**. The end-to-end exercise of
+  `generate.Adjust` under this arm is annotations alone. The spec's third
+  payoff -- putting `pkg/runtime-tools/generate` under test across its
+  ~25 entry points, including the RDT, io-priority and net-device
+  dimensions no node here can reach -- is therefore **not** delivered.
+  Splitting those four subtests into a spec half and a kernel half is the
+  cheap follow-up that would deliver it.
+- `Container.CDI_devices`: the mock runs no CDI registry, so it could
+  only report a device name it never injected, and the CDI test's two
+  assertions exist precisely to tell those apart.
+- The fields it authors, listed above. They print as not exercised, and
+  a test fails if one of them is ever counted as measured here.
+
+### What "agreement" means on this arm
+
+Nine fields are counted in the 28 but measure something weaker than they
+do against a runtime: `Container.rlimits`,
+`LinuxContainer.{namespaces,cgroups_path,devices,resources,seccomp_policy}`
+and `LinuxPodSandbox.{cgroups_path,namespaces,resources}`. `Inspect`
+returns the same `*rspec.Spec` that the hook message was projected from,
+and the suite's input plugin returns no adjustment, so both sides of
+those comparisons come from this driver's own model.
+
+They are not vacuous -- the shown side makes the full
+stub-to-proto-to-Adaptation round trip, so a transport that dropped
+namespaces or mangled a cgroups path would still be caught -- but what
+they measure here is **transport, not agreement**. Read those nine rows
+as "NRI carried it", not as "the runtime realized what it reported". The
+agreement tier means what it says only against a real runtime, and the
+design's rule is the reason this paragraph exists rather than nine gates:
+gating them would discard a real transport check, and leaving them
+undisclosed would overstate the arm.
+
+### What it found about the suite and the mock, not about NRI
+
+- A runtime must hold `Adaptation.BlockPluginSync()` around each hook it
+  dispatches. A plugin becomes eligible for events only after its
+  `Synchronize` call returns, so a plugin that considers itself ready can
+  still miss a hook dispatched in that window. Real runtimes hold the
+  block; a runtime fast enough to create a pod inside the window has to.
+  This driver takes it per `Adaptation` call rather than across a whole
+  driver operation, which matches NRI's own per-call granularity and
+  narrows the window rather than closing it between calls.
+- Four gaps in the mock itself, all fixed and all pinned by tests: a
+  cgroups path built from names where a runtime builds it from ids; a pod
+  removal that did not stop its containers first; a security context it
+  advertised and did not apply, which left the suite's `seccomp_policy`
+  check comparing two empties and passing; and a sysctl map shared by
+  every container in a pod, where one container's adjustment would have
+  rewritten its siblings' realized specs and produced a false finding
+  against NRI.
+- It will not take a node's NRI socket. Adaptation's listener unlinks
+  whatever sits at the path before binding, so a mock run pointed at
+  `/var/run/nri/nri.sock` as root would have stolen a live runtime's
+  socket and removed it on exit. The driver now listens on a private
+  temporary socket unless a path is given explicitly, refuses one
+  something is already answering on, and publishes the path it chose so
+  the suite's plugins find it.
+
 ### Reproducing it
 
 ```sh

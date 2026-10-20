@@ -588,3 +588,35 @@ func TestCoverageSectionAbsentWithoutInputTests(t *testing.T) {
 
 	require.NotContains(t, b.String(), "Input field coverage")
 }
+
+// A run with no runtime behind it must be unmistakable in the summary, in the
+// header and in the sign-off both. A reader quoting a clean mock run as a
+// runtime result is the failure this guards against, and the suite has
+// already shipped a summary that read clean while 34 tests failed.
+func TestReportPrintSaysWhenThereIsNoRuntimeUnderTest(t *testing.T) {
+	var b strings.Builder
+	(&Report{}).Print(&b, Header{Runtime: "mock", RuntimeVersion: "0 (no runtime)", NoRuntime: true})
+
+	// Whitespace-normalised: the summary wraps its prose, and this test is
+	// about what it says, not where the lines break.
+	out := strings.Join(strings.Fields(strings.ToLower(b.String())), " ")
+
+	require.Contains(t, out, "no runtime under test",
+		"the header has to say there is no runtime")
+	require.Contains(t, out, "says nothing about any runtime",
+		"the sign-off has to refuse a reading it cannot support")
+	require.NotContains(t, out, "conformant")
+}
+
+// And a run against a real runtime keeps the wording it had: a reader
+// comparing two runs must see the difference in the mock's output, not in the
+// runtime's.
+func TestReportPrintLeavesARealRuntimeSummaryAlone(t *testing.T) {
+	var b strings.Builder
+	(&Report{}).Print(&b, Header{Runtime: "cri-o", RuntimeVersion: "1.37.2"})
+	out := strings.Join(strings.Fields(strings.ToLower(b.String())), " ")
+
+	require.NotContains(t, out, "no runtime under test")
+	require.NotContains(t, out, "says nothing about any runtime")
+	require.Contains(t, out, "no expectation failures")
+}

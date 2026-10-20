@@ -135,6 +135,11 @@ type Header struct {
 	// Collecting says whether expectation failures were collected or whether
 	// the run stopped each test at its first one.
 	Collecting bool
+	// NoRuntime says there was no runtime under test: the run measured the
+	// NRI side of the protocol against a driver that plays the runtime
+	// itself. A summary of such a run says so twice, because a reader who
+	// quotes it as a runtime result has been misled by it.
+	NoRuntime bool
 	// Failed says whether the run failed, as go test's own verdict reported it.
 	//
 	// A Report cannot know this, and that is the point. Most of the suite's
@@ -266,7 +271,7 @@ func (r *Report) Print(w io.Writer, hdr Header) {
 	writeOperationFailures(&b, operations)
 	writeSkips(&b, r.Skips())
 	writeCoverage(&b, r.CoverageOf(), InputFields)
-	writeSummaryCount(&b, len(expectations), len(operations), hdr.Failed)
+	writeSummaryCount(&b, len(expectations), len(operations), hdr.Failed, hdr.NoRuntime)
 
 	fmt.Fprint(w, b.String())
 }
@@ -304,6 +309,10 @@ func writeSummaryHeader(b *strings.Builder, hdr Header) {
 	mode := "stop at the first expectation failure (default)"
 	if hdr.Collecting {
 		mode = "collect expectation failures (-nri-test.collect-failures)"
+	}
+
+	if hdr.NoRuntime {
+		runtime += " -- no runtime under test"
 	}
 
 	fmt.Fprintf(b, "runtime:         %s\n", runtime)
@@ -396,7 +405,7 @@ func writeSkips(b *strings.Builder, skips []Skip) {
 // would hand a reader of a failing run the same sentence a clean one gets. That
 // is the shape of the 34-failure sign-off, in a place no single test could see,
 // so the failing case says plainly that it is blind.
-func writeSummaryCount(b *strings.Builder, expectations, operations int, failed bool) {
+func writeSummaryCount(b *strings.Builder, expectations, operations int, failed, noRuntime bool) {
 	// Only when neither kind was recorded. This condition is the defect: with it
 	// reading `expectations == 0` alone, a run whose every test was ended by a
 	// refused driver call -- 34 of them, on the first CRI-O sweep -- signed off
@@ -420,6 +429,12 @@ func writeSummaryCount(b *strings.Builder, expectations, operations int, failed 
 		b.WriteString("\nNo expectation failures and no failed operations were collected. " +
 			"That says\nonly that the expectations this run reached were met; it is not a " +
 			"verdict on\nanything it did not check.\n")
+
+		if noRuntime {
+			b.WriteString("\nThere was no runtime under test: this run measured the NRI side " +
+				"of the\nprotocol against a driver that plays the runtime itself, so it says " +
+				"nothing\nabout any runtime.\n")
+		}
 
 		return
 	}

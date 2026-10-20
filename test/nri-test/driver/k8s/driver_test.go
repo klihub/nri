@@ -36,10 +36,14 @@ func testDriver() (*Driver, *fake.Clientset) {
 	return newDriver(cfg, cs, nil, "node1"), cs
 }
 
-func TestCapabilitiesAreExecOnly(t *testing.T) {
+// Exec, because it execs through the API server, and
+// ObservedRuntimeState, because it observes through the unchanged CRI
+// inspector and so reads what the node's runtime produced. Everything else a
+// Kubernetes pod cannot express, and the gates say so with a reason.
+func TestCapabilitiesAreExecAndObservationOnly(t *testing.T) {
 	d, _ := testDriver()
 
-	require.Equal(t, framework.CapExec, d.Capabilities())
+	require.Equal(t, framework.CapExec|framework.CapObservedRuntimeState, d.Capabilities())
 	require.False(t, d.ConflictsWithKubelet())
 }
 

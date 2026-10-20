@@ -543,6 +543,10 @@ func summaryHeader(failed bool) Header {
 		RunID:          TestConfig.RunID,
 		Collecting:     TestConfig.CollectFailures,
 		Failed:         failed,
+		// Keyed off the driver rather than off a method of its own: one bool
+		// does not earn a place in the Driver interface, and the driver that
+		// plays the runtime is the one the flag names.
+		NoRuntime: TestConfig.Driver == DriverMock,
 	}
 }
 

@@ -140,7 +140,9 @@ func (d *Driver) Name() string { return "k8s" }
 // Capabilities returns what this driver can express: exec, and nothing that
 // needs a container apart from its pod or resources a pod spec cannot state.
 // Exec goes through the API server, see Inspector.
-func (d *Driver) Capabilities() framework.Capability { return framework.CapExec }
+func (d *Driver) Capabilities() framework.Capability {
+	return framework.CapExec | framework.CapObservedRuntimeState
+}
 
 // ConflictsWithKubelet is false: kubelet running is this driver's precondition.
 func (d *Driver) ConflictsWithKubelet() bool { return false }

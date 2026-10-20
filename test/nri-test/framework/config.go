@@ -84,6 +84,11 @@ const (
 	// kubelet running, so its workloads arrive the way a user's do.
 	DriverCRI = "cri"
 	DriverK8s = "k8s"
+	// DriverMock runs the suite against pkg/adaptation with no runtime at
+	// all, so what it measures is the NRI side of the protocol and nothing
+	// below it. It is a control arm: a clean run says the NRI chain held, not
+	// that any runtime is conformant.
+	DriverMock = "mock"
 
 	// NamespacesK8s and NamespacesCRI name the namespace options the CRI driver
 	// creates pods with. NamespacesK8s sends what kubelet sends for an ordinary
@@ -276,9 +281,9 @@ func (c *Config) Complete() error {
 	if c.Driver == "" {
 		c.Driver = DriverCRI
 	}
-	if c.Driver != DriverCRI && c.Driver != DriverK8s {
-		return fmt.Errorf("unknown -nri-test.driver %q: use %q or %q",
-			c.Driver, DriverCRI, DriverK8s)
+	if c.Driver != DriverCRI && c.Driver != DriverK8s && c.Driver != DriverMock {
+		return fmt.Errorf("unknown -nri-test.driver %q: use %q, %q or %q",
+			c.Driver, DriverCRI, DriverK8s, DriverMock)
 	}
 	if c.CRINamespaces == "" {
 		c.CRINamespaces = NamespacesK8s
