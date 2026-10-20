@@ -2096,3 +2096,40 @@ func (i *podInspector) InspectPod(context.Context, string) (*ObservedPod, error)
 }
 
 var _ Inspector = &podInspector{}
+
+func TestSuiteCovered(t *testing.T) {
+	useConfig(t, &Config{Timeout: time.Minute, Namespace: "nri-test"})
+
+	t.Run("should record each field against its hook", func(t *testing.T) {
+		saved := TestReport
+		TestReport = &Report{}
+
+		t.Cleanup(func() { TestReport = saved })
+
+		s := newFakeSuite(&fakeT{})
+		s.Covered(CreateContainer, "Container.CDI_devices", "LinuxContainer.sysctl")
+
+		got := TestReport.CoverageOf()
+		require.Len(t, got, 2)
+		require.Equal(t, "Container.CDI_devices", got[0].Field)
+		require.Equal(t, CreateContainer, got[0].Hook)
+		require.Equal(t, "LinuxContainer.sysctl", got[1].Field)
+	})
+
+	t.Run("should reject a field the table does not name", func(t *testing.T) {
+		// A typo here would be reported forever as a field no run exercises,
+		// while the field it meant would also read as unexercised. Two wrong
+		// lines from one mistake, and neither of them loud.
+		saved := TestReport
+		TestReport = &Report{}
+
+		t.Cleanup(func() { TestReport = saved })
+
+		ft := &fakeT{}
+		s := newFakeSuite(ft)
+
+		require.Panics(t, func() { s.Covered(CreateContainer, "Container.nonesuch") },
+			"fatalf must not return")
+		require.Contains(t, ft.allErrors(), "Container.nonesuch")
+	})
+}

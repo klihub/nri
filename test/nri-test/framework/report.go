@@ -101,6 +101,19 @@ type Skip struct {
 	Reason string
 }
 
+// Coverage is one input field a run verified.
+//
+// Recorded by the test that checked it, so the summary reports what a run
+// actually did rather than what the suite is capable of. The hand-counted
+// coverage claims this replaces went stale three separate times.
+type Coverage struct {
+	// Field is the field's qualified name, as InputFields names it:
+	// "Container.CDI_devices".
+	Field string
+	// Hook is the callback the field was read from.
+	Hook EventType
+}
+
 // Header describes the run a summary belongs to.
 //
 // A summary that did not name these is not quotable: the same finding means
@@ -145,6 +158,7 @@ type Report struct {
 	mu       sync.Mutex
 	findings []Finding
 	skips    []Skip
+	coverage []Coverage
 }
 
 // TestReport is what the suite collects into, and what TestMain's exit code
@@ -181,6 +195,27 @@ func (r *Report) Skips() []Skip {
 	defer r.mu.Unlock()
 
 	return slices.Clone(r.skips)
+}
+
+// AddCoverage records that a run verified an input field.
+//
+// Called by the test that read the field, after its assertions, so that what is
+// recorded is a field this run measured. A field recorded before its
+// assertions would be counted even where the test went on to be skipped.
+func (r *Report) AddCoverage(c Coverage) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.coverage = append(r.coverage, c)
+}
+
+// CoverageOf returns the input fields the run verified, in arrival order. A
+// clone, for the reason Findings returns one.
+func (r *Report) CoverageOf() []Coverage {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return slices.Clone(r.coverage)
 }
 
 // Findings returns what was collected, in the order it arrived.
@@ -230,6 +265,7 @@ func (r *Report) Print(w io.Writer, hdr Header) {
 	writeFindings(&b, expectations)
 	writeOperationFailures(&b, operations)
 	writeSkips(&b, r.Skips())
+	writeCoverage(&b, r.CoverageOf(), InputFields)
 	writeSummaryCount(&b, len(expectations), len(operations), hdr.Failed)
 
 	fmt.Fprint(w, b.String())
@@ -416,4 +452,51 @@ func orUnknown(s string) string {
 	}
 
 	return s
+}
+
+// writeCoverage writes what the run measured of the input surface, against the
+// table of everything it could have.
+//
+// The section is absent from a run that measured no input fields at all: a run
+// of the adjustment tests alone would otherwise be told it covered 0 of 41,
+// which describes a run that asked and failed rather than one that never asked.
+//
+// A field counts as covered when its test ran and recorded it. A field whose
+// test skipped is NOT covered -- a skip says a property went unverified here,
+// which is the opposite of a pass, and the one way this reporting can go wrong
+// is by letting a run of skips read as a run that measured something. A field
+// whose test ran and failed IS covered: the run looked, and the finding above
+// says what it found.
+func writeCoverage(b *strings.Builder, covered []Coverage, table []InputField) {
+	if len(covered) == 0 {
+		return
+	}
+
+	seen := map[string]bool{}
+	for _, c := range covered {
+		seen[c.Field] = true
+	}
+
+	var missing []string
+	for _, f := range table {
+		name := f.Message + "." + f.Name
+		if !seen[name] {
+			missing = append(missing, name)
+		}
+	}
+
+	fmt.Fprintf(b, "\nInput field coverage: %d of %d measured in this run\n",
+		len(seen), len(table))
+
+	for _, c := range covered {
+		fmt.Fprintf(b, "\n  %s at %s\n", c.Field, c.Hook)
+	}
+
+	if len(missing) > 0 {
+		b.WriteString("\n  not exercised by this run:\n")
+
+		for _, name := range missing {
+			fmt.Fprintf(b, "    %s\n", name)
+		}
+	}
 }

@@ -76,6 +76,12 @@ func TestInputFidelity(t *testing.T) {
 			return
 		}
 
+		s.Covered(framework.RunPodSandbox,
+			"PodSandbox.name",
+			"PodSandbox.uid",
+			"PodSandbox.labels",
+			"PodSandbox.annotations")
+
 		s.ExpectShown("name", framework.ExpectShownScalar(
 			"name", spec.Name, got.Pod.GetName()))
 		s.ExpectShown("uid", framework.ExpectShownScalar(
@@ -108,6 +114,9 @@ func TestInputFidelity(t *testing.T) {
 			return
 		}
 
+		s.Covered(framework.RunPodSandbox,
+			"PodSandbox.runtime_handler")
+
 		s.ExpectShown("runtime_handler", framework.ExpectShownScalar(
 			"runtime_handler", spec.RuntimeHandler, got.Pod.GetRuntimeHandler()))
 	})
@@ -124,6 +133,9 @@ func TestInputFidelity(t *testing.T) {
 		if got == nil {
 			return
 		}
+
+		s.Covered(framework.RunPodSandbox,
+			"LinuxPodSandbox.cgroup_parent")
 
 		s.ExpectShown("cgroup_parent", framework.ExpectShownScalar(
 			"cgroup_parent", spec.CgroupParent, got.Pod.GetLinux().GetCgroupParent()))
@@ -143,6 +155,10 @@ func TestInputFidelity(t *testing.T) {
 		if got == nil {
 			return
 		}
+
+		s.Covered(framework.RunPodSandbox,
+			"LinuxPodSandbox.pod_overhead",
+			"LinuxPodSandbox.pod_resources")
 
 		linux := got.Pod.GetLinux()
 		s.ExpectShown("pod_overhead", framework.ExpectShownScalar(
@@ -164,6 +180,10 @@ func TestInputFidelity(t *testing.T) {
 		if got == nil {
 			return
 		}
+
+		s.Covered(framework.CreateContainer,
+			"Container.name",
+			"Container.pod_sandbox_id")
 
 		s.ExpectShown("name", framework.ExpectShownScalar(
 			"name", ctrSpec.Name, got.Ctr.GetName()))
@@ -189,6 +209,10 @@ func TestInputFidelity(t *testing.T) {
 			return
 		}
 
+		s.Covered(framework.CreateContainer,
+			"Container.annotations",
+			"Container.labels")
+
 		s.ExpectShown("annotations", framework.ExpectShownMap(
 			"annotations", ctrSpec.Annotations, got.Ctr.GetAnnotations()))
 		s.ExpectShown("labels", framework.ExpectShownMap(
@@ -210,6 +234,10 @@ func TestInputFidelity(t *testing.T) {
 
 		// Container.args carries the whole command line, entry point first: NRI
 		// has one field where CRI has Command and Args.
+		s.Covered(framework.CreateContainer,
+			"Container.args",
+			"Container.env")
+
 		s.ExpectShown("args", framework.ExpectShownStrings(
 			"args", ctrSpec.Command, got.Ctr.GetArgs()))
 		s.ExpectShown("env", framework.ExpectShownStrings(
@@ -231,6 +259,9 @@ func TestInputFidelity(t *testing.T) {
 			return
 		}
 
+		s.Covered(framework.CreateContainer,
+			"Container.mounts")
+
 		var destinations []string
 		for _, m := range got.Ctr.GetMounts() {
 			destinations = append(destinations, m.GetDestination())
@@ -251,6 +282,9 @@ func TestInputFidelity(t *testing.T) {
 		if got == nil {
 			return
 		}
+
+		s.Covered(framework.CreateContainer,
+			"Container.image")
 
 		image := got.Ctr.GetImage()
 
@@ -282,6 +316,9 @@ func TestInputFidelity(t *testing.T) {
 			return
 		}
 
+		s.Covered(framework.CreateContainer,
+			"LinuxContainer.sysctl")
+
 		s.ExpectShown("sysctl", framework.ExpectShownMap(
 			"sysctl", spec.Sysctls, got.Ctr.GetLinux().GetSysctl()))
 	})
@@ -304,6 +341,9 @@ func TestInputFidelity(t *testing.T) {
 			return
 		}
 
+		s.Covered(framework.CreateContainer,
+			"LinuxContainer.seccomp_profile")
+
 		s.ExpectShown("seccomp_profile", framework.ExpectShownScalar(
 			"seccomp_profile", api.SecurityProfile_UNCONFINED,
 			got.Ctr.GetLinux().GetSeccompProfile().GetProfileType()))
@@ -325,6 +365,9 @@ func TestInputFidelity(t *testing.T) {
 		if got == nil {
 			return
 		}
+
+		s.Covered(framework.CreateContainer,
+			"LinuxContainer.oom_score_adj")
 
 		s.ExpectShown("oom_score_adj", framework.ExpectShownScalar(
 			"oom_score_adj", int64(-17),
@@ -349,6 +392,9 @@ func TestInputFidelity(t *testing.T) {
 		if got == nil {
 			return
 		}
+
+		s.Covered(framework.CreateContainer,
+			"Container.user")
 
 		user := got.Ctr.GetUser()
 		s.ExpectShown("user", framework.ExpectShownScalar(
@@ -391,7 +437,13 @@ func TestInputAgreement(t *testing.T) {
 			return
 		}
 
+		// The oracle first: Inspect ends the case through fatalf, and a field
+		// recorded before its oracle was obtained would be counted as measured
+		// by a run that never managed to look.
 		spec := s.Inspect(ctr.ID).Spec
+
+		s.Covered(framework.CreateContainer,
+			"Container.rlimits")
 
 		var shown, realized []string
 		for _, r := range got.Ctr.GetRlimits() {
@@ -422,6 +474,9 @@ func TestInputAgreement(t *testing.T) {
 		}
 
 		spec := s.Inspect(ctr.ID).Spec
+
+		s.Covered(framework.CreateContainer,
+			"LinuxContainer.namespaces")
 
 		var shown, realized []string
 		for _, n := range got.Ctr.GetLinux().GetNamespaces() {
@@ -456,6 +511,9 @@ func TestInputAgreement(t *testing.T) {
 			realized = spec.Linux.CgroupsPath
 		}
 
+		s.Covered(framework.CreateContainer,
+			"LinuxContainer.cgroups_path")
+
 		s.ExpectAgrees("cgroups_path", "realized OCI spec",
 			framework.ExpectScalarEqual("cgroups_path",
 				got.Ctr.GetLinux().GetCgroupsPath(), realized))
@@ -475,8 +533,9 @@ func TestInputAgreement(t *testing.T) {
 		// only assertion that could hold is "neither side has one" -- and the
 		// direction that matters, a runtime applying a policy and showing the
 		// plugin nothing, would be undetectable. That is the omission case this
-		// tier exists for, and arranging the state that hides it is a test that
-		// cannot fail. The paired fidelity check covers unconfined.
+		// tier exists for, and arranging the state that hides it while
+		// recording the field as measured is a test that cannot fail. The
+		// paired fidelity check on seccomp_profile covers unconfined.
 		ctrSpec.SeccompProfile = &framework.SeccompProfile{
 			Type: framework.SeccompRuntimeDefault,
 		}
@@ -487,10 +546,16 @@ func TestInputAgreement(t *testing.T) {
 			return
 		}
 
+		// The oracle before Covered: Inspect ends the case through fatalf, and
+		// a field recorded before its oracle was obtained would be counted as
+		// measured by a run that never managed to look.
 		realizedHasSeccomp := false
 		if spec := s.Inspect(ctr.ID).Spec; spec != nil && spec.Linux != nil {
 			realizedHasSeccomp = spec.Linux.Seccomp != nil
 		}
+
+		s.Covered(framework.CreateContainer,
+			"LinuxContainer.seccomp_policy")
 
 		shown := got.Ctr.GetLinux().GetSeccompPolicy()
 
@@ -519,8 +584,14 @@ func TestInputAgreement(t *testing.T) {
 			return
 		}
 
+		// The oracle first; see the seccomp subtest for why Covered follows it.
+		realized := s.Inspect(ctr.ID).Pid
+
+		s.Covered(framework.PostStartContainer,
+			"Container.pid")
+
 		s.ExpectAgrees("pid", "CRI status",
-			framework.ExpectScalarEqual("pid", got.Ctr.GetPid(), s.Inspect(ctr.ID).Pid))
+			framework.ExpectScalarEqual("pid", got.Ctr.GetPid(), realized))
 		// Inspect leaves Pid at zero when the runtime reports none, so equality
 		// alone passes on 0 == 0. A running container always has a pid, which
 		// makes that the omission case rather than a corner.
@@ -543,6 +614,9 @@ func TestInputAgreement(t *testing.T) {
 		// different moments and CRI reports nanoseconds since the epoch, so an
 		// equality check would be comparing one clock reading against another.
 		// What is in question is whether the field is populated at all.
+		s.Covered(framework.PostCreateContainer,
+			"Container.created_at")
+
 		s.ExpectAgrees("created_at", "hook request",
 			framework.ExpectPopulated("created_at", int(min(got.Ctr.GetCreatedAt(), 1)), 1))
 	})
@@ -558,6 +632,9 @@ func TestInputAgreement(t *testing.T) {
 		if got == nil {
 			return
 		}
+
+		s.Covered(framework.PostStartContainer,
+			"Container.started_at")
 
 		s.ExpectAgrees("started_at", "hook request",
 			framework.ExpectPopulated("started_at", int(min(got.Ctr.GetStartedAt(), 1)), 1))
@@ -575,6 +652,9 @@ func TestInputAgreement(t *testing.T) {
 		}
 
 		realized := s.InspectPod(pod).IPs
+
+		s.Covered(framework.RunPodSandbox,
+			"PodSandbox.ips")
 
 		s.ExpectAgrees("ips", "CRI status",
 			framework.ExpectStringsSubset("ips", got.Pod.GetIps(), realized))
@@ -598,8 +678,13 @@ func TestInputAgreement(t *testing.T) {
 			return
 		}
 
+		realized := s.InspectPod(pod).Pid
+
+		s.Covered(framework.RunPodSandbox,
+			"PodSandbox.pid")
+
 		s.ExpectAgrees("pid", "CRI status",
-			framework.ExpectScalarEqual("pid", got.Pod.GetPid(), s.InspectPod(pod).Pid))
+			framework.ExpectScalarEqual("pid", got.Pod.GetPid(), realized))
 		// The guard the container pid needs, for the same reason.
 		s.ExpectAgrees("pid", "CRI status",
 			framework.ExpectPopulated("pid", int(min(got.Pod.GetPid(), 1)), 1))
@@ -626,6 +711,10 @@ func TestInputAgreement(t *testing.T) {
 		if got == nil {
 			return
 		}
+
+		s.Covered(framework.RemoveContainer,
+			"Container.exit_code",
+			"Container.finished_at")
 
 		s.ExpectAgrees("exit_code", "hook request",
 			framework.ExpectScalarEqual("exit_code", int32(3), got.Ctr.GetExitCode()))
@@ -661,6 +750,12 @@ func TestInputStateLadder(t *testing.T) {
 			if got == nil {
 				continue
 			}
+
+			// Recorded per rung, against the hook actually read. Recording it
+			// once against CreateContainer named a hook this test never asserts
+			// at -- and one ExpectStateAt refuses, since a container does not
+			// exist there -- and counted the field even when no rung arrived.
+			s.Covered(hook, "Container.state")
 
 			s.ExpectAgrees("state", "hook request",
 				framework.ExpectStateAt(hook, got.Ctr.GetState()))
@@ -704,6 +799,9 @@ func TestInputCDIDevices(t *testing.T) {
 		for _, d := range got.Ctr.GetCDIDevices() {
 			shown = append(shown, d.GetName())
 		}
+
+		s.Covered(framework.CreateContainer,
+			"Container.CDI_devices")
 
 		s.ExpectShown("CDI_devices", framework.ExpectShownStrings(
 			"CDI_devices", []string{device}, shown))

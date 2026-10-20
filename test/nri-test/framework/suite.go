@@ -1129,6 +1129,39 @@ func (s *Suite) expectInput(field, surface string, err error) {
 	s.expect(field, surface, err)
 }
 
+// Covered records that this case measured the named input fields at hook, for
+// the summary's coverage section. Names are qualified as InputFields names
+// them: "Container.CDI_devices".
+//
+// Called by a test once it has the hook's payload and is about to assert, so
+// what is recorded is a field this run actually read. Before the assertions
+// rather than after, deliberately: a field whose assertion failed was still
+// measured, and the finding says what was found. A test that skipped never
+// reaches here, which is the whole of how a skip stays out of the count.
+//
+// A name the table does not carry ends the case. A typo would otherwise report
+// the field it meant as unexercised and invent a second unexercised field
+// beside it -- two wrong lines from one mistake, and neither of them loud.
+func (s *Suite) Covered(hook EventType, fields ...string) {
+	s.t.Helper()
+
+	known := map[string]bool{}
+	for _, f := range InputFields {
+		known[f.Message+"."+f.Name] = true
+	}
+
+	for _, name := range fields {
+		if !known[name] {
+			s.fatalf("Covered", fmt.Errorf("%q is not a field in InputFields", name),
+				"a test recorded coverage for an unknown input field")
+
+			return
+		}
+
+		TestReport.AddCoverage(Coverage{Field: name, Hook: hook})
+	}
+}
+
 // ExpectShown records a fidelity finding: the plugin was not shown what the
 // test set. The surface is the hook request, because that is the only thing
 // such a check read.

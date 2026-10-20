@@ -503,3 +503,88 @@ func TestReportPrintWithOnlySkips(t *testing.T) {
 	require.Contains(t, strings.ToLower(out), "no expectation failures",
 		"a summary with skips and no findings must still say nothing was collected")
 }
+
+func TestCoverageCountsVerifiedFields(t *testing.T) {
+	r := &Report{}
+
+	r.AddCoverage(Coverage{Field: "Container.CDI_devices", Hook: CreateContainer})
+	r.AddCoverage(Coverage{Field: "LinuxContainer.sysctl", Hook: CreateContainer})
+
+	var b strings.Builder
+	r.Print(&b, Header{})
+
+	out := b.String()
+	require.Contains(t, out, "Container.CDI_devices")
+	require.Contains(t, out, "2 of")
+}
+
+func TestCoverageExcludesSkippedFields(t *testing.T) {
+	// A field whose test skipped is unmeasured, which is the opposite of a pass.
+	// Counting it as coverage is how a suite that measured nothing reports that
+	// it measured everything.
+	r := &Report{}
+
+	r.AddCoverage(Coverage{Field: "Container.CDI_devices", Hook: CreateContainer})
+
+	// Three skips, so that an implementation counting skips as coverage would
+	// print a different number. One coverage entry plus three skips must still
+	// read as one field verified.
+	r.AddSkip(Skip{Test: "TestInputFidelity/sysctl", Reason: "driver lacks Sysctls"})
+	r.AddSkip(Skip{Test: "TestInputFidelity/seccomp", Reason: "driver lacks SecurityContext"})
+	r.AddSkip(Skip{Test: "TestInputAgreement/exit", Reason: "driver lacks ContainerLifecycle"})
+
+	var b strings.Builder
+	r.Print(&b, Header{})
+
+	out := b.String()
+	require.Contains(t, out, "1 of", "only the field whose test ran is covered")
+
+	// And the unmeasured fields are named as unmeasured, not quietly absent.
+	require.Contains(t, out, "not exercised")
+	require.Contains(t, out, "LinuxContainer.sysctl",
+		"a field no test reached must be listed, not omitted")
+}
+
+func TestCoverageIncludesFailedFields(t *testing.T) {
+	// A field whose test ran and failed WAS measured: the run looked, and the
+	// finding says what it found. Reporting it as unmeasured would hide the
+	// measurement behind the failure.
+	r := &Report{}
+
+	r.AddCoverage(Coverage{Field: "Container.image", Hook: CreateContainer})
+	r.AddFinding(Finding{Test: "TestInputFidelity", Feature: "image",
+		Err: errors.New("the plugin was shown nothing")})
+
+	var b strings.Builder
+	r.Print(&b, Header{})
+
+	require.Contains(t, b.String(), "Container.image")
+}
+
+func TestCoverageNamesUnexercisedTableRows(t *testing.T) {
+	// A row the run never reached. Without this the table and the run can drift
+	// apart unnoticed, which is the failure mode the hand-counted claims in the
+	// README had.
+	r := &Report{}
+
+	r.AddCoverage(Coverage{Field: "Container.CDI_devices", Hook: CreateContainer})
+
+	var b strings.Builder
+	r.Print(&b, Header{})
+
+	out := b.String()
+	require.Contains(t, out, "not exercised")
+	require.Contains(t, out, "Container.rlimits",
+		"a field in the table that no run touched has to be named")
+}
+
+func TestCoverageSectionAbsentWithoutInputTests(t *testing.T) {
+	// A run of the adjustment tests alone measured no input fields, and a
+	// coverage section claiming 0 of 41 would describe a run that never asked.
+	r := &Report{}
+
+	var b strings.Builder
+	r.Print(&b, Header{})
+
+	require.NotContains(t, b.String(), "Input field coverage")
+}
