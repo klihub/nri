@@ -453,3 +453,18 @@ func makeSpec(options ...specOption) *rspec.Spec {
 func ptr[T any](v T) *T {
 	return &v
 }
+
+// NewSpecGenerator is the only way a caller outside this module can get a
+// Generator, since the sole UnderlyingGenerator implementation is internal.
+func TestNewSpecGenerator(t *testing.T) {
+	spec := &rspec.Spec{Version: "1.2.0"}
+	g := xgen.NewSpecGenerator(spec)
+
+	require.NotNil(t, g)
+	require.Equal(t, spec, g.Config, "the generator works on the spec it was given")
+
+	require.NoError(t, g.Adjust(&api.ContainerAdjustment{
+		Env: []*api.KeyValue{{Key: "INJECTED", Value: "yes"}},
+	}))
+	require.Contains(t, g.Config.Process.Env, "INJECTED=yes")
+}
