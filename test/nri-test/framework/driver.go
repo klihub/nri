@@ -80,6 +80,12 @@ const (
 	// fields would compare the driver against itself and could not fail. The
 	// tests that read them skip, and the fields print as not exercised.
 	CapObservedRuntimeState
+	// CapInTreeAdjustments means an adjustment reaches the realized spec
+	// through the in-tree pkg/runtime-tools/generate, with no runtime in
+	// between. A test asserting the adjusted spec is then a test of that
+	// library; on a runtime it would be a test of the runtime's own copy of
+	// it, which the conformance tests already cover.
+	CapInTreeAdjustments
 )
 
 var capabilityNames = []struct {
@@ -98,6 +104,7 @@ var capabilityNames = []struct {
 	{CapSecurityContext, "SecurityContext"},
 	{CapDevices, "Devices"},
 	{CapObservedRuntimeState, "ObservedRuntimeState"},
+	{CapInTreeAdjustments, "InTreeAdjustments"},
 }
 
 // Has reports whether all capabilities in o are present in c.

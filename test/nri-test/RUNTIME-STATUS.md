@@ -161,7 +161,7 @@ the in-tree adjustment-to-spec mapping -- and nothing below it. A clean
 run here says that chain held. It says nothing about CRI-O or containerd,
 and the summary says so twice.
 
-**81 passed, 0 failed. 28 of 41 input fields measured.**
+**103 passed, 0 failed. 28 of 41 input fields measured.**
 
 Fourteen skips are capability gates: seven need `ObservedRuntimeState`,
 which this driver withholds because the pids, timestamps, lifecycle
@@ -177,6 +177,53 @@ the NRI version it was built from, so `RequireNRIVersion` and every
 other version gate run here -- but only in a build that generated
 `pkg/version/info/git`, which `make nri-test` does and a bare
 `go test` in a fresh checkout does not.
+
+### What the arm settles about the in-tree spec generator
+
+The mock applies every creation adjustment through
+`pkg/runtime-tools/generate`, with no runtime in between, so on this arm
+an assertion about the adjusted spec is a test of that library. The
+tests in `suite/generate_test.go` gate on `CapInTreeAdjustments`, which
+only this driver advertises, and aim at the merge rather than the write:
+replacing a value the spec already carries, and honouring a leading
+`-` on a key as a removal marker. Each one was mutation checked, and
+`AdjustEnv`, `AdjustArgs`, `AdjustAnnotations`, `AdjustSysctl`,
+`AdjustMounts`, `AdjustNamespaces`, `AdjustResources` and
+`AdjustRlimits` all have a named test that fails when they stop doing
+their job.
+
+Three limits on what a plugin can reach came out of writing them. None
+is a defect in `generate`; all three are in what `pkg/adaptation`
+forwards, and all three are untested elsewhere:
+
+- **An environment variable or a device the container already has
+  cannot be removed by a plugin.** `adjustEnv` and `adjustDevices` in
+  `pkg/adaptation/result.go` resolve a removal marker themselves --
+  stripping the variable from the creation request and from adjustments
+  collected from earlier plugins -- and never put the marker into the
+  adjustment the runtime applies. `adjustMounts` does forward one, in a
+  step titled "apply deletions with no corresponding additions", and
+  `adjustAnnotations`, `adjustSysctl` and `adjustNamespaces` forward
+  theirs too. So `RemoveEnv` and `RemoveDevice` work plugin-to-plugin
+  but not against the container's own environment or devices, and
+  `generate`'s removal branch for both is unreachable through NRI.
+- **`AdjustEnv`'s modify-existing block therefore has no reachable
+  effect.** `AddProcessEnv` already replaces a key in place, and the
+  block's other job is removal, so skipping it changes nothing a test
+  can observe. That mutation is the one the suite deliberately does not
+  catch.
+- **Two adjustments of one environment key are refused, not merged.**
+  `pkg/adaptation` reports `plugins "X" and "X" both tried to set Env K`
+  -- naming the one plugin twice -- so `generate`'s own last-one-wins
+  never runs.
+
+And one inconsistency inside `generate` itself: **`AdjustRlimits` is the
+only `Adjust*` entry point that neither deduplicates nor honours a
+removal marker.** It appends unconditionally, so adjusting a limit the
+container already has, such as the `RLIMIT_NOFILE` every container here
+is created with, leaves two entries for one type. The test asserts only
+that the requested limit is present, so whoever changes this does not
+have to rewrite it.
 
 ### What the arm settles
 

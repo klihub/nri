@@ -243,7 +243,8 @@ test/nri-test/
     |-- lifecycle_test.go     runLifecycle helper + subscription-mask table
     |-- ordering_test.go      multi-plugin invocation order by index
     |-- adjust_test.go        five creation adjustments, spec and kernel
-    `-- input_test.go         the NRI input surface, per field and tier
+    |-- input_test.go         the NRI input surface, per field and tier
+    `-- generate_test.go      adjustment merge semantics, mock arm only
 ```
 
 ## Architecture
@@ -296,6 +297,7 @@ is pinned by a test.
 | `CapObservedRuntimeState` | yes | yes, read through the unchanged CRI inspector |
 | `CapSysctls` | yes | no -- only the sysctls kubelet deems safe, and the rest need node configuration |
 | `CapSecurityContext` | yes | no -- expressible, but through admission and defaulting that can rewrite it |
+| `CapInTreeAdjustments` | no -- a runtime applies adjustments with its own copy of the generator | no, for the same reason |
 
 The mock driver is a third column, and a short one: it advertises the
 request-side bits -- lifecycle, resources, metadata, sysctls, security context,
@@ -304,6 +306,13 @@ devices -- and withholds `CapExec`, `CapCDIDevices`,
 because nothing runs, no CDI registry exists, the errors it would observe are
 its own, and the pids, timestamps, states and termination status it would
 report are its own invention rather than a runtime's.
+
+It is also the only driver advertising `CapInTreeAdjustments`, which means an
+adjustment reaches the realized spec through the in-tree
+`pkg/runtime-tools/generate` with no runtime in between. That is what
+`suite/generate_test.go` gates on: there, an assertion about the adjusted spec
+is a test of that library, while on a runtime it would test the runtime's own
+vendored copy, which the subjects in `adjust_test.go` already cover.
 
 A test declares what it needs through `RequireCaps`; the framework skips it,
 with a reason, when the active driver lacks them. The CRI driver has every
@@ -492,6 +501,14 @@ mapping the runtimes use. So: create a control container from an identical
 `ContainerSpec` with no plugin connected, observe its spec, apply the
 adjustment locally with `Generator.Adjust`, and diff against the adjusted
 container's observed spec. Near-total field coverage for very little code.
+
+A different test of the same library already exists and does not replace
+this. On the mock arm that mapping *is* the implementation under test, with
+no runtime in between, so `suite/generate_test.go` asserts its merge
+semantics directly -- replacement in place, and the `-` removal marker --
+against expectations the tests state as literals. That covers the library's
+behaviour but says nothing about a runtime's vendored copy of it, which is
+what the differential check is for.
 
 It is not an independent oracle -- it compares the runtime's vendored copy of
 this code against the in-tree copy -- so it belongs behind a flag, off by

@@ -76,7 +76,8 @@ func (r *Runtime) Capabilities() framework.Capability {
 		framework.CapContainerMetadata |
 		framework.CapDevices |
 		framework.CapSysctls |
-		framework.CapSecurityContext
+		framework.CapSecurityContext |
+		framework.CapInTreeAdjustments
 }
 
 // RuntimeVersion returns what the summary names as the runtime under test.
@@ -607,6 +608,12 @@ func containerSpec(spec *framework.ContainerSpec, p *pod, c *container) *rspec.S
 	// ContainerSpec.Command would otherwise be written through.
 	if args := append(append([]string{}, spec.Command...), spec.Args...); len(args) > 0 {
 		s.Process.Args = args
+	}
+
+	// A copy, for the reason the pod's sysctls are cloned below: an adjustment
+	// rewrites the realized spec in place.
+	if len(spec.Annotations) > 0 {
+		s.Annotations = maps.Clone(spec.Annotations)
 	}
 
 	for k, v := range spec.Env {
