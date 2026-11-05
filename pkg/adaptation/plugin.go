@@ -309,8 +309,56 @@ func (p *plugin) connect(conn stdnet.Conn) (retErr error) {
 	}
 
 	api.RegisterRuntimeService(p.rpcs, p)
+	api.RegisterStreamingRuntimeService(p.rpcs, &streamingService{p: p})
 
 	return nil
+}
+
+// streamingService serves a plugin's offer of an event stream.
+//
+// A plugin opens the stream; the runtime then sends that plugin's requests
+// down the reply half of it. Server push over a client-initiated call, which
+// is also the whole of the version negotiation: a plugin that cannot stream
+// does not call this, and the runtime goes on using unary calls without
+// having to ask anything or compare any versions.
+type streamingService struct {
+	p *plugin
+}
+
+// StartEventStream uses the stream for this plugin's requests until it ends.
+//
+// It must not return earlier than that: returning closes the stream.
+func (s *streamingService) StartEventStream(_ context.Context, srv api.StreamingRuntime_StartEventStreamServer) error {
+	stream := newPluginStream(srv)
+
+	if err := s.p.impl.useStream(stream); err != nil {
+		return err
+	}
+
+	log.Infof(noCtx, "plugin %q opened an event stream", s.p.name())
+
+	// Tell the plugin the stream is in use before it registers, so that
+	// which transport this plugin gets is settled once rather than raced
+	// against the first request.
+	if err := srv.Send(&api.RuntimeMessage{
+		Msg: &api.RuntimeMessage_StreamReady{StreamReady: &api.Empty{}},
+	}); err != nil {
+		return fmt.Errorf("failed to accept event stream of plugin %q: %w", s.p.name(), err)
+	}
+
+	err := stream.run()
+
+	log.Infof(noCtx, "event stream of plugin %q ended: %v", s.p.name(), err)
+
+	// A plugin's transport is settled for the life of its connection, so one
+	// that has lost its stream cannot be served over this connection at all:
+	// close it and let the plugin reconnect and negotiate again. Usually the
+	// connection is already gone and this is what reaps the plugin a moment
+	// sooner; where it is not, the alternative is a plugin that answers
+	// nothing while still registered.
+	s.p.close()
+
+	return err
 }
 
 // Start Runtime service, wait for plugin to register, then configure it.

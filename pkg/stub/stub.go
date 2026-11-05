@@ -183,6 +183,16 @@ type Stub interface {
 	// Logger returns the logger used by the stub.
 	Logger() nrilog.Logger
 
+	// Streaming reports whether this plugin's requests arrive on an event
+	// stream rather than as unary calls.
+	//
+	// It is also which ordering this plugin got. On a stream the runtime
+	// delivers in a fixed order and applies the answers in that same order;
+	// over unary calls it promises only the second half. Ordering is a
+	// preference the runtime may decline, so it is not a property a plugin
+	// can rely on having.
+	Streaming() bool
+
 	// RuntimeNRIVersion returns the NRI version used in the runtime, if known.
 	RuntimeNRIVersion() string
 	// PluignNRIVersion returns the NRI version used in the plugin/stub.
@@ -215,6 +225,31 @@ type Option func(*stub) error
 func WithOnClose(onClose func()) Option {
 	return func(s *stub) error {
 		s.onClose = onClose
+		return nil
+	}
+}
+
+// WithOrderedEvents has the plugin answer streamed requests one at a time,
+// in the order the runtime dispatched them.
+//
+// That order is then the order the runtime applies the answers in, which is
+// the guarantee a stateful plugin needs: decide twice about the same
+// container and the second decision lands second. The cost is this
+// plugin's own throughput, since it stops answering several at once -- a
+// plugin that serializes internally anyway pays nothing, and one that does
+// not should not ask for this.
+//
+// Not the default. Without it a plugin answers concurrently, which is what
+// it already does today over unary calls, so streaming does not quietly
+// slow anything down.
+//
+// A preference, never a guarantee: it takes effect only where the runtime
+// carries this plugin's requests on an event stream, and the runtime may
+// decline the stream, in which case the plugin is invoked concurrently and
+// told so at Warn.
+func WithOrderedEvents() Option {
+	return func(s *stub) error {
+		s.orderedEvents = true
 		return nil
 	}
 }
@@ -303,10 +338,17 @@ type stub struct {
 	rpcc       *ttrpc.Client
 	runtime    api.RuntimeService
 	started    bool
-	doneC      chan struct{}
-	srvErrC    chan error
-	cfgErrC    chan error
-	syncReq    *api.SynchronizeRequest
+
+	// orderedEvents answers streamed requests one at a time. See
+	// WithOrderedEvents.
+	orderedEvents bool
+
+	// streaming records that the runtime took an event stream.
+	streaming bool
+	doneC     chan struct{}
+	srvErrC   chan error
+	cfgErrC   chan error
+	syncReq   *api.SynchronizeRequest
 
 	registrationTimeout time.Duration
 	requestTimeout      time.Duration
@@ -450,6 +492,12 @@ func (stub *stub) Start(ctx context.Context) (retErr error) {
 	stub.rpcc = rpcc
 
 	stub.runtime = api.NewRuntimeClient(rpcc)
+
+	// Before registering, so the runtime has settled on a transport for
+	// this plugin before it starts driving it. Registering is what makes
+	// it call Configure, and that call should already be going the way
+	// every later one will.
+	stub.startStream(ctx, rpcc)
 
 	if err = stub.register(ctx); err != nil {
 		stub.close()
