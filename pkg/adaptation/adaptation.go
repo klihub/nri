@@ -57,7 +57,11 @@ type UpdateFn func(context.Context, []*ContainerUpdate) ([]*ContainerUpdate, err
 
 // Adaptation is the NRI abstraction for container runtime NRI adaptation/integration.
 type Adaptation struct {
-	sync.Mutex
+	// Held for writing by startup, shutdown and plugin registration, and
+	// for reading by every request, so requests run alongside each other.
+	// The order they are dispatched and applied in is order's job.
+	sync.RWMutex
+	order       requestOrder
 	name        string
 	version     string
 	nriVersion  string
@@ -243,9 +247,10 @@ func (r *Adaptation) Stop() {
 
 // RunPodSandbox relays the corresponding CRI request to plugins.
 func (r *Adaptation) RunPodSandbox(ctx context.Context, req *RunPodSandboxRequest) error {
-	r.Lock()
-	defer r.Unlock()
-	defer r.removeClosedPlugins()
+	defer r.removeClosed()
+
+	r.RLock()
+	defer r.RUnlock()
 
 	for _, plugin := range r.plugins {
 		if _, err := plugin.runPodSandbox(ctx, req); err != nil {
@@ -258,9 +263,10 @@ func (r *Adaptation) RunPodSandbox(ctx context.Context, req *RunPodSandboxReques
 
 // UpdatePodSandbox relays the corresponding CRI request to plugins.
 func (r *Adaptation) UpdatePodSandbox(ctx context.Context, req *UpdatePodSandboxRequest) (*UpdatePodSandboxResponse, error) {
-	r.Lock()
-	defer r.Unlock()
-	defer r.removeClosedPlugins()
+	defer r.removeClosed()
+
+	r.RLock()
+	defer r.RUnlock()
 
 	for _, plugin := range r.plugins {
 		_, err := plugin.updatePodSandbox(ctx, req)
@@ -274,9 +280,10 @@ func (r *Adaptation) UpdatePodSandbox(ctx context.Context, req *UpdatePodSandbox
 
 // PostUpdatePodSandbox relays the corresponding CRI request to plugins.
 func (r *Adaptation) PostUpdatePodSandbox(ctx context.Context, req *PostUpdatePodSandboxRequest) error {
-	r.Lock()
-	defer r.Unlock()
-	defer r.removeClosedPlugins()
+	defer r.removeClosed()
+
+	r.RLock()
+	defer r.RUnlock()
 
 	for _, plugin := range r.plugins {
 		_, err := plugin.postUpdatePodSandbox(ctx, req)
@@ -290,9 +297,10 @@ func (r *Adaptation) PostUpdatePodSandbox(ctx context.Context, req *PostUpdatePo
 
 // StopPodSandbox relays the corresponding CRI request to plugins.
 func (r *Adaptation) StopPodSandbox(ctx context.Context, req *StopPodSandboxRequest) error {
-	r.Lock()
-	defer r.Unlock()
-	defer r.removeClosedPlugins()
+	defer r.removeClosed()
+
+	r.RLock()
+	defer r.RUnlock()
 
 	for _, plugin := range r.plugins {
 		_, err := plugin.stopPodSandbox(ctx, req)
@@ -306,9 +314,10 @@ func (r *Adaptation) StopPodSandbox(ctx context.Context, req *StopPodSandboxRequ
 
 // RemovePodSandbox relays the corresponding CRI request to plugins.
 func (r *Adaptation) RemovePodSandbox(ctx context.Context, req *RemovePodSandboxRequest) error {
-	r.Lock()
-	defer r.Unlock()
-	defer r.removeClosedPlugins()
+	defer r.removeClosed()
+
+	r.RLock()
+	defer r.RUnlock()
 
 	for _, plugin := range r.plugins {
 		_, err := plugin.removePodSandbox(ctx, req)
@@ -322,9 +331,13 @@ func (r *Adaptation) RemovePodSandbox(ctx context.Context, req *RemovePodSandbox
 
 // CreateContainer relays the corresponding CRI request to plugins.
 func (r *Adaptation) CreateContainer(ctx context.Context, req *CreateContainerRequest) (*CreateContainerResponse, error) {
-	r.Lock()
-	defer r.Unlock()
-	defer r.removeClosedPlugins()
+	defer r.removeClosed()
+
+	r.RLock()
+	defer r.RUnlock()
+
+	t := r.order.take()
+	defer t.release()
 
 	var (
 		result   = collectCreateContainerResult(req)
@@ -352,14 +365,28 @@ func (r *Adaptation) CreateContainer(ctx context.Context, req *CreateContainerRe
 		}
 	}
 
-	return r.validateContainerAdjustment(ctx, validate, result)
+	// Validators only approve or refuse, so they are not a decision to be
+	// ordered and run alongside other requests' validators.
+	rpl, err := r.validateContainerAdjustment(ctx, validate, result)
+	if err != nil {
+		return nil, err
+	}
+
+	// The caller applies what we return, so returning in order is what
+	// puts the decisions into practice in order.
+	if err := t.commitTurn(ctx); err != nil {
+		return nil, err
+	}
+
+	return rpl, nil
 }
 
 // PostCreateContainer relays the corresponding CRI request to plugins.
 func (r *Adaptation) PostCreateContainer(ctx context.Context, req *PostCreateContainerRequest) error {
-	r.Lock()
-	defer r.Unlock()
-	defer r.removeClosedPlugins()
+	defer r.removeClosed()
+
+	r.RLock()
+	defer r.RUnlock()
 
 	for _, plugin := range r.plugins {
 		_, err := plugin.postCreateContainer(ctx, req)
@@ -373,9 +400,10 @@ func (r *Adaptation) PostCreateContainer(ctx context.Context, req *PostCreateCon
 
 // StartContainer relays the corresponding CRI request to plugins.
 func (r *Adaptation) StartContainer(ctx context.Context, req *StartContainerRequest) error {
-	r.Lock()
-	defer r.Unlock()
-	defer r.removeClosedPlugins()
+	defer r.removeClosed()
+
+	r.RLock()
+	defer r.RUnlock()
 
 	for _, plugin := range r.plugins {
 		_, err := plugin.startContainer(ctx, req)
@@ -389,9 +417,10 @@ func (r *Adaptation) StartContainer(ctx context.Context, req *StartContainerRequ
 
 // PostStartContainer relays the corresponding CRI request to plugins.
 func (r *Adaptation) PostStartContainer(ctx context.Context, req *PostStartContainerRequest) error {
-	r.Lock()
-	defer r.Unlock()
-	defer r.removeClosedPlugins()
+	defer r.removeClosed()
+
+	r.RLock()
+	defer r.RUnlock()
 
 	for _, plugin := range r.plugins {
 		_, err := plugin.postStartContainer(ctx, req)
@@ -405,9 +434,13 @@ func (r *Adaptation) PostStartContainer(ctx context.Context, req *PostStartConta
 
 // UpdateContainer relays the corresponding CRI request to plugins.
 func (r *Adaptation) UpdateContainer(ctx context.Context, req *UpdateContainerRequest) (*UpdateContainerResponse, error) {
-	r.Lock()
-	defer r.Unlock()
-	defer r.removeClosedPlugins()
+	defer r.removeClosed()
+
+	r.RLock()
+	defer r.RUnlock()
+
+	t := r.order.take()
+	defer t.release()
 
 	result := collectUpdateContainerResult(req)
 	for _, plugin := range r.plugins {
@@ -421,14 +454,19 @@ func (r *Adaptation) UpdateContainer(ctx context.Context, req *UpdateContainerRe
 		}
 	}
 
+	if err := t.commitTurn(ctx); err != nil {
+		return nil, err
+	}
+
 	return result.updateContainerResponse(), nil
 }
 
 // PostUpdateContainer relays the corresponding CRI request to plugins.
 func (r *Adaptation) PostUpdateContainer(ctx context.Context, req *PostUpdateContainerRequest) error {
-	r.Lock()
-	defer r.Unlock()
-	defer r.removeClosedPlugins()
+	defer r.removeClosed()
+
+	r.RLock()
+	defer r.RUnlock()
 
 	for _, plugin := range r.plugins {
 		_, err := plugin.postUpdateContainer(ctx, req)
@@ -442,9 +480,13 @@ func (r *Adaptation) PostUpdateContainer(ctx context.Context, req *PostUpdateCon
 
 // StopContainer relays the corresponding CRI request to plugins.
 func (r *Adaptation) StopContainer(ctx context.Context, req *StopContainerRequest) (*StopContainerResponse, error) {
-	r.Lock()
-	defer r.Unlock()
-	defer r.removeClosedPlugins()
+	defer r.removeClosed()
+
+	r.RLock()
+	defer r.RUnlock()
+
+	t := r.order.take()
+	defer t.release()
 
 	result := collectStopContainerResult()
 	for _, plugin := range r.plugins {
@@ -458,14 +500,19 @@ func (r *Adaptation) StopContainer(ctx context.Context, req *StopContainerReques
 		}
 	}
 
+	if err := t.commitTurn(ctx); err != nil {
+		return nil, err
+	}
+
 	return result.stopContainerResponse(), nil
 }
 
 // RemoveContainer relays the corresponding CRI request to plugins.
 func (r *Adaptation) RemoveContainer(ctx context.Context, req *RemoveContainerRequest) error {
-	r.Lock()
-	defer r.Unlock()
-	defer r.removeClosedPlugins()
+	defer r.removeClosed()
+
+	r.RLock()
+	defer r.RUnlock()
 
 	for _, plugin := range r.plugins {
 		_, err := plugin.removeContainer(ctx, req)
