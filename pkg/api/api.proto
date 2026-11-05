@@ -31,6 +31,90 @@ service Runtime {
     rpc UpdateContainers(UpdateContainersRequest) returns (UpdateContainersResponse);
 }
 
+// StreamingRuntime carries a plugin's whole conversation with the runtime
+// over one stream in each direction, instead of a unary call per request.
+//
+// PROTOTYPE. What this buys is the order. A stream delivers in the order it
+// was written, so the writer at the runtime end decides the order a plugin
+// sees requests in, and nothing downstream can reshuffle them. With a unary
+// call per request there is no such thing: ttrpc may put two calls on the
+// wire either way round, and the server answers each in its own goroutine,
+// so neither the arrival order nor the processing order is ours to pick.
+//
+// The two messages mirror service Plugin one request and one response at a
+// time. Carrying the same messages rather than folding the events together
+// keeps the semantics: an event a plugin can refuse today it can still
+// refuse here, because it still has a reply of its own. StateChange is the
+// one thing left behind -- the dedicated per-event messages replaced it,
+// and a new protocol has no reason to inherit it.
+service StreamingRuntime {
+    // StartEventStream opens a plugin's request and reply streams.
+    rpc StartEventStream(stream PluginMessage) returns (stream RuntimeMessage);
+}
+
+// RuntimeMessage is one request from the runtime to a plugin.
+message RuntimeMessage {
+    // Seq identifies this request and fixes its place in the order.
+    //
+    // It counts up without gaps for each plugin, so a plugin can tell
+    // whether it has missed one, and the reply carries it back so the
+    // runtime can match a reply to its request. A stream already delivers
+    // in order, so seq is not here to rebuild an order the transport lost;
+    // it is here to name one the transport kept.
+    uint64 seq = 1;
+
+    oneof msg {
+        ConfigureRequest configure_request = 2;
+        SynchronizeRequest synchronize_request = 3;
+        Empty shutdown_request = 4;
+        RunPodSandboxRequest run_pod_sandbox_request = 5;
+        UpdatePodSandboxRequest update_pod_sandbox_request = 6;
+        PostUpdatePodSandboxRequest post_update_pod_sandbox_request = 7;
+        StopPodSandboxRequest stop_pod_sandbox_request = 8;
+        RemovePodSandboxRequest remove_pod_sandbox_request = 9;
+        CreateContainerRequest create_container_request = 10;
+        PostCreateContainerRequest post_create_container_request = 11;
+        StartContainerRequest start_container_request = 12;
+        PostStartContainerRequest post_start_container_request = 13;
+        UpdateContainerRequest update_container_request = 14;
+        PostUpdateContainerRequest post_update_container_request = 15;
+        StopContainerRequest stop_container_request = 16;
+        RemoveContainerRequest remove_container_request = 17;
+        ValidateContainerAdjustmentRequest validate_container_adjustment_request = 18;
+    }
+}
+
+// PluginMessage is one reply from a plugin to the runtime.
+message PluginMessage {
+    // Seq is the seq of the request this answers.
+    uint64 seq = 1;
+
+    // Error is set when the plugin failed or refused the request, and
+    // takes the place of the error a unary call would have returned. A
+    // reply carrying an error need carry no message.
+    string error = 2;
+
+    oneof msg {
+        ConfigureResponse configure_response = 3;
+        SynchronizeResponse synchronize_response = 4;
+        Empty shutdown_response = 5;
+        RunPodSandboxResponse run_pod_sandbox_response = 6;
+        UpdatePodSandboxResponse update_pod_sandbox_response = 7;
+        PostUpdatePodSandboxResponse post_update_pod_sandbox_response = 8;
+        StopPodSandboxResponse stop_pod_sandbox_response = 9;
+        RemovePodSandboxResponse remove_pod_sandbox_response = 10;
+        CreateContainerResponse create_container_response = 11;
+        PostCreateContainerResponse post_create_container_response = 12;
+        StartContainerResponse start_container_response = 13;
+        PostStartContainerResponse post_start_container_response = 14;
+        UpdateContainerResponse update_container_response = 15;
+        PostUpdateContainerResponse post_update_container_response = 16;
+        StopContainerResponse stop_container_response = 17;
+        RemoveContainerResponse remove_container_response = 18;
+        ValidateContainerAdjustmentResponse validate_container_adjustment_response = 19;
+    }
+}
+
 message RegisterPluginRequest {
     // Name of the plugin to register.
     string plugin_name = 1;
