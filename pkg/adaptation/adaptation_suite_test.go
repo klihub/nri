@@ -479,6 +479,12 @@ func TestPluginContainerCreationAdjustments(t *testing.T) {
 		case "remove mount":
 			a.RemoveMount("/remove/test/destination")
 
+		case "remove environment":
+			a.RemoveEnv("removed")
+
+		case "remove device":
+			a.RemoveDevice("/dev/removed")
+
 		case "environment":
 			if overwrite {
 				a.RemoveEnv("key")
@@ -731,6 +737,27 @@ func TestPluginContainerCreationAdjustments(t *testing.T) {
 					},
 				},
 			}))
+			// A removal with no corresponding addition has to reach the runtime:
+			// stripping it from the collected adjustments alone removes it only
+			// between plugins, leaving what the container already has in place.
+			t.Run("remove an environment variable", runTable("remove environment",
+				&api.ContainerAdjustment{
+					Env: []*api.KeyValue{
+						{
+							Key: api.MarkForRemoval("removed"),
+						},
+					},
+				}))
+			t.Run("remove a device", runTable("remove device",
+				&api.ContainerAdjustment{
+					Linux: &api.LinuxContainerAdjustment{
+						Devices: []*api.LinuxDevice{
+							{
+								Path: api.MarkForRemoval("/dev/removed"),
+							},
+						},
+					},
+				}))
 			t.Run("adjust environment", runTable("environment", &api.ContainerAdjustment{
 				Env: []*api.KeyValue{
 					{
