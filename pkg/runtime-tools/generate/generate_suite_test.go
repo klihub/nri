@@ -273,6 +273,37 @@ func TestAdjustment(t *testing.T) {
 		require.Equal(t, map[string]string{"net.ipv4.ip_forward": "1"}, spec.Linux.Sysctl)
 	})
 
+	// A removal of something the spec already carries. Reachable through NRI
+	// only since pkg/adaptation began forwarding a deletion with no
+	// corresponding addition, so without these the enabled path is untested.
+	t.Run("remove an environment variable the spec has", func(t *testing.T) {
+		spec := makeSpec()
+		spec.Process.Env = []string{"KEEP=yes", "DROP=no"}
+		adjust := &api.ContainerAdjustment{}
+		adjust.RemoveEnv("DROP")
+
+		xg := xgen.SpecGenerator(ocigen.New(spec))
+		require.NotNil(t, xg)
+		require.NoError(t, xg.Adjust(adjust))
+		require.Equal(t, []string{"KEEP=yes"}, spec.Process.Env)
+	})
+
+	t.Run("remove a device the spec has", func(t *testing.T) {
+		spec := makeSpec()
+		spec.Linux.Devices = []rspec.LinuxDevice{
+			{Path: "/dev/keep", Type: "c", Major: 1, Minor: 1},
+			{Path: "/dev/drop", Type: "c", Major: 1, Minor: 2},
+		}
+		adjust := &api.ContainerAdjustment{}
+		adjust.RemoveDevice("/dev/drop")
+
+		xg := xgen.SpecGenerator(ocigen.New(spec))
+		require.NotNil(t, xg)
+		require.NoError(t, xg.Adjust(adjust))
+		require.Len(t, spec.Linux.Devices, 1)
+		require.Equal(t, "/dev/keep", spec.Linux.Devices[0].Path)
+	})
+
 	t.Run("RDT", func(t *testing.T) {
 		spec := makeSpec()
 		adjust := &api.ContainerAdjustment{
