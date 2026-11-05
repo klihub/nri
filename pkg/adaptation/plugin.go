@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	stdnet "net"
 	"os"
 	"os/exec"
@@ -68,6 +69,11 @@ type plugin struct {
 	closeC chan struct{}
 	r      *Adaptation
 	impl   *pluginType
+}
+
+type streamingService struct {
+	*plugin
+	srv api.StreamingRuntime_StartEventStreamServer
 }
 
 // SetPluginRegistrationTimeout sets the timeout for plugin registration.
@@ -309,6 +315,54 @@ func (p *plugin) connect(conn stdnet.Conn) (retErr error) {
 	}
 
 	api.RegisterRuntimeService(p.rpcs, p)
+	api.RegisterStreamingRuntimeService(p.rpcs, &streamingService{plugin: p})
+
+	return nil
+}
+
+func (rs *streamingService) StartEventStream(ctx context.Context, srv api.StreamingRuntime_StartEventStreamServer) error {
+	log.Infof(noCtx, "*** StartEventStream called...")
+
+	if err := srv.SendMsg(
+		&api.RuntimeMessage{
+			Msg: &api.RuntimeMessage_StateChangeEvent{
+				StateChangeEvent: &api.StateChangeEvent{
+					Event:     69,
+					Pod:       &api.PodSandbox{Name: "kuusysi"},
+					Container: &api.Container{Name: "ysikuus"},
+				},
+			},
+		},
+	); err != nil {
+		log.Infof(noCtx, "*** stream send error: %v", err)
+		return err
+	}
+
+	for {
+		var req api.PluginMessage
+		if err := srv.RecvMsg(&req); err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			log.Infof(noCtx, "*** stream recv error: %v", err)
+			return err
+		}
+
+		log.Infof(noCtx, "*** stream recv message: %+v", req)
+		rpl := &api.RuntimeMessage{
+			Msg: &api.RuntimeMessage_StateChangeEvent{
+				StateChangeEvent: &api.StateChangeEvent{
+					Event:     69,
+					Pod:       &api.PodSandbox{Name: "kuusysi"},
+					Container: &api.Container{Name: "kuusysi"},
+				},
+			},
+		}
+		if err := srv.SendMsg(rpl); err != nil {
+			log.Infof(noCtx, "*** stream send error: %v", err)
+			return err
+		}
+	}
 
 	return nil
 }

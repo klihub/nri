@@ -32,6 +32,8 @@ import (
 	"github.com/containerd/nri/pkg/net"
 	"github.com/containerd/nri/pkg/net/multiplex"
 	"github.com/containerd/ttrpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // Plugin can implement a number of interfaces related to Pod and Container
@@ -295,6 +297,7 @@ type stub struct {
 	rpcs       *ttrpc.Server
 	rpcc       *ttrpc.Client
 	runtime    api.RuntimeService
+	streaming  api.StreamingRuntimeClient
 	started    bool
 	doneC      chan struct{}
 	srvErrC    chan error
@@ -304,6 +307,11 @@ type stub struct {
 	registrationTimeout time.Duration
 	requestTimeout      time.Duration
 	logger              nrilog.Logger
+}
+
+type streamingClient struct {
+	stub *stub
+	c    api.StreamingRuntimeClient
 }
 
 // Handlers for NRI plugin event and request.
@@ -452,6 +460,16 @@ func (stub *stub) Start(ctx context.Context) (retErr error) {
 
 	stub.logger.Infof(ctx, "Started plugin %s...", stub.Name())
 
+	stub.streaming = &streamingClient{
+		stub: stub,
+		c:    api.NewStreamingRuntimeClient(rpcc),
+	}
+
+	if err := stub.startStream(); err != nil {
+		stub.close()
+		return err
+	}
+
 	stub.started = true
 	return nil
 }
@@ -596,6 +614,35 @@ func (stub *stub) register(ctx context.Context) error {
 	return nil
 }
 
+func (stub *stub) startStream() error {
+	stub.logger.Infof(noCtx, "Starting event stream for plugin %s...", stub.Name())
+
+	stream, err := stub.streaming.StartEventStream(context.Background())
+	if err != nil {
+		return fmt.Errorf("failed to start event stream: %w", err)
+	}
+
+	go func() {
+		for {
+			evt, err := stream.Recv()
+			if err != nil {
+				if status, ok := status.FromError(err); ok {
+					if status.Code() == codes.Unimplemented {
+						stub.logger.Infof(noCtx, "*** event streaming not supported by runtime")
+					}
+				} else {
+					stub.logger.Errorf(noCtx, "*** (stream) event receive error: %v", err)
+				}
+				return
+			}
+			stub.logger.Infof(noCtx, "*** received event %+v", evt)
+		}
+	}()
+
+	return nil
+
+}
+
 // Handle a lost connection.
 func (stub *stub) connClosed() {
 	stub.Lock()
@@ -605,6 +652,11 @@ func (stub *stub) connClosed() {
 		stub.onClose()
 		return
 	}
+}
+
+func (s *streamingClient) StartEventStream(ctx context.Context) (api.StreamingRuntime_StartEventStreamClient, error) {
+	return s.c.StartEventStream(ctx)
+	return nil, nil
 }
 
 //

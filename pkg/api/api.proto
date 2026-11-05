@@ -31,6 +31,39 @@ service Runtime {
     rpc UpdateContainers(UpdateContainersRequest) returns (UpdateContainersResponse);
 }
 
+service StreamingRuntime {
+    // StartEventStream is our bidirectional streaming RPC for a plugin.
+    rpc StartEventStream(stream PluginMessage) returns (stream RuntimeMessage);
+}
+
+message RuntimeMessage {
+    oneof msg {
+        ConfigureRequest configure_request = 1;
+        SynchronizeRequest synchronize_request = 2;
+        CreateContainerRequest create_container_request = 3;
+        UpdateContainerRequest update_container_request = 4;
+        StopContainerRequest stop_container_request = 5;
+        UpdatePodSandboxRequest update_pod_sandbox_request = 6;
+        StateChangeEvent state_change_event = 7;
+        ValidateContainerAdjustmentRequest validate_container_adjustment_request = 8;
+        Empty shutdown_request = 9;
+    }
+}
+
+message PluginMessage {
+        oneof msg {
+            ConfigureResponse configure_response = 1;
+            SynchronizeResponse synchronize_response = 2;
+            CreateContainerResponse create_container_response = 3;
+            UpdateContainerResponse update_container_response = 4;
+            StopContainerResponse stop_container_response = 5;
+            UpdatePodSandboxResponse update_pod_sandbox_response = 6;
+            ValidateContainerAdjustmentResponse validate_container_adjustment_response = 7;
+            Empty shutdown_response = 8;
+        }
+        
+}
+
 message RegisterPluginRequest {
     // Name of the plugin to register.
     string plugin_name = 1;
