@@ -121,7 +121,8 @@ type fatalGateT struct {
 	skips []string
 }
 
-func (f *fatalGateT) Helper() {}
+func (f *fatalGateT) Helper()      {}
+func (f *fatalGateT) Name() string { return "fake" }
 
 func (f *fatalGateT) Fatal(args ...any) {
 	panic(fmt.Sprint(args...))
@@ -546,4 +547,153 @@ func TestSkipUnlessConfigSuiteSkipsUnlessTheNamedSuiteWasRequested(t *testing.T)
 			require.Equal(t, tc.skip, skipped)
 		})
 	}
+}
+
+func TestSkipUnlessRuntimeHandler(t *testing.T) {
+	// The gate a test asking for a specific low-level runtime needs: on a node that
+	// does not have crun installed, a crun-specific test must say that what it
+	// would have verified is unmeasured here rather than fail as if crun were
+	// broken.
+	for _, tc := range []struct {
+		name       string
+		discovered []string
+		want       string
+		skip       bool
+	}{
+		{name: "the handler is installed", discovered: []string{"crun", "runc"}, want: "crun", skip: false},
+		{name: "the only handler installed", discovered: []string{"runc"}, want: "runc", skip: false},
+		{name: "the handler is not installed", discovered: []string{"runc"}, want: "crun", skip: true},
+		// A runtime that advertises no handlers at all cannot confirm it has the
+		// one asked for, so the test is unverified rather than passed.
+		{name: "no handlers discovered", discovered: nil, want: "crun", skip: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			useRuntimeHandlers(t, tc.discovered)
+
+			skipped := didSkip(t, func(t *testing.T) {
+				SkipUnlessRuntimeHandler(t, tc.want)
+			})
+
+			require.Equal(t, tc.skip, skipped)
+		})
+	}
+
+	t.Run("names the handler in the recorded skip", func(t *testing.T) {
+		// The reason reaches the summary, which is read far from the test's own
+		// output, so it has to name the handler that was missing and what the node
+		// does have. See Skipped.
+		useRuntimeHandlers(t, []string{"runc"})
+
+		r := useReport(t)
+
+		require.True(t, didSkip(t, func(t *testing.T) {
+			SkipUnlessRuntimeHandler(t, "crun")
+		}))
+
+		got := r.Skips()
+		require.Len(t, got, 1)
+		require.Contains(t, got[0].Reason, "crun", "the reason must name the handler asked for")
+		require.Contains(t, got[0].Reason, "runc", "the reason must name what the node has")
+	})
+}
+
+// requireOneRecordedSkip asserts that a gate which skipped recorded exactly one
+// skip with a reason, and that a reader of the summary could act on it.
+func requireOneRecordedSkip(t *testing.T, r *Report) {
+	t.Helper()
+
+	got := r.Skips()
+	require.Len(t, got, 1, "the gate must record exactly one skip")
+	require.NotEmpty(t, got[0].Reason, "a recorded skip must say why it skipped")
+
+	// And which test it was. A skip with an empty Test prints as "<unknown>" in the
+	// summary, which tells a reader that something went unverified and not what, so
+	// there is nothing to go and run.
+	require.NotEmpty(t, got[0].Test, "a recorded skip must name the test that skipped")
+}
+
+func TestGatesRecordTheirSkips(t *testing.T) {
+	// A skip the summary does not name is a skip a reader takes for a pass, so
+	// every gate that can skip must record it as well as skipping the test.
+	t.Run("RequireCaps", func(t *testing.T) {
+		saved := driver
+		t.Cleanup(func() { driver = saved })
+		driver = &gateDriver{name: "fake", caps: 0}
+
+		r := useReport(t)
+
+		skipped := didSkip(t, func(t *testing.T) {
+			RequireCaps(t, CapUpdatePodResources)
+		})
+
+		require.True(t, skipped)
+		requireOneRecordedSkip(t, r)
+	})
+
+	t.Run("RequireNRIVersion", func(t *testing.T) {
+		saved := runtimeNRIVersion
+		t.Cleanup(func() { runtimeNRIVersion = saved })
+		runtimeNRIVersion = "v0.9.0"
+
+		r := useReport(t)
+
+		skipped := didSkip(t, func(t *testing.T) {
+			RequireNRIVersion(t, "v0.10.0")
+		})
+
+		require.True(t, skipped)
+		requireOneRecordedSkip(t, r)
+	})
+
+	t.Run("SkipUnlessConfigSuite", func(t *testing.T) {
+		saved := TestConfig.ConfigSuite
+		t.Cleanup(func() { TestConfig.ConfigSuite = saved })
+		TestConfig.ConfigSuite = ""
+
+		r := useReport(t)
+
+		skipped := didSkip(t, func(t *testing.T) {
+			SkipUnlessConfigSuite(t, "hugepages")
+		})
+
+		require.True(t, skipped)
+		requireOneRecordedSkip(t, r)
+	})
+
+	t.Run("SkipUnlessCPUs", func(t *testing.T) {
+		r := useReport(t)
+		status := &fakeStatusReader{status: procStatus(map[string]string{"Cpus_allowed_list": "0"})}
+
+		skipped := didSkip(t, func(t *testing.T) {
+			SkipUnlessCPUs(t, status, &Container{ID: "ctr"}, 2)
+		})
+
+		require.True(t, skipped)
+		requireOneRecordedSkip(t, r)
+	})
+
+	t.Run("SkipUnlessNUMANodes", func(t *testing.T) {
+		r := useReport(t)
+		status := &fakeStatusReader{status: procStatus(map[string]string{"Mems_allowed_list": "0"})}
+
+		skipped := didSkip(t, func(t *testing.T) {
+			SkipUnlessNUMANodes(t, status, &Container{ID: "ctr"}, 2)
+		})
+
+		require.True(t, skipped)
+		requireOneRecordedSkip(t, r)
+	})
+
+	t.Run("SkipUnlessRuntimeHandler", func(t *testing.T) {
+		useRuntimeHandlers(t, []string{"runc"})
+
+		r := useReport(t)
+
+		skipped := didSkip(t, func(t *testing.T) {
+			SkipUnlessRuntimeHandler(t, "crun")
+		})
+
+		require.True(t, skipped)
+		requireOneRecordedSkip(t, r)
+	})
 }

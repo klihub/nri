@@ -538,6 +538,111 @@ func expectSuite(t *testing.T, i *specInspector) (*Suite, *fakeT) {
 	return newFakeSuite(ft), ft
 }
 
+// expectCollectingSuite is expectSuite with the run collecting failures and a
+// report of its own, for a test that wants to read the Finding a wrapper
+// recorded rather than be aborted by it.
+func expectCollectingSuite(t *testing.T, i *specInspector) (*Suite, *fakeT, *Report) {
+	t.Helper()
+
+	s, ft := expectSuite(t, i)
+
+	// expectSuite's useConfig installed a Config this test owns and restores, so
+	// the mode can be flipped on it here rather than by growing a parameter on
+	// the helper every caller of it would then have to pass.
+	TestConfig.CollectFailures = true
+
+	return s, ft, useReport(t)
+}
+
+func TestSuiteExpectWrappersRecordTheirFeatureAndSurface(t *testing.T) {
+	// The feature and the surface are what make a finding readable in the run's
+	// summary, which is read long after the test output it came from scrolled
+	// past, and the container id is what makes one actionable in a case with more
+	// than one container. Each wrapper supplies its own pair and nothing else in
+	// the suite reads these strings, so this is the only thing that can notice a
+	// wrapper naming another wrapper's feature or reading surface.
+	ctr := &Container{ID: "ctr0"}
+
+	for _, tc := range []struct {
+		name    string
+		spec    *rspec.Spec
+		stdout  string
+		call    func(*Suite)
+		feature string
+		surface string
+		detail  string
+	}{
+		{
+			name:    "annotation",
+			spec:    &rspec.Spec{Annotations: map[string]string{"k": "v"}},
+			call:    func(s *Suite) { s.ExpectAnnotation(ctr, "k", "other") },
+			feature: "annotation",
+			surface: "OCI spec",
+			detail:  "other",
+		},
+		{
+			name:    "env",
+			spec:    &rspec.Spec{Process: &rspec.Process{Env: []string{"K=V"}}},
+			stdout:  "PATH=/bin\x00",
+			call:    func(s *Suite) { s.ExpectEnv(ctr, "K", "V") },
+			feature: "env",
+			surface: "OCI spec + /proc/self/environ",
+			detail:  "process environment",
+		},
+		{
+			name:    "mount",
+			spec:    &rspec.Spec{Mounts: []rspec.Mount{{Destination: "/dst"}}},
+			stdout:  "proc /proc proc rw 0 0\n",
+			call:    func(s *Suite) { s.ExpectMount(ctr, "/dst") },
+			feature: "mount",
+			surface: "OCI spec + /proc/self/mounts",
+			detail:  "/dst",
+		},
+		{
+			name:    "cpuset",
+			stdout:  "Cpus_allowed_list:\t0-43\nMems_allowed_list:\t0-1\n",
+			call:    func(s *Suite) { s.ExpectCpuset(ctr, "0") },
+			feature: "cpuset",
+			surface: "/proc/self/status",
+			detail:  "0-43",
+		},
+		{
+			name:    "mems",
+			stdout:  "Cpus_allowed_list:\t0-1\nMems_allowed_list:\t0-1\n",
+			call:    func(s *Suite) { s.ExpectMems(ctr, "0") },
+			feature: "mems",
+			surface: "/proc/self/status",
+			detail:  "Mems_allowed_list",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			i := &specInspector{spec: tc.spec}
+			i.stdout = tc.stdout
+
+			s, ft, r := expectCollectingSuite(t, i)
+
+			// No require.Panics: in collecting mode the wrapper returns, and
+			// fakeT.FailNow panics, so returning at all proves it did not abort.
+			tc.call(s)
+
+			findings := r.Findings()
+			require.Len(t, findings, 1)
+			require.Equal(t, tc.feature, findings[0].Feature,
+				"the wrapper must record its own feature")
+			require.Equal(t, tc.surface, findings[0].Surface,
+				"the wrapper must record the surface it read")
+
+			// The container id reaches the summary only through the error, since a
+			// Finding has nowhere else to carry it, and the expectation's own text
+			// must survive the wrapping that puts it there.
+			require.ErrorContains(t, findings[0].Err, "container ctr0")
+			require.ErrorContains(t, findings[0].Err, tc.detail)
+			require.Contains(t, ft.allErrors(), "container ctr0",
+				"a collected failure is still reported against the case")
+		})
+	}
+}
+
 func TestSuiteExpectAnnotation(t *testing.T) {
 	ctr := &Container{ID: "ctr0"}
 

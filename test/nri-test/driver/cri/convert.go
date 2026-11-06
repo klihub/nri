@@ -56,7 +56,18 @@ func ContainerConfig(cfg *framework.Config, c *framework.ContainerSpec) *runtime
 			Name:    c.Name,
 			Attempt: 0,
 		},
-		Image:       &runtimeapi.ImageSpec{Image: image},
+		Image: &runtimeapi.ImageSpec{
+			Image: image,
+			// Both fields, always, and never one without the other.
+			//
+			// CRI-O requires UserSpecifiedImage: with it empty it refuses the
+			// creation outright, with "user specified image not specified, cannot
+			// verify image signature", so a suite that omits it cannot create a
+			// single container there. containerd does not require it, so omitting it
+			// costs nothing there and blocks CRI-O entirely. Image stays as it is:
+			// it is what the runtime resolves the image from.
+			UserSpecifiedImage: image,
+		},
 		Command:     c.Command,
 		Args:        c.Args,
 		Labels:      c.Labels,

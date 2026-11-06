@@ -20,8 +20,12 @@ so that it reuses the entire assertion layer unchanged.
 - [Why a new tool](#why-a-new-tool)
 - [Non-goals](#non-goals)
 - [Requirements](#requirements)
+- [Building and testing](#building-and-testing)
+- [Running against a node](#running-against-a-node)
+- [Layout](#layout)
 - [Architecture](#architecture)
 - [Verification](#verification)
+- [Reporting](#reporting)
 - [The low-level runtime](#the-low-level-runtime)
 - [Isolation](#isolation)
 - [Gating](#gating)
@@ -78,6 +82,106 @@ selectable, so a failure can be located rather than merely observed. See
   summary.
 - **No ginkgo, no gomega.** Standard library `testing` plus
   `github.com/stretchr/testify/require`, matching `pkg/adaptation`.
+
+## Building and testing
+
+```
+make nri-test          # from the repository root, writes build/bin/nri-test
+```
+
+One binary, packaged like `critest`: `-test.run` selects tests, `-test.v`
+controls verbosity, and the suite's own flags are registered from `init()`.
+
+A separate Go module is required, not merely tidy: `k8s.io/cri-api` today and
+`k8s.io/client-go` later must not enter the root `go.mod`, which containerd and
+CRI-O vendor. The repository already uses per-directory modules for `plugins/*`
+and `examples/`, so this follows an established pattern.
+
+Unit tests cover the framework's pure parts and the CRI driver's conversions:
+
+```
+cd test/nri-test
+go test -race ./framework/... ./driver/...
+go vet ./framework/... ./driver/...
+```
+
+The `suite` package is not unit-testable: its `TestMain` calls
+`framework.Setup`, which needs root and a live runtime, so `go test ./...`
+fails there on any ordinary workstation. That failure is expected and is not a
+regression. Listing is the exception and works anywhere:
+
+```
+./build/bin/nri-test -test.list '.*'
+```
+
+## Running against a node
+
+```
+bash hack/run-nri-test.sh runc          # one handler per invocation
+bash hack/run-nri-test.sh crun
+bash hack/run-nri-test.sh '' -test.run=TestSmoke
+```
+
+The script builds with `CGO_ENABLED=0`, copies the binary to the node, stops
+kubelet, runs the suite, and restores kubelet on every exit path. Node, ssh
+config, endpoints and timeout come from the environment; read its header before
+using it.
+
+Three things about it are load-bearing:
+
+- **One run at a time per node.** The interrupt path identifies the remote
+  suite by its binary path, because nothing on the remote command line
+  distinguishes one invocation from another. A second run, or a copy started by
+  hand, is killed as root.
+- **Kubelet must be down for a CRI-mode run.** Kubelet garbage-collects
+  sandboxes it does not recognise, and the suite creates exactly those. The
+  suite detects a running kubelet and refuses rather than stopping it itself;
+  `-nri-test.allow-kubelet` overrides, and accepts that sandboxes may vanish
+  mid-run.
+- **An unconfirmed stop withholds the restore** and exits 2. A node left with
+  kubelet down is loud and one command to fix. A kubelet collecting a live
+  sweep's sandboxes is neither.
+
+To sweep both low-level runtimes, invoke once per handler. The flag is
+single-valued on purpose: one that accepted a list and ran one entry of it
+would misreport what produced the result.
+
+## Layout
+
+```
+test/nri-test/
+|-- go.mod                    module github.com/containerd/nri/test/nri-test
+|                             replace github.com/containerd/nri => ../..
+|-- framework/                mode-agnostic library
+|   |-- config.go             flags -> Config
+|   |-- suite.go              Suite: run-level Setup/Teardown, per-case lifecycle
+|   |-- plugin.go             TestPlugin -- ported mockPlugin, scope-filtered
+|   |-- eventq.go             Event/EventQ -- ported from pkg/adaptation/suite_test.go
+|   |-- driver.go             Driver interface + Capability bits
+|   |-- inspector.go          Inspector + Executor interfaces, Observed
+|   |-- spec.go               PodSpec / ContainerSpec (mode-neutral)
+|   |-- scope.go              Scope: the run's isolation guard
+|   |-- stale.go              stale-workload notice
+|   |-- expect.go             adjustment -> spec and kernel assertions
+|   |-- proc.go               /proc/<pid>/status parser
+|   |-- gate.go               capability / version / environment / CPU / NUMA / handler gates
+|   |-- report.go             Finding, Skip, Report, the end-of-run summary
+|   |-- kubelet.go            kubelet detection and the CRI-mode refusal
+|   `-- listing.go            -test.list detection, so listing needs no runtime
+|-- driver/cri/               Driver + Inspector over CRI
+|   |-- client.go             cri-api dial for runtime and image services
+|   |-- driver.go             Driver implementation
+|   |-- convert.go            PodSpec/ContainerSpec -> CRI configs
+|   `-- inspector.go          ContainerStatus(verbose) -> runtimeSpec decode
+`-- suite/                    package suite -- all *_test.go, one test binary
+    |-- main_test.go          TestMain, flag registration, exit code
+    |-- smoke_test.go         one end-to-end lifecycle + OCI-spec check
+    |-- connection_test.go    registration, configuration, version exchange
+    |-- sync_test.go          synchronization + Container-proto fidelity
+    |-- lifecycle_test.go     runLifecycle helper + subscription-mask table
+    |-- ordering_test.go      multi-plugin invocation order by index
+    `-- adjust_test.go        five creation adjustments, spec and kernel
+```
 
 ## Architecture
 
@@ -288,6 +392,60 @@ left to write.
 
 The flag is **not** registered until the check exists: a flag registered ahead
 of its feature does nothing, and says nothing about doing nothing.
+
+## Reporting
+
+A wrapper ending in `require.NoError` calls `FailNow`, so one failure per test
+is all a run reports, and enumerating what a runtime does differently takes as
+many runs as there are failures.
+
+**Expectations collect. Driver calls stay fatal.** `CreatePod`,
+`CreateContainer`, `StartContainer`, `Exec` and `Inspect` still end their test,
+because a collected creation failure leaves the body running with a nil
+`*Container` and fills the summary with derived noise that buries the one real
+finding. A failed operation ends its test; a failed comparison does not.
+
+**A failure is recorded in both modes.** The mode decides whether the test
+aborts, not whether the failure is reported. A fatal driver call is recorded
+too, under its own kind: leaving it unrecorded is how a 34-failure run once
+printed `No expectation failures were collected`, which is worse than printing
+nothing at all, because a reader believes it.
+
+**The default is failing.** `-nri-test.collect-failures` selects collecting
+mode. A collecting default would make a CI report green on real failures unless
+CI remembered to pass a flag. In collecting mode the run still exits non-zero
+if anything was collected: collecting changes *when* the suite stops, not
+whether it reports.
+
+`Teardown` prints a summary: a header naming the runtime, its version, the NRI
+version, the runtime handler and the run id; then expectation failures with the
+test, the feature and the surface read; then failed operations; then every skip
+with its reason; then a count of both failure kinds.
+
+**Four things the summary does not see**, which matters when you read one:
+
+1. `Suite.CreatePod`'s guard against a pod spec carrying containers for a
+   driver that creates them individually. Deliberate: a suite bug, not a
+   runtime result.
+2. The gates' own inability-to-evaluate aborts. Deliberate, same reason.
+3. Every bare `require.*` and `t.Errorf` in the `suite` package. Only
+   `adjust_test.go` calls `Suite.Expect*` at all, so most tests still fail at
+   their first assertion in both modes. Unconverted, not deliberate.
+4. The per-case cleanup and leak guards, including the pod and container leak
+   reports. Unconverted.
+
+Because of 3 and 4 a run can fail entirely through paths the summary cannot
+see. It says so when that happens: a failing run with nothing collected prints
+that it failed through assertions the summary does not see, and that the test
+output is the only account of what. Converting the leak and cleanup guards to
+record is the real remedy and is still owed.
+
+**A skip is not a failure.** Skips are recorded so the summary can name what
+went unverified, but `HasFindings` counts findings only, so a run whose gates
+all skipped exits zero. `testing` offers no way to enumerate skips after the
+fact and `m.Run` returns only an exit code, so every skip site records as it
+skips, through `framework.Skipped`. A direct `t.Skip` in a new test is
+invisible to the summary.
 
 ## The low-level runtime
 
@@ -532,6 +690,7 @@ flags, which follow `critest` naming:
 | `-nri-test.collect-failures` | false | collect expectation failures into an end-of-run summary instead of failing at the first; the run still exits non-zero if anything was collected |
 | `-nri-test.allow-kubelet` | false | run even though a kubelet process is present; its sandbox garbage collection may remove this run's pods mid-test |
 | `-nri-test.runtime-handler` | empty | CRI runtime handler, and so the low-level runtime, to create pods with; empty means the runtime's own default. One handler per run |
+| `-nri-test.cgroup-parent` | empty | cgroup parent for the run's pods; empty lets the runtime derive one. A runtime configured for systemd cgroups rejects the form it derives for a pod with no parent, so such a node needs a systemd slice, `system.slice` |
 
 ### What `Setup` does before any test runs
 

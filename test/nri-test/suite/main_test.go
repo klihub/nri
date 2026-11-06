@@ -67,6 +67,26 @@ func TestMain(m *testing.M) {
 
 	code := m.Run()
 
-	framework.Teardown()
+	// Teardown prints the run's summary, so it runs before the exit code is
+	// decided and before the process leaves.
+	//
+	// It is handed m.Run's verdict, because the summary cannot derive it. Most of
+	// this package asserts through bare require and t.Errorf calls, which record
+	// nothing with the report, so a run that failed only through those would print
+	// an empty summary that reads exactly like a clean one. With the code in hand
+	// the summary says instead that it is blind and that the output above is the
+	// only account of what failed.
+	framework.Teardown(code)
+
+	// A run that collected a failure must not exit 0. In collecting mode a
+	// failure is reported through Errorf, so go test already fails the run and
+	// this changes nothing; this is the belt for the case where a finding was
+	// recorded but the test's own verdict somehow did not carry it, which is the
+	// dropped-update defect one level up: the summary says it failed and the exit
+	// code says it passed, and CI believes the exit code.
+	if code == 0 && framework.TestReport.HasFindings() {
+		code = 1
+	}
+
 	os.Exit(code)
 }
