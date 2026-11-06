@@ -47,6 +47,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -406,4 +407,111 @@ func TestScalabilityPathological(t *testing.T) {
 	t.Logf("  one at a time %v (%d x %v)", serial, n, delay)
 	t.Logf("  speedup      %.1fx", float64(serial)/float64(total))
 	t.Logf("  plugin saw   %d requests, %d failed", len(rig.plugins[0].Seen()), failed)
+}
+
+// TestApplyRunsInArrivalOrder is the guarantee as a runtime sees it.
+//
+// Observable from out here only because apply runs inside the commit
+// section: what it writes down is written while the order is held, so
+// there is no window between committing and recording for the scheduler to
+// reorder. That is what the old end-to-end check lacked, and why it had to
+// measure the scheduler instead.
+//
+// Requests are issued one at a time, each handed to its own goroutine once
+// the plugin has taken the previous one, so the arrival order is known. The
+// plugin's delay falls as they arrive, so whichever it sees last it answers
+// first: an implementation that applied answers as they came back would
+// reverse them.
+func TestApplyRunsInArrivalOrder(t *testing.T) {
+	const (
+		count = 8
+		step  = 20 * time.Millisecond
+	)
+
+	delay := func(ctr *api.Container) time.Duration {
+		i, err := strconv.Atoi(ctr.Id[len("ctr-"):])
+		if err != nil {
+			return step
+		}
+
+		return time.Duration(count-i) * step
+	}
+
+	rig := startRig(t, 1, delay)
+	plugin := rig.plugins[0]
+
+	var (
+		mu      sync.Mutex
+		applied []string
+		inside  int
+		overlap int
+		wg      sync.WaitGroup
+	)
+
+	for i := 0; i < count; i++ {
+		ctr := container(i)
+
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			err := rig.runtime.CreateContainerAndApply(context.Background(),
+				&api.CreateContainerRequest{Pod: pod(), Container: ctr},
+				func(*api.CreateContainerResponse) error {
+					mu.Lock()
+					inside++
+					if inside > overlap {
+						overlap = inside
+					}
+					applied = append(applied, ctr.Id)
+					mu.Unlock()
+
+					// Held open, so an implementation that let the next
+					// request apply early is caught rather than raced with.
+					time.Sleep(time.Millisecond)
+
+					mu.Lock()
+					inside--
+					mu.Unlock()
+
+					return nil
+				})
+			if err != nil {
+				t.Errorf("CreateContainerAndApply %s: %v", ctr.Id, err)
+			}
+		}()
+
+		waitForObserved(t, plugin, i+1)
+	}
+
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	require.Equal(t, 1, overlap, "two requests must not apply at once")
+	require.Equal(t, plugin.Seen(), applied,
+		"answers must be applied in the order the requests arrived")
+}
+
+// waitForObserved blocks until plugin has taken at least want requests.
+//
+// How a test fixes the arrival order: the next request is not issued until
+// the plugin has taken the previous one, so what arrives when is the test's
+// choice rather than the scheduler's.
+func waitForObserved(t *testing.T, plugin *delayPlugin, want int) {
+	t.Helper()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(plugin.Seen()) >= want {
+			return
+		}
+
+		time.Sleep(time.Millisecond)
+	}
+
+	t.Fatalf("plugin %s took %d requests, waited for %d",
+		plugin.name, len(plugin.Seen()), want)
 }

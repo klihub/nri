@@ -330,7 +330,41 @@ func (r *Adaptation) RemovePodSandbox(ctx context.Context, req *RemovePodSandbox
 }
 
 // CreateContainer relays the corresponding CRI request to plugins.
+//
+// The caller applies what this returns, and does so after NRI has let go of
+// the order, so the cross-container decisions of two concurrent requests
+// can still be applied the wrong way round. CreateContainerAndApply closes
+// that; this is kept for callers that have not moved to it.
 func (r *Adaptation) CreateContainer(ctx context.Context, req *CreateContainerRequest) (*CreateContainerResponse, error) {
+	var rpl *CreateContainerResponse
+
+	err := r.CreateContainerAndApply(ctx, req, func(resp *CreateContainerResponse) error {
+		rpl = resp
+
+		return nil
+	})
+
+	return rpl, err
+}
+
+// CreateContainerAndApply relays the request to plugins and calls apply
+// with the answer, in the order the requests arrived.
+//
+// apply is where a runtime puts the answer into practice: the container
+// updates and evictions it carries reach containers other than the one this
+// request is about, so two requests applying them out of order is exactly
+// what the ordering guarantee forbids. The next request's apply does not
+// start until this one has returned, so there is one order and the runtime
+// is inside it.
+//
+// A callback rather than a handle to release, because a handle a caller
+// forgets does not weaken the order, it stops it: every later request would
+// wait for a turn that never comes. A callback cannot be forgotten.
+//
+// An adjustment needs none of this. It describes the container the request
+// is about, which no other request touches.
+func (r *Adaptation) CreateContainerAndApply(ctx context.Context, req *CreateContainerRequest,
+	apply func(*CreateContainerResponse) error) error {
 	defer r.removeClosed()
 
 	r.RLock()
@@ -357,11 +391,11 @@ func (r *Adaptation) CreateContainer(ctx context.Context, req *CreateContainerRe
 		}
 		rpl, err := plugin.createContainer(ctx, req)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		err = result.apply(rpl, plugin.name())
 		if err != nil {
-			return nil, err
+			return err
 		}
 	}
 
@@ -369,16 +403,20 @@ func (r *Adaptation) CreateContainer(ctx context.Context, req *CreateContainerRe
 	// ordered and run alongside other requests' validators.
 	rpl, err := r.validateContainerAdjustment(ctx, validate, result)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	// The caller applies what we return, so returning in order is what
-	// puts the decisions into practice in order.
 	if err := t.commitTurn(ctx); err != nil {
-		return nil, err
+		return err
 	}
 
-	return rpl, nil
+	if apply == nil {
+		return nil
+	}
+
+	// Inside the turn: release runs after this, so the next request's apply
+	// waits for it.
+	return apply(rpl)
 }
 
 // PostCreateContainer relays the corresponding CRI request to plugins.
@@ -433,7 +471,26 @@ func (r *Adaptation) PostStartContainer(ctx context.Context, req *PostStartConta
 }
 
 // UpdateContainer relays the corresponding CRI request to plugins.
+//
+// See CreateContainer: the answer is applied outside the order. Prefer
+// UpdateContainerAndApply.
 func (r *Adaptation) UpdateContainer(ctx context.Context, req *UpdateContainerRequest) (*UpdateContainerResponse, error) {
+	var rpl *UpdateContainerResponse
+
+	err := r.UpdateContainerAndApply(ctx, req, func(resp *UpdateContainerResponse) error {
+		rpl = resp
+
+		return nil
+	})
+
+	return rpl, err
+}
+
+// UpdateContainerAndApply relays the request to plugins and calls apply
+// with the answer, in the order the requests arrived. See
+// CreateContainerAndApply.
+func (r *Adaptation) UpdateContainerAndApply(ctx context.Context, req *UpdateContainerRequest,
+	apply func(*UpdateContainerResponse) error) error {
 	defer r.removeClosed()
 
 	r.RLock()
@@ -446,19 +503,23 @@ func (r *Adaptation) UpdateContainer(ctx context.Context, req *UpdateContainerRe
 	for _, plugin := range r.plugins {
 		rpl, err := plugin.updateContainer(ctx, req)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		err = result.apply(rpl, plugin.name())
 		if err != nil {
-			return nil, err
+			return err
 		}
 	}
 
 	if err := t.commitTurn(ctx); err != nil {
-		return nil, err
+		return err
 	}
 
-	return result.updateContainerResponse(), nil
+	if apply == nil {
+		return nil
+	}
+
+	return apply(result.updateContainerResponse())
 }
 
 // PostUpdateContainer relays the corresponding CRI request to plugins.
@@ -479,7 +540,26 @@ func (r *Adaptation) PostUpdateContainer(ctx context.Context, req *PostUpdateCon
 }
 
 // StopContainer relays the corresponding CRI request to plugins.
+//
+// See CreateContainer: the answer is applied outside the order. Prefer
+// StopContainerAndApply.
 func (r *Adaptation) StopContainer(ctx context.Context, req *StopContainerRequest) (*StopContainerResponse, error) {
+	var rpl *StopContainerResponse
+
+	err := r.StopContainerAndApply(ctx, req, func(resp *StopContainerResponse) error {
+		rpl = resp
+
+		return nil
+	})
+
+	return rpl, err
+}
+
+// StopContainerAndApply relays the request to plugins and calls apply with
+// the answer, in the order the requests arrived. See
+// CreateContainerAndApply.
+func (r *Adaptation) StopContainerAndApply(ctx context.Context, req *StopContainerRequest,
+	apply func(*StopContainerResponse) error) error {
 	defer r.removeClosed()
 
 	r.RLock()
@@ -492,19 +572,23 @@ func (r *Adaptation) StopContainer(ctx context.Context, req *StopContainerReques
 	for _, plugin := range r.plugins {
 		rpl, err := plugin.stopContainer(ctx, req)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		err = result.apply(rpl, plugin.name())
 		if err != nil {
-			return nil, err
+			return err
 		}
 	}
 
 	if err := t.commitTurn(ctx); err != nil {
-		return nil, err
+		return err
 	}
 
-	return result.stopContainerResponse(), nil
+	if apply == nil {
+		return nil
+	}
+
+	return apply(result.stopContainerResponse())
 }
 
 // RemoveContainer relays the corresponding CRI request to plugins.
