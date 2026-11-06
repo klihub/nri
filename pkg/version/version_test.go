@@ -22,6 +22,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestGetFromBuildInfo(t *testing.T) {
+	// A binary built inside this repository records no build info entry for the
+	// NRI module: a nested module reaches it through a directory replace, and a
+	// test binary records no module dependencies at all. This test binary is
+	// such a build, so it must report the version embedded from git.
+	embedded := "v1.2.3-45-gabcdef"
+
+	saved := fallback
+	fallback = &embedded
+	t.Cleanup(func() { fallback = saved })
+
+	require.Equal(t, embedded, GetFromBuildInfo(),
+		"a build inside the repository must report the embedded git version")
+}
+
 func TestStripGitSuffix(t *testing.T) {
 	for _, tc := range []*struct {
 		name     string

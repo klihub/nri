@@ -15,7 +15,7 @@
 #   limitations under the License.
 
 out=$1
-version=$(git describe --always --dirty=.m 2>/dev/null)
+version=$(git describe --tags --always --dirty=.m 2>/dev/null)
 
 if [ -z "$version" ]; then
     version="0.0.0-unknown"
