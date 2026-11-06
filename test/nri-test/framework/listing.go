@@ -35,3 +35,19 @@ func listingOnly(fs *flag.FlagSet) bool {
 
 	return f.Value.String() != ""
 }
+
+// selectedTests returns the value of -test.run, or "" when it is not set.
+func selectedTests() string {
+	return selectedTestsIn(flag.CommandLine)
+}
+
+// selectedTestsIn is selectedTests over an arbitrary flag set, including one
+// that registers no test.run flag at all.
+func selectedTestsIn(fs *flag.FlagSet) string {
+	f := fs.Lookup("test.run")
+	if f == nil {
+		return ""
+	}
+
+	return f.Value.String()
+}

@@ -41,3 +41,21 @@ func TestListingOnlyWithoutFlag(t *testing.T) {
 	fs := flag.NewFlagSet("bare", flag.ContinueOnError)
 	require.False(t, listingOnly(fs), "a set without test.list is not a listing run")
 }
+
+func TestSelectedTests(t *testing.T) {
+	// What a fragment records as its selection, and what the status document
+	// qualifies its negative claims with, so an unset flag has to read as an
+	// unfiltered run rather than as a filter nobody set.
+	fs := flag.NewFlagSet("suite", flag.ContinueOnError)
+	fs.String("test.run", "", "")
+
+	require.Equal(t, "", selectedTestsIn(fs), "an unset -test.run selects every test")
+
+	require.NoError(t, fs.Set("test.run", "TestInput"))
+	require.Equal(t, "TestInput", selectedTestsIn(fs))
+}
+
+func TestSelectedTestsWithoutFlag(t *testing.T) {
+	fs := flag.NewFlagSet("bare", flag.ContinueOnError)
+	require.Equal(t, "", selectedTestsIn(fs), "a set without test.run selects every test")
+}
