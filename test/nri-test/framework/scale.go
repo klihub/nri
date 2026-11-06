@@ -114,6 +114,26 @@ func TeardownPhase() Phase {
 	}
 }
 
+// ChurnPhase is the mixed measurement: pods arriving while others leave.
+//
+// A busy node does both at once, so measuring them only as separate phases
+// measures something it never does. It matters for NRI in particular
+// because CreateContainer and StopContainer are two of the three requests a
+// plugin can answer with a change, so a churn is where the two contend for
+// whatever establishes the order those answers are applied in.
+//
+// Unordered, and with no anchor: a pod in this phase is either going up or
+// coming down, so there is no stage every pod passes through and no order
+// the stages follow across the set. Per-stage arrivals from the phase's
+// first event are what it is read by.
+func ChurnPhase() Phase {
+	return Phase{
+		Name:    "churn",
+		Stages:  append(slices.Clone(scaleStages), teardownStages...),
+		Ordered: false,
+	}
+}
+
 // podLevelStages are the stages that describe the pod rather than a container
 // in it. Reported separately because a burst can be slow at getting sandboxes
 // created and fast at the containers inside them, or the reverse, and the two
