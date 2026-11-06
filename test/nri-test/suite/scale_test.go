@@ -322,10 +322,13 @@ func runCRIBurst(t *testing.T, iteration int) {
 	// What the burst created, so teardown measures the same set and nothing is
 	// left behind if a later step fails.
 	var (
-		mu    sync.Mutex
-		pods  []*framework.Pod
-		ctrs  []*framework.Container
-		names []string
+		mu   sync.Mutex
+		pods []*framework.Pod
+		ctrs []*framework.Container
+		// created only grows, so the cleanup covers a churn's pods too and
+		// a pod the churn failed to remove is not left behind.
+		created []*framework.Pod
+		names   []string
 	)
 
 	t.Cleanup(func() {
@@ -339,7 +342,7 @@ func runCRIBurst(t *testing.T, iteration int) {
 		cctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
 		defer cancel()
 
-		for _, p := range pods {
+		for _, p := range created {
 			_ = s.Driver().StopPod(cctx, p)
 			_ = s.Driver().RemovePod(cctx, p)
 		}
@@ -369,69 +372,20 @@ func runCRIBurst(t *testing.T, iteration int) {
 		go func(spec *framework.PodSpec) {
 			defer wg.Done()
 
-			var pod *framework.Pod
-
-			err := ops.Time(&framework.OpRecord{
-				Op: framework.RunPodSandbox, PodName: spec.Name,
-			}, func() error {
-				var err error
-				pod, err = s.Driver().CreatePod(q.ctxFor(ctx, spec.Name), spec)
-
-				return err
-			})
-
-			if pod != nil {
-				q.learn(pod.ID, spec.Name)
-
-				mu.Lock()
-				pods = append(pods, pod)
-				names = append(names, spec.Name)
-				mu.Unlock()
-			}
-
-			if err != nil || pod == nil {
-				return
-			}
-
-			cspec := s.CtrSpec("burst")
-
-			var ctr *framework.Container
-
-			crec := &framework.OpRecord{
-				Op: framework.CreateContainer, PodName: spec.Name,
-				PodID: pod.ID, CtrName: cspec.Name,
-			}
-
-			err = ops.Time(crec, func() error {
-				var err error
-				ctr, err = s.Driver().CreateContainer(q.ctxFor(ctx, spec.Name), pod, cspec)
-
-				return err
-			})
-
-			// The id only exists once the call has returned, and CorrelateOps
-			// keys container operations on it, so filling it in afterwards is
-			// what lets this call be matched to its callback at all. Safe to
-			// write here: the records are read after the burst's goroutines
-			// have joined.
-			if ctr != nil {
-				crec.CtrID = ctr.ID
-			}
-
-			if err != nil || ctr == nil {
-				return
-			}
+			pod, ctr := createBurstPod(s, q, spec, ops, ctx)
 
 			mu.Lock()
-			ctrs = append(ctrs, ctr)
-			mu.Unlock()
+			defer mu.Unlock()
 
-			_ = ops.Time(&framework.OpRecord{
-				Op: framework.StartContainer, PodName: spec.Name,
-				PodID: pod.ID, CtrName: cspec.Name, CtrID: ctr.ID,
-			}, func() error {
-				return s.Driver().StartContainer(q.ctxFor(ctx, spec.Name), ctr)
-			})
+			if pod != nil {
+				pods = append(pods, pod)
+				created = append(created, pod)
+				names = append(names, spec.Name)
+			}
+
+			if ctr != nil {
+				ctrs = append(ctrs, ctr)
+			}
 		}(spec)
 	}
 
@@ -456,6 +410,59 @@ func runCRIBurst(t *testing.T, iteration int) {
 	upReport.ClientBurst = framework.ClientBurst(ops.Records(), up)
 	upReport.Print(os.Stdout)
 
+	reports := []*framework.ScaleReport{upReport}
+
+	// Churn, when asked for: the next set of pods created while this set is
+	// torn down, so creates and stops contend the way they do on a node that
+	// is actually busy.
+	if cfg.ScaleChurn {
+		churnSpecs := make([]*framework.PodSpec, 0, n)
+		for i := 0; i < n; i++ {
+			churnSpecs = append(churnSpecs, s.PodSpec("churn"))
+		}
+
+		// Five calls per pod arriving, two per pod leaving.
+		churnOps := framework.NewOpLog(n*3 + len(pods)*2)
+
+		churnCtx, churnCancel := context.WithTimeout(context.Background(),
+			cfg.ScalePhaseBudget())
+
+		newPods, newCtrs := churnCRIBurst(t, s, q, churnSpecs, pods, churnOps, churnCtx)
+
+		churnCancel()
+
+		churnNames := make([]string, 0, len(churnSpecs))
+		for _, spec := range churnSpecs {
+			churnNames = append(churnNames, spec.Name)
+		}
+
+		// Both directions' pods: this phase records the ones leaving as well
+		// as the ones arriving, and the report is of the two together.
+		churnNamesAll := append(slices.Clone(names), churnNames...)
+
+		waitForStage(q, churnNames, cfg.ScaleTerminal(), len(churnNames), q.grace())
+		waitForStage(q, names, framework.RemovePodSandbox, len(names), q.grace())
+
+		churnEvents := q.Events()
+
+		churn := framework.NewPhaseTimeline(cfg, churnEvents, churnNamesAll,
+			framework.ChurnPhase())
+		churnReport := q.report(iteration, n, churn, churnNamesAll)
+		churnReport.OpStats = framework.CorrelateOps(churnOps.Records(), churnEvents)
+		churnReport.ClientBurst = framework.ClientBurst(churnOps.Records(), churn)
+		churnReport.Print(os.Stdout)
+
+		reports = append(reports, churnReport)
+
+		// What the teardown below is left with.
+		mu.Lock()
+		pods = newPods
+		ctrs = append(ctrs, newCtrs...)
+		created = append(created, newPods...)
+		names = churnNames
+		mu.Unlock()
+	}
+
 	// Teardown, measured the same way, and it is also the cleanup: the pods
 	// this burst created are stopped and removed together, so the measurement
 	// and the tidy-up are the same act rather than two.
@@ -476,8 +483,10 @@ func runCRIBurst(t *testing.T, iteration int) {
 	downReport.ClientBurst = framework.ClientBurst(downOps.Records(), down)
 	downReport.Print(os.Stdout)
 
+	reports = append(reports, downReport)
+
 	if cfg.ScaleReportPath != "" {
-		writeScaleReports(t, cfg.ScaleReportPath, iteration, upReport, downReport)
+		writeScaleReports(t, cfg.ScaleReportPath, iteration, reports...)
 	}
 
 	// The deliverable is the measurement, so the assertions are about whether
@@ -521,6 +530,147 @@ func runCRIBurst(t *testing.T, iteration int) {
 
 // tearDownCRIBurst stops and removes the burst's pods together, timing each
 // call.
+// createBurstPod creates a pod, a container in it, and starts the container,
+// timing every call.
+//
+// Returns whatever it got as far as, so a caller can tear down a pod that
+// only partly came up rather than leak it.
+func createBurstPod(s *framework.Suite, q *scaleSource, spec *framework.PodSpec,
+	ops *framework.OpLog, ctx context.Context) (*framework.Pod, *framework.Container) {
+	var pod *framework.Pod
+
+	err := ops.Time(&framework.OpRecord{
+		Op: framework.RunPodSandbox, PodName: spec.Name,
+	}, func() error {
+		var err error
+		pod, err = s.Driver().CreatePod(q.ctxFor(ctx, spec.Name), spec)
+
+		return err
+	})
+
+	if pod != nil {
+		q.learn(pod.ID, spec.Name)
+	}
+
+	if err != nil || pod == nil {
+		return pod, nil
+	}
+
+	cspec := s.CtrSpec("burst")
+
+	var ctr *framework.Container
+
+	crec := &framework.OpRecord{
+		Op: framework.CreateContainer, PodName: spec.Name,
+		PodID: pod.ID, CtrName: cspec.Name,
+	}
+
+	err = ops.Time(crec, func() error {
+		var err error
+		ctr, err = s.Driver().CreateContainer(q.ctxFor(ctx, spec.Name), pod, cspec)
+
+		return err
+	})
+
+	// The id only exists once the call has returned, and CorrelateOps keys
+	// container operations on it, so filling it in afterwards is what lets
+	// this call be matched to its callback at all. Safe to write here: the
+	// records are read after the burst's goroutines have joined.
+	if ctr != nil {
+		crec.CtrID = ctr.ID
+	}
+
+	if err != nil || ctr == nil {
+		return pod, nil
+	}
+
+	_ = ops.Time(&framework.OpRecord{
+		Op: framework.StartContainer, PodName: spec.Name,
+		PodID: pod.ID, CtrName: cspec.Name, CtrID: ctr.ID,
+	}, func() error {
+		return s.Driver().StartContainer(q.ctxFor(ctx, spec.Name), ctr)
+	})
+
+	return pod, ctr
+}
+
+// stopBurstPod stops and removes one pod, timing both calls.
+//
+// StopPod first, then RemovePod, which is the order a client has to use.
+// Both are timed: the NRI teardown events are spread across them and which
+// one carries which is a runtime's choice, which is why the teardown phase
+// does not assume an order.
+func stopBurstPod(s *framework.Suite, q *scaleSource, pod *framework.Pod,
+	ops *framework.OpLog, ctx context.Context) {
+	_ = ops.Time(&framework.OpRecord{
+		Op: framework.StopPodSandbox, PodName: pod.Spec.Name, PodID: pod.ID,
+	}, func() error {
+		return s.Driver().StopPod(q.ctxFor(ctx, pod.Spec.Name), pod)
+	})
+
+	_ = ops.Time(&framework.OpRecord{
+		Op: framework.RemovePodSandbox, PodName: pod.Spec.Name, PodID: pod.ID,
+	}, func() error {
+		return s.Driver().RemovePod(q.ctxFor(ctx, pod.Spec.Name), pod)
+	})
+}
+
+// churnCRIBurst creates one set of pods while tearing another down, every
+// call released together.
+//
+// This is the shape a busy node actually has, and for NRI it is the case
+// where CreateContainer and StopContainer contend: both are requests a
+// plugin can answer with a change, so both go through whatever establishes
+// the order those answers are applied in. Measuring them only as separate
+// phases never puts that under load.
+func churnCRIBurst(t *testing.T, s *framework.Suite, q *scaleSource,
+	specs []*framework.PodSpec, down []*framework.Pod, ops *framework.OpLog,
+	ctx context.Context) ([]*framework.Pod, []*framework.Container) {
+	t.Helper()
+
+	var (
+		mu   sync.Mutex
+		wg   sync.WaitGroup
+		pods []*framework.Pod
+		ctrs []*framework.Container
+	)
+
+	for _, spec := range specs {
+		wg.Add(1)
+
+		go func(spec *framework.PodSpec) {
+			defer wg.Done()
+
+			pod, ctr := createBurstPod(s, q, spec, ops, ctx)
+
+			mu.Lock()
+			defer mu.Unlock()
+
+			if pod != nil {
+				pods = append(pods, pod)
+			}
+
+			if ctr != nil {
+				ctrs = append(ctrs, ctr)
+			}
+		}(spec)
+	}
+
+	for _, pod := range down {
+		wg.Add(1)
+
+		go func(pod *framework.Pod) {
+			defer wg.Done()
+
+			stopBurstPod(s, q, pod, ops, ctx)
+		}(pod)
+	}
+
+	wg.Wait()
+
+	return pods, ctrs
+}
+
 func tearDownCRIBurst(t *testing.T, s *framework.Suite, q *scaleSource, pods []*framework.Pod,
 	ops *framework.OpLog, ctx context.Context) {
 	t.Helper()
@@ -533,21 +683,7 @@ func tearDownCRIBurst(t *testing.T, s *framework.Suite, q *scaleSource, pods []*
 		go func(pod *framework.Pod) {
 			defer wg.Done()
 
-			// StopPod first, then RemovePod, which is the order a client has to
-			// use. Both are timed: the NRI teardown events are spread across
-			// them and which one carries which is a runtime's choice, which is
-			// why the teardown phase does not assume an order.
-			_ = ops.Time(&framework.OpRecord{
-				Op: framework.StopPodSandbox, PodName: pod.Spec.Name, PodID: pod.ID,
-			}, func() error {
-				return s.Driver().StopPod(q.ctxFor(ctx, pod.Spec.Name), pod)
-			})
-
-			_ = ops.Time(&framework.OpRecord{
-				Op: framework.RemovePodSandbox, PodName: pod.Spec.Name, PodID: pod.ID,
-			}, func() error {
-				return s.Driver().RemovePod(q.ctxFor(ctx, pod.Spec.Name), pod)
-			})
+			stopBurstPod(s, q, pod, ops, ctx)
 		}(pod)
 	}
 

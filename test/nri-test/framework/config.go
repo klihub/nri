@@ -204,6 +204,9 @@ type Config struct {
 	// turns the scalability test off, which is what an ordinary conformance
 	// run wants: it is the only mode that talks to Kubernetes.
 	ScaleReplicas int
+	// ScaleChurn runs a churn phase after the startup burst: another set of
+	// pods created while the first set is torn down, measured together.
+	ScaleChurn bool
 	// ScaleIterations is how many bursts to measure.
 	ScaleIterations int
 	// ScaleSettle bounds how long a burst's events are waited for.
@@ -330,6 +333,9 @@ func RegisterFlags() {
 	flag.StringVar(&TestConfig.ScaleTerminalEvent, "nri-test.scale-terminal",
 		string(PostStartContainer),
 		"stage a burst is measured to: StartContainer or PostStartContainer")
+	flag.BoolVar(&TestConfig.ScaleChurn, "nri-test.scale-churn", false,
+		"after the startup burst, create another set of pods while tearing the "+
+			"first set down, and measure the two together")
 	flag.IntVar(&TestConfig.ScalePlugins, "nri-test.scale-plugins", 1,
 		"plugins kept registered during a scalability run, the recorder included; "+
 			"the others simulate plugins that subscribe and take time to answer")

@@ -679,3 +679,47 @@ func TestArrivalsCountPodsThatNeverReachedTheStage(t *testing.T) {
 	require.Len(t, arrivals, 1)
 	require.Equal(t, 1, skipped)
 }
+
+// TestChurnPhaseCoversBothDirections pins that a churn measures the pods
+// arriving and the pods leaving in one phase.
+//
+// It also pins the two properties that make it readable: no anchor, because
+// a pod in a churn is going one way or the other and there is no stage all
+// of them pass through; and unordered, because the stages of the two
+// directions do not follow one another.
+func TestChurnPhaseCoversBothDirections(t *testing.T) {
+	p := ChurnPhase()
+
+	require.Equal(t, "churn", p.Name)
+	require.Empty(t, p.Anchor, "a churn has no stage every pod passes through")
+	require.False(t, p.Ordered, "the two directions' stages do not follow one another")
+
+	for _, st := range append(slices.Clone(scaleStages), teardownStages...) {
+		require.Contains(t, p.Stages, st)
+	}
+}
+
+// TestChurnArrivalsSpanBothDirections checks a churn's arrivals are measured
+// from the phase's first event whichever direction a pod was going, so a
+// create and a stop released together are comparable.
+func TestChurnArrivalsSpanBothDirections(t *testing.T) {
+	tl := &Timeline{
+		Phase:    ChurnPhase(),
+		Terminal: PostStartContainer,
+		Pods: []*PodTimeline{
+			{PodName: "arriving", At: map[EventType]time.Time{
+				RunPodSandbox: at(0), CreateContainer: at(400),
+			}},
+			{PodName: "leaving", At: map[EventType]time.Time{
+				StopContainer: at(100), RemovePodSandbox: at(700),
+			}},
+		},
+	}
+
+	creates, _ := tl.Arrivals(CreateContainer)
+	stops, _ := tl.Arrivals(StopContainer)
+
+	require.Equal(t, []time.Duration{400 * time.Millisecond}, creates)
+	require.Equal(t, []time.Duration{100 * time.Millisecond}, stops,
+		"a stop is measured from the churn's first event, not the pod's own")
+}
