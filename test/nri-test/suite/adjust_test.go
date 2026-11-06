@@ -60,7 +60,7 @@ func adjustingPlugin(s *framework.Suite, name string,
 	return p
 }
 
-// probeContainer creates and starts a container to read the node's unadjusted
+// probeContainer creates and starts a container, in a pod of its own, to read the node's unadjusted
 // view of a container from.
 //
 // Call it before this case's plugins are started, which is what makes it a probe:
@@ -72,8 +72,8 @@ func adjustingPlugin(s *framework.Suite, name string,
 // nothing while looking careful.
 //
 // Started, because the gates read /proc/self/status through an exec.
-func probeContainer(s *framework.Suite, pod *framework.Pod) *framework.Container {
-	probe := s.CreateContainer(pod, s.CtrSpec("probe"))
+func probeContainer(s *framework.Suite) *framework.Container {
+	_, probe := s.CreatePodWithContainer("probe", s.CtrSpec("probe"))
 	s.StartContainer(probe)
 
 	return probe
@@ -108,14 +108,11 @@ func requireSawCreateContainer(t *testing.T, s *framework.Suite, ctr *framework.
 func TestAdjustAnnotation(t *testing.T) {
 	t.Run("should reach the container's OCI spec", func(t *testing.T) {
 		s := framework.NewSuite(t, "adjust-annotation")
-		framework.RequireCaps(t, framework.CapContainerLifecycle)
-
 		s.StartPlugins(adjustingPlugin(s, "adjust-annotation", func(a *api.ContainerAdjustment) {
 			a.AddAnnotation("nri-test.containerd.io/adjusted", "yes")
 		}))
 
-		pod := s.CreatePod(s.PodSpec("pod"))
-		ctr := s.CreateContainer(pod, s.CtrSpec("ctr0"))
+		_, ctr := s.CreatePodWithContainer("pod", s.CtrSpec("ctr0"))
 
 		// Created is enough: the spec is readable before start, and an annotation
 		// has no in-container expression to check.
@@ -128,7 +125,7 @@ func TestAdjustAnnotation(t *testing.T) {
 func TestAdjustEnv(t *testing.T) {
 	t.Run("should reach the container's OCI spec and a process started in it", func(t *testing.T) {
 		s := framework.NewSuite(t, "adjust-env")
-		framework.RequireCaps(t, framework.CapContainerLifecycle|framework.CapExec)
+		framework.RequireCaps(t, framework.CapExec)
 
 		// A key in the suite's own namespace, so nothing else on the node could
 		// supply it. An adjustment of a name an image plausibly defines -- PATH,
@@ -143,8 +140,7 @@ func TestAdjustEnv(t *testing.T) {
 			a.AddEnv(key, want)
 		}))
 
-		pod := s.CreatePod(s.PodSpec("pod"))
-		ctr := s.CreateContainer(pod, s.CtrSpec("ctr0"))
+		_, ctr := s.CreatePodWithContainer("pod", s.CtrSpec("ctr0"))
 
 		// Started, unlike the annotation case: reading /proc/self/environ needs a
 		// process to read it from.
@@ -168,7 +164,7 @@ func TestAdjustEnv(t *testing.T) {
 func TestAdjustMount(t *testing.T) {
 	t.Run("should reach the container's OCI spec and its mount table", func(t *testing.T) {
 		s := framework.NewSuite(t, "adjust-mount")
-		framework.RequireCaps(t, framework.CapContainerLifecycle|framework.CapExec)
+		framework.RequireCaps(t, framework.CapExec)
 
 		// Under /mnt, which busybox has, and named after the suite so a stray mount
 		// is attributable. The source is /tmp because every node has one and its
@@ -188,8 +184,7 @@ func TestAdjustMount(t *testing.T) {
 			})
 		}))
 
-		pod := s.CreatePod(s.PodSpec("pod"))
-		ctr := s.CreateContainer(pod, s.CtrSpec("ctr0"))
+		_, ctr := s.CreatePodWithContainer("pod", s.CtrSpec("ctr0"))
 
 		// Started: the mount table is the container's own, read through an exec.
 		s.StartContainer(ctr)
@@ -205,7 +200,7 @@ func TestAdjustMount(t *testing.T) {
 func TestAdjustCpuset(t *testing.T) {
 	t.Run("should reach the kernel's Cpus_allowed_list", func(t *testing.T) {
 		s := framework.NewSuite(t, "adjust-cpuset")
-		framework.RequireCaps(t, framework.CapContainerLifecycle|framework.CapExec)
+		framework.RequireCaps(t, framework.CapExec)
 
 		// CPU 0 alone. Every node has a CPU 0, which is why this is the value to
 		// ask for -- and on a node that has only CPU 0 it is also the value an
@@ -213,16 +208,14 @@ func TestAdjustCpuset(t *testing.T) {
 		// assertion able to fail. See framework.SkipUnlessCPUs.
 		const wantCPUs = "0"
 
-		pod := s.CreatePod(s.PodSpec("pod"))
-
-		probe := probeContainer(s, pod)
+		probe := probeContainer(s)
 		framework.SkipUnlessCPUs(t, s, probe, 2)
 
 		s.StartPlugins(adjustingPlugin(s, "adjust-cpuset", func(a *api.ContainerAdjustment) {
 			a.SetLinuxCPUSetCPUs(wantCPUs)
 		}))
 
-		ctr := s.CreateContainer(pod, s.CtrSpec("ctr0"))
+		_, ctr := s.CreatePodWithContainer("pod", s.CtrSpec("ctr0"))
 		s.StartContainer(ctr)
 
 		// The kernel's own answer, not the runtime's record of the request: a
@@ -237,7 +230,7 @@ func TestAdjustCpuset(t *testing.T) {
 func TestAdjustMems(t *testing.T) {
 	t.Run("should reach the kernel's Mems_allowed_list", func(t *testing.T) {
 		s := framework.NewSuite(t, "adjust-mems")
-		framework.RequireCaps(t, framework.CapContainerLifecycle|framework.CapExec)
+		framework.RequireCaps(t, framework.CapExec)
 
 		// NUMA node 0, for the reason the cpuset test asks for CPU 0, and gated for
 		// the same reason: a single-node node reports Mems_allowed_list "0" whatever
@@ -246,16 +239,14 @@ func TestAdjustMems(t *testing.T) {
 		// what went unmeasured.
 		const wantMems = "0"
 
-		pod := s.CreatePod(s.PodSpec("pod"))
-
-		probe := probeContainer(s, pod)
+		probe := probeContainer(s)
 		framework.SkipUnlessNUMANodes(t, s, probe, 2)
 
 		s.StartPlugins(adjustingPlugin(s, "adjust-mems", func(a *api.ContainerAdjustment) {
 			a.SetLinuxCPUSetMems(wantMems)
 		}))
 
-		ctr := s.CreateContainer(pod, s.CtrSpec("ctr0"))
+		_, ctr := s.CreatePodWithContainer("pod", s.CtrSpec("ctr0"))
 		s.StartContainer(ctr)
 
 		s.ExpectMems(ctr, wantMems)

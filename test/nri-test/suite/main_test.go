@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/containerd/nri/test/nri-test/driver/cri"
+	"github.com/containerd/nri/test/nri-test/driver/k8s"
 	"github.com/containerd/nri/test/nri-test/framework"
 )
 
@@ -40,6 +41,23 @@ func newCRIDriver(ctx context.Context, cfg *framework.Config) (framework.Driver,
 	return d, i, nil
 }
 
+func newK8sDriver(ctx context.Context, cfg *framework.Config) (framework.Driver, framework.Inspector, error) {
+	d, i, err := k8s.NewDriver(ctx, cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return d, i, nil
+}
+
+func newDriver(ctx context.Context, cfg *framework.Config) (framework.Driver, framework.Inspector, error) {
+	if cfg.Driver == framework.DriverK8s {
+		return newK8sDriver(ctx, cfg)
+	}
+
+	return newCRIDriver(ctx, cfg)
+}
+
 func TestMain(m *testing.M) {
 	flag.Parse()
 
@@ -51,12 +69,27 @@ func TestMain(m *testing.M) {
 		os.Exit(m.Run())
 	}
 
+	// Likewise static, and for the same reason: no Complete().
+	if framework.TestConfig.ListImages {
+		framework.ListImages(os.Stdout, framework.TestConfig)
+		os.Exit(0)
+	}
+
 	if err := framework.TestConfig.Complete(); err != nil {
 		fmt.Fprintf(os.Stderr, "nri-test: %v\n", err)
 		os.Exit(1)
 	}
 
-	if err := framework.Setup(framework.TestConfig, newCRIDriver); err != nil {
+	if framework.TestConfig.PullImages {
+		if err := framework.PullImages(framework.TestConfig, newDriver); err != nil {
+			fmt.Fprintf(os.Stderr, "nri-test: %v\n", err)
+			os.Exit(1)
+		}
+
+		os.Exit(0)
+	}
+
+	if err := framework.Setup(framework.TestConfig, newDriver); err != nil {
 		fmt.Fprintf(os.Stderr, "nri-test: setup failed: %v\n", err)
 		os.Exit(1)
 	}
