@@ -330,7 +330,8 @@ func WriteOpStats(b *strings.Builder, stats []OpStats) {
 	}
 
 	fmt.Fprintf(b, "\n  client-side view, per driver call:\n\n")
-	fmt.Fprintf(b, "    %-38s %5s %9s %9s %9s\n", "interval", "n", "p50", "p90", "max")
+	fmt.Fprintf(b, "    %-38s %5s %9s %9s %9s %9s\n",
+		"interval", "n", "p50", "p90", "p99", "max")
 
 	for _, s := range stats {
 		for _, st := range []Stat{s.Call, s.Before, s.After} {
@@ -338,8 +339,8 @@ func WriteOpStats(b *strings.Builder, stats []OpStats) {
 				continue
 			}
 
-			fmt.Fprintf(b, "    %-38s %5d %9s %9s %9s\n",
-				st.Name, st.N, st.P50, st.P90, st.Max)
+			fmt.Fprintf(b, "    %-38s %5d %9s %9s %9s %9s\n",
+				st.Name, st.N, st.P50, st.P90, st.P99, st.Max)
 		}
 
 		if s.Uncorrelated > 0 {
