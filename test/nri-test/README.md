@@ -199,6 +199,39 @@ To sweep both low-level runtimes, invoke once per handler. The flag is
 single-valued on purpose: one that accepted a list and ran one entry of it
 would misreport what produced the result.
 
+A worked invocation against a two-VM setup, with the runtime's own
+sockets and the suite's results collected back:
+
+```sh
+export NODE=vagrant@node TIMEOUT=60s
+
+# CRI-O
+export ENDPOINT=unix:///var/run/crio/crio.sock NRI_SOCKET=/run/nri/nri.sock
+bash hack/run-nri-test.sh runc
+
+# containerd. The -nri-test.cgroup-parent is needed when the runtime is
+# configured for systemd cgroups, which Setup refuses the run and says.
+export ENDPOINT=unix:///run/containerd/containerd.sock
+export NRI_SOCKET=/run/nri-containerd/nri.sock
+bash hack/run-nri-test.sh runc -nri-test.cgroup-parent=system.slice
+
+make nri-test-status
+```
+
+`ENDPOINT` must be passed explicitly: an empty value autodetects the
+containerd socket even when `NRI_SOCKET` is CRI-O's, and the run then hangs.
+
+For a CRI-driver run the script passes `-nri-test.status-dir`, so the suite
+writes its fragment on the node, as root. The script copies the fragments
+in `test/nri-test/status/fragments` to the node before the run, so that the
+suite's refusal to replace a record that measured more fields than this run
+did has that record to compare against, and copies what the run wrote back
+into that directory afterwards. `make nri-test-status` renders RUNTIME-STATUS.md
+from what is there, and `make nri-test-status-check` fails until it is
+re-rendered. `STATUS_DIR=` collects no fragment, and a run of the k8s driver
+collects none either: a fragment from it is refused rather than rendered.
+
+
 ## Layout
 
 ```
@@ -824,6 +857,8 @@ flags, which follow `critest` naming:
 | `-nri-test.allow-kubelet` | false | run even though a kubelet process is present; its sandbox garbage collection may remove this run's pods mid-test |
 | `-nri-test.runtime-handler` | empty | CRI runtime handler, and so the low-level runtime, to create pods with; empty means the runtime's own default. One handler per run |
 | `-nri-test.cgroup-parent` | empty | cgroup parent for the run's pods; empty lets the runtime derive one. A runtime configured for systemd cgroups rejects the form it derives for a pod with no parent, so such a node needs a systemd slice, `system.slice` |
+| `-nri-test.status-dir` | empty | directory to write the run's results into as JSON, one fragment per runtime, version and handler, which `make nri-test-status` renders `RUNTIME-STATUS.md` from; empty writes none |
+| `-nri-test.status-force` | false | write that fragment even where it would replace one that measured input fields this run did not, or one that cannot be read as a fragment |
 
 ### What `Setup` does before any test runs
 
@@ -948,6 +983,31 @@ So they are not re-derived.
 - **The suite's pods get cgroup path `system.slice:crio:<id>`**, not a
   `kubepods-...slice` path, because the suite sets no `CgroupParent`. The
   systemd triple form breaks no expectation.
+- **The k8s driver passes on containerd too.** With the node's kubelet pointed
+  at containerd 2.3.3 (containerd's runc and crun handlers set to
+  `SystemdCgroup = true` to match the kubelet's systemd cgroup driver), the
+  whole suite passed with runc and with crun, with nothing failing in either.
+  No count of passes, skips or failures is quoted: a count in prose goes stale
+  with nothing in the toolchain able to notice, and a count about a runtime
+  belongs in the rendered tables below, where a run puts it.
+- **CRI pod and container annotations do not reach a container's OCI spec**
+  unless the runtime's passthrough allowlist names them, and those are empty by
+  default -- containerd's `PodAnnotations` and `ContainerAnnotations`. A created
+  container's `spec.annotations` holds only the runtime's own keys. So a test
+  must never use an annotation it set through CRI as evidence that it is
+  looking at the right spec; container *environment* is the right evidence,
+  because it is data the test chooses and both runtimes must carry CRI
+  container env into `spec.process.env`.
+- **A runtime's own spec annotation keys are not portable.** CRI-O uses
+  `io.container.manager`, `io.kubernetes.cri-o.*` and
+  `io.kubernetes.container.*`; containerd uses `io.kubernetes.cri.*`.
+- **CRI-O requires `ContainerConfig.Image.UserSpecifiedImage`.** With it empty
+  it refuses every container creation with "user specified image not specified,
+  cannot verify image signature". containerd does not require it, which is why
+  the omission went unnoticed until the first CRI-O run.
+- **An entry with an empty name in `StatusResponse.RuntimeHandlers` is the
+  runtime's default** and is never selectable. CRI-O 1.37.2 reports `crun`,
+  `runc`, and one entry with no name at all.
 - **Both runtimes report the container's init pid** in
   `ContainerStatus(verbose)`'s `Info["info"]`, and `/proc/<pid>/environ` is
   readable. `ParseVerboseInfo` decodes only `runtimeSpec`, so the suite does
@@ -955,6 +1015,7 @@ So they are not re-derived.
 - **Both runtimes report container environment and annotations during
   `Synchronize`**, so the two fidelity hatches in `sync_test.go` have never
   fired. Two runtimes are not grounds for removing them.
+
 ## Input conformance
 
 What a runtime tells a plugin about a pod and a container, as opposed to what it

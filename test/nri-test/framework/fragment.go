@@ -27,8 +27,8 @@ import (
 	"strings"
 )
 
-// fragmentSchema is the Schema of the fragments this package writes.
-const fragmentSchema = 1
+// FragmentSchema is the Schema of the fragments this package writes.
+const FragmentSchema = 1
 
 // Fragment is one run's results in the form written to disk.
 type Fragment struct {
@@ -41,8 +41,9 @@ type Fragment struct {
 	Coverage    []Coverage        `json:"coverage"`
 }
 
-// FragmentFinding is a Finding in written form. Plugin and Expected are set
-// only when the finding's error is an InputMismatch.
+// FragmentFinding is a Finding in written form. Error is the finding's error
+// verbatim. Reason, Plugin and Expected are set only when that error is an
+// InputMismatch: Reason is the clause of Error that follows the field name.
 type FragmentFinding struct {
 	Kind     string `json:"kind"`
 	Test     string `json:"test"`
@@ -50,6 +51,7 @@ type FragmentFinding struct {
 	Surface  string `json:"surface"`
 	Hook     string `json:"hook"`
 	Error    string `json:"error"`
+	Reason   string `json:"reason"`
 	Plugin   string `json:"plugin"`
 	Expected string `json:"expected"`
 }
@@ -58,7 +60,7 @@ type FragmentFinding struct {
 // written form.
 func (r *Report) Fragment(hdr Header, env Environment, selection string) Fragment {
 	f := Fragment{
-		Schema:      fragmentSchema,
+		Schema:      FragmentSchema,
 		Header:      hdr,
 		Environment: env,
 		Selection:   selection,
@@ -81,6 +83,7 @@ func (r *Report) Fragment(hdr Header, env Environment, selection string) Fragmen
 
 			var im *InputMismatch
 			if errors.As(fd.Err, &im) {
+				ff.Reason = im.Reason
 				ff.Plugin = im.Plugin
 				ff.Expected = im.Expected
 			}

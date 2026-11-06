@@ -78,6 +78,10 @@
 #                 needs kubelet running, so this script leaves it alone then.
 #   K8S_KUBECONFIG  kubeconfig on the node for the k8s driver (default
 #                 /etc/kubernetes/admin.conf)
+#   STATUS_DIR    where to keep the JSON fragment the run writes (default
+#                 test/nri-test/status/fragments); empty collects none
+#   REMOTE_STATUS_DIR  where the run writes it on the node (default
+#                 /tmp/nri-test-status)
 
 set -o errexit -o nounset -o pipefail
 
@@ -89,6 +93,7 @@ NRI_SOCKET="${NRI_SOCKET:-/run/nri/nri.sock}"
 TIMEOUT="${TIMEOUT:-60s}"
 DRIVER="${DRIVER:-cri}"
 K8S_KUBECONFIG="${K8S_KUBECONFIG:-/etc/kubernetes/admin.conf}"
+REMOTE_STATUS_DIR="${REMOTE_STATUS_DIR:-/tmp/nri-test-status}"
 
 # The handler is positional and first, so a flag in that slot is taken as a
 # handler name: `run-nri-test.sh -test.run=TestSmoke` becomes
@@ -152,6 +157,33 @@ suite_pattern="^(sudo )?${REMOTE_BIN//./\\.} "
 
 top_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# REMOTE_STATUS_DIR is interpolated into remote commands this script runs as
+# root, so it is restricted to the class REMOTE_BIN is, and for the same
+# reason: nothing in that class is special to a shell. It is also `rm -rf`'d on
+# the node before each run, so an absolute path of ordinary characters is the
+# least this has to insist on. The blast radius of a reckless value is the
+# caller's to get right.
+case "$REMOTE_STATUS_DIR" in
+"" | [!/]* | *[!A-Za-z0-9/._-]*)
+    echo "ERROR: REMOTE_STATUS_DIR ($REMOTE_STATUS_DIR) must be an absolute" \
+        "path of letters, digits, '/', '.', '_' and '-': it is interpolated" \
+        "into commands run as root on the node, and removed before each run" >&2
+    exit 1
+    ;;
+esac
+
+STATUS_DIR="${STATUS_DIR-$top_dir/test/nri-test/status/fragments}"
+
+# Whether this run collects a status fragment at all.
+#
+# Only a CRI-driver run does. `status.Load` refuses a fragment from any other
+# driver, by design, so a k8s run's fragment would break the next render of
+# RUNTIME-STATUS.md rather than add anything to it.
+collect_status=""
+if [ -n "$STATUS_DIR" ] && [ "$DRIVER" = cri ]; then
+    collect_status=yes
+fi
+
 ssh_opts=()
 [ -n "$SSH_CONFIG" ] && ssh_opts=(-F "$SSH_CONFIG")
 
@@ -166,6 +198,52 @@ on_node() {
 # shell as part of the command.
 on_node_tty() {
     ssh "${ssh_opts[@]}" -tt "$NODE" "$@"
+}
+
+# push_fragments puts the fragments this repository holds on the node, in the
+# directory the run writes its own into.
+#
+# They are pushed because the suite's refusal to replace a record that measured
+# more fields than this run did happens where the run writes, on the node. With
+# nothing there to compare against, a filtered run would write a thinner
+# fragment with nothing to refuse it, and the fetch below would bring that back
+# over the fuller one in the tree.
+push_fragments() {
+    on_node "sudo rm -rf '$REMOTE_STATUS_DIR' && mkdir -p '$REMOTE_STATUS_DIR'" || {
+        echo "ERROR: could not prepare $NODE:$REMOTE_STATUS_DIR for the run's" \
+            "fragment" >&2
+        return 1
+    }
+
+    local have="" f
+    for f in "$STATUS_DIR"/*.json; do
+        if [ -e "$f" ]; then
+            have=yes
+            break
+        fi
+    done
+    [ -n "$have" ] || return 0
+
+    tar -C "$STATUS_DIR" -cf - . | on_node "tar -C '$REMOTE_STATUS_DIR' -xf -" || {
+        echo "ERROR: could not copy $STATUS_DIR to $NODE:$REMOTE_STATUS_DIR" >&2
+        return 1
+    }
+}
+
+# fetch_fragments brings back what the run wrote.
+#
+# Over tar rather than scp, and through sudo, because the suite runs as root on
+# the node and leaves the fragment root-owned, and because the file's name is
+# derived from the runtime, its version and the handler, which this script does
+# not know.
+fetch_fragments() {
+    mkdir -p "$STATUS_DIR" || return 1
+
+    on_node "sudo tar -C '$REMOTE_STATUS_DIR' -cf - ." | tar -C "$STATUS_DIR" -xf - || {
+        echo "ERROR: could not copy $NODE:$REMOTE_STATUS_DIR back to" \
+            "$STATUS_DIR, so this run's results are only on the node" >&2
+        return 1
+    }
 }
 
 kubelet_was_active=""
@@ -433,6 +511,12 @@ args=(
 if [ "$DRIVER" != cri ]; then
     args+=(-nri-test.driver "$DRIVER" -nri-test.kubeconfig "$K8S_KUBECONFIG")
 fi
+if [ -n "$collect_status" ]; then
+    args+=(-nri-test.status-dir "$REMOTE_STATUS_DIR")
+
+    echo "--- putting $STATUS_DIR on $NODE:$REMOTE_STATUS_DIR"
+    push_fragments || exit 1
+fi
 
 # Two details of this invocation are load-bearing, and neither is about ssh's
 # options as such.
@@ -463,6 +547,20 @@ on_node_tty sudo "$REMOTE_BIN" "${args[@]}" "$@" &
 suite_pid=$!
 wait "$suite_pid" || rc=$?
 suite_pid=""
+
+# After the run and before the verdict, on every path the run returned on: a
+# failing run's fragment is the interesting one, which is why the suite writes
+# it from Teardown. A fetch that fails is a failure of this script's own step,
+# so it decides the exit code when the run itself had nothing worse to say.
+if [ -n "$collect_status" ]; then
+    echo "--- fetching the run's fragment from $NODE:$REMOTE_STATUS_DIR"
+    if fetch_fragments; then
+        echo "--- the run's fragment is in $STATUS_DIR; 'make nri-test-status'" \
+            "renders RUNTIME-STATUS.md from it"
+    elif [ "$rc" = 0 ]; then
+        rc=1
+    fi
+fi
 
 # Name the step, because rc alone cannot. 255 is ssh's own and says nothing
 # about the suite; a status above 128 is a signal, not a verdict; anything else

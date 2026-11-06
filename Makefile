@@ -238,5 +238,13 @@ nri-test: go-generate
 	$(Q)cd test/nri-test && \
 	    $(GO_CMD) test -c -o $(BIN_PATH)/nri-test ./suite
 
+nri-test-status:
+	$(Q)cd test/nri-test && \
+	    $(GO_CMD) run ./cmd/runtime-status
+
+nri-test-status-check:
+	$(Q)cd test/nri-test && \
+	    $(GO_CMD) run ./cmd/runtime-status -check
+
 clean-nri-test:
 	$(Q)rm -f $(BIN_PATH)/nri-test

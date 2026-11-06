@@ -63,6 +63,19 @@ func TestFragmentFindingCarriesBothSides(t *testing.T) {
 	require.Equal(t, "plain", fs[1].Error)
 }
 
+func TestFragmentFindingCarriesTheReasonWithoutTheField(t *testing.T) {
+	r := &Report{}
+	r.AddFinding(Finding{Err: &InputMismatch{
+		Field: "Container.image", Reason: "not reported, and the spec has none",
+	}})
+	r.AddFinding(Finding{Err: fmt.Errorf("plain")})
+
+	fs := r.Fragment(Header{}, Environment{}, "").Findings
+	require.Equal(t, "not reported, and the spec has none", fs[0].Reason)
+	require.Equal(t, "Container.image: not reported, and the spec has none", fs[0].Error)
+	require.Empty(t, fs[1].Reason)
+}
+
 func TestKeyIsFilesystemSafe(t *testing.T) {
 	key := func(rt, v, h string) string {
 		return Fragment{Header: Header{Runtime: rt, RuntimeVersion: v, RuntimeHandler: h}}.Key()
