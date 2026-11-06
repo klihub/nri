@@ -36,26 +36,31 @@ const (
 
 // GetFromBuildInfo returns the locally used NRI version. This
 // is taken either from the debug/build info provided by the
-// golang runtime, or for plugins hosted in the NRI repository
+// golang runtime, or for a build inside the NRI repository
 // from a git-described version generated at build time.
 func GetFromBuildInfo() string {
-	version := UnknownVersion
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return UnknownVersion
+	}
 
-	if bi, ok := debug.ReadBuildInfo(); ok {
-		for _, mod := range bi.Deps {
-			if mod.Path != nriModulePath {
-				continue
-			}
+	version := ""
 
-			if mod.Replace != nil && mod.Replace.Version != DevelVersion {
-				version = mod.Replace.Version
-			} else {
-				version = mod.Version
-			}
+	for _, mod := range bi.Deps {
+		if mod.Path != nriModulePath {
+			continue
+		}
+
+		if mod.Replace != nil && mod.Replace.Version != DevelVersion {
+			version = mod.Replace.Version
+		} else {
+			version = mod.Version
 		}
 	}
 
-	if version == DevelVersion {
+	// A build inside this repository records no entry for the NRI module: it is
+	// the main module, or a test binary which records no dependencies at all.
+	if version == "" || version == DevelVersion {
 		return fallbackVersion()
 	}
 
