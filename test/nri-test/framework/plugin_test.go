@@ -1250,3 +1250,148 @@ func (s *testStub) RuntimeNRIVersion() string          { return "" }
 func (s *testStub) PluginNRIVersion() string           { return "" }
 
 var _ stub.Stub = &testStub{}
+
+// capturePlugin returns a plugin scoped to the run every capture test uses.
+func capturePlugin() *TestPlugin {
+	return NewTestPlugin("test", "00", 0, &EventQ{},
+		&Scope{Namespaces: []string{"nri-test"}, RunID: "run0"})
+}
+
+func TestCaptureOffByDefault(t *testing.T) {
+	p := capturePlugin()
+
+	_, _, err := p.CreateContainer(context.Background(),
+		scopedPod("pod0", "nri-test", "run0"), testCtr("pod0", "ctr0"))
+	require.NoError(t, err)
+
+	require.Empty(t, p.AllCaptured(),
+		"a plugin that was never asked to capture must retain nothing: "+
+			"retention costs a clone of two protos per hook")
+	require.Nil(t, p.Captured(CreateContainer, "pod0", "ctr0"))
+}
+
+func TestCaptureRetainsHookPayloads(t *testing.T) {
+	p := capturePlugin()
+	p.Capture(true)
+
+	_, _, err := p.CreateContainer(context.Background(),
+		scopedPod("pod0", "nri-test", "run0"), testCtr("pod0", "ctr0"))
+	require.NoError(t, err)
+
+	got := p.Captured(CreateContainer, "pod0", "ctr0")
+	require.NotNil(t, got, "CreateContainer must be captured")
+	require.Equal(t, CreateContainer, got.Hook)
+	require.Equal(t, "pod0", got.Pod.GetName(), "captured pod")
+	require.Equal(t, "ctr0", got.Ctr.GetName(), "captured container")
+}
+
+func TestCaptureRetainsPodHookPayloads(t *testing.T) {
+	p := capturePlugin()
+	p.Capture(true)
+
+	require.NoError(t, p.RunPodSandbox(context.Background(),
+		scopedPod("pod0", "nri-test", "run0")))
+
+	// An empty container id, because a pod hook has no container. The input
+	// tests read PodSandbox.ips from exactly this.
+	got := p.Captured(RunPodSandbox, "pod0", "")
+	require.NotNil(t, got, "RunPodSandbox must be captured")
+	require.Equal(t, "pod0", got.Pod.GetName())
+	require.Nil(t, got.Ctr, "a pod hook carries no container")
+}
+
+func TestCaptureClonesPayloads(t *testing.T) {
+	p := capturePlugin()
+	p.Capture(true)
+
+	pod := scopedPod("pod0", "nri-test", "run0")
+	ctr := testCtr("pod0", "ctr0")
+
+	_, _, err := p.CreateContainer(context.Background(), pod, ctr)
+	require.NoError(t, err)
+
+	// The runtime's buffer is not ours to hold: the stub may reuse or mutate it
+	// after the callback returns, and a capture that aliased it would report
+	// whatever it later became rather than what the hook was given.
+	pod.Name = "mutated-pod"
+	ctr.Name = "mutated-ctr"
+
+	got := p.Captured(CreateContainer, "pod0", "ctr0")
+	require.NotNil(t, got)
+	require.Equal(t, "pod0", got.Pod.GetName(), "captured pod aliases the caller's proto")
+	require.Equal(t, "ctr0", got.Ctr.GetName(), "captured container aliases the caller's proto")
+}
+
+func TestCapturePerHook(t *testing.T) {
+	p := capturePlugin()
+	p.Capture(true)
+
+	var (
+		ctx = context.Background()
+		pod = scopedPod("pod0", "nri-test", "run0")
+		ctr = testCtr("pod0", "ctr0")
+	)
+
+	_, _, err := p.CreateContainer(ctx, pod, ctr)
+	require.NoError(t, err)
+	require.NoError(t, p.PostStartContainer(ctx, pod, ctr))
+
+	require.Len(t, p.AllCaptured(), 2, "one entry per hook invocation")
+	require.NotNil(t, p.Captured(CreateContainer, "pod0", "ctr0"))
+	require.NotNil(t, p.Captured(PostStartContainer, "pod0", "ctr0"))
+	require.Nil(t, p.Captured(StartContainer, "pod0", "ctr0"),
+		"a hook that never fired must not be reported as captured")
+}
+
+func TestCaptureIgnoresOutOfScopeWorkloads(t *testing.T) {
+	p := capturePlugin()
+	p.Capture(true)
+
+	_, _, err := p.CreateContainer(context.Background(),
+		scopedPod("pod0", "default", "run0"), testCtr("pod0", "ctr0"))
+	require.NoError(t, err)
+
+	require.Empty(t, p.AllCaptured(),
+		"capture must sit behind the scope guard: retaining another run's "+
+			"workload is observing something we do not own")
+}
+
+func TestCaptureIsRetainedBeforeTheEventIsPublished(t *testing.T) {
+	// The ordering inside record, and it is load-bearing. The event is the
+	// signal Suite.CapturedAt waits on, so a payload retained *after* the event
+	// is published is a payload a waiting test can arrive too early for -- and
+	// CapturedAt reports a payload it cannot find as a finding against the
+	// runtime. An intermittent conformance failure blamed on a runtime that
+	// behaved correctly is the worst thing this suite can produce.
+	for range 2000 {
+		p := capturePlugin()
+		p.Capture(true)
+
+		want := &Event{
+			Type:   CreateContainer,
+			Plugin: p.FullName(),
+			PodID:  "pod0",
+			CtrID:  "ctr0",
+		}
+
+		got := make(chan *Captured, 1)
+
+		go func() {
+			if _, err := p.q.Wait(want, time.After(5*time.Second)); err != nil {
+				got <- nil
+
+				return
+			}
+
+			got <- p.Captured(CreateContainer, "pod0", "ctr0")
+		}()
+
+		_, _, err := p.CreateContainer(context.Background(),
+			scopedPod("pod0", "nri-test", "run0"), testCtr("pod0", "ctr0"))
+		require.NoError(t, err)
+
+		require.NotNil(t, <-got,
+			"a test released by the event found no payload: record published the "+
+				"event before retaining it")
+	}
+}

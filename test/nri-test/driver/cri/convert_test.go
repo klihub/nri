@@ -249,3 +249,159 @@ func TestNamespaceOptions(t *testing.T) {
 		require.Nil(t, ContainerConfig(cri, &framework.ContainerSpec{Name: "ctr0"}).Linux)
 	})
 }
+
+func TestContainerConfigCarriesCDIDevices(t *testing.T) {
+	t.Run("should pass the device names through", func(t *testing.T) {
+		cfg := ContainerConfig(testConfig(), &framework.ContainerSpec{
+			Name:       "ctr0",
+			CDIDevices: []string{"nri-test.containerd.io/device=null"},
+		})
+
+		require.Len(t, cfg.CDIDevices, 1)
+		require.Equal(t, "nri-test.containerd.io/device=null", cfg.CDIDevices[0].Name)
+	})
+}
+
+func TestContainerConfigCarriesDevices(t *testing.T) {
+	t.Run("should pass a device through with its permissions", func(t *testing.T) {
+		cfg := ContainerConfig(testConfig(), &framework.ContainerSpec{
+			Name: "ctr0",
+			Devices: []*framework.Device{
+				{HostPath: "/dev/null", ContainerPath: "/dev/test-device", Permissions: "rwm"},
+			},
+		})
+
+		require.Len(t, cfg.Devices, 1)
+		require.Equal(t, "/dev/null", cfg.Devices[0].HostPath)
+		require.Equal(t, "/dev/test-device", cfg.Devices[0].ContainerPath)
+		require.Equal(t, "rwm", cfg.Devices[0].Permissions)
+	})
+
+	// A device is a CRI field of its own, not part of the Linux section, so a
+	// spec carrying only a device must not grow one.
+	t.Run("should not create a linux section for a device alone", func(t *testing.T) {
+		cfg := ContainerConfig(testConfig(), &framework.ContainerSpec{
+			Name:    "ctr0",
+			Devices: []*framework.Device{{HostPath: "/dev/null", ContainerPath: "/dev/test-device"}},
+		})
+
+		require.Nil(t, cfg.Linux)
+	})
+}
+
+func TestPodSandboxConfigCarriesSysctls(t *testing.T) {
+	t.Run("should pass the sysctls through", func(t *testing.T) {
+		cfg := PodSandboxConfig(testConfig(), &framework.PodSpec{
+			Name:    "pod0",
+			Sysctls: map[string]string{"net.ipv4.ip_forward": "1"},
+		})
+
+		require.NotNil(t, cfg.Linux,
+			"the linux section has to be created for sysctls alone")
+		require.Equal(t, map[string]string{"net.ipv4.ip_forward": "1"}, cfg.Linux.Sysctls)
+	})
+
+	t.Run("should carry overhead and resources", func(t *testing.T) {
+		cfg := PodSandboxConfig(testConfig(), &framework.PodSpec{
+			Name:         "pod0",
+			PodOverhead:  &framework.Resources{MemoryLimit: 1 << 20},
+			PodResources: &framework.Resources{CPUShares: 512},
+		})
+
+		require.NotNil(t, cfg.Linux)
+		require.Equal(t, int64(1<<20), cfg.Linux.Overhead.GetMemoryLimitInBytes())
+		require.Equal(t, int64(512), cfg.Linux.Resources.GetCpuShares())
+	})
+}
+
+func TestContainerConfigCarriesSecurityContext(t *testing.T) {
+	t.Run("should pass the user, group and supplemental groups through", func(t *testing.T) {
+		uid, gid := int64(1234), int64(1234)
+		cfg := ContainerConfig(testConfig(), &framework.ContainerSpec{
+			Name:               "ctr0",
+			RunAsUser:          &uid,
+			RunAsGroup:         &gid,
+			SupplementalGroups: []int64{4321},
+		})
+
+		sc := cfg.GetLinux().GetSecurityContext()
+		require.NotNil(t, sc, "the security context has to be created for these alone")
+		require.Equal(t, int64(1234), sc.GetRunAsUser().GetValue())
+		require.Equal(t, int64(1234), sc.GetRunAsGroup().GetValue())
+		require.Equal(t, []int64{4321}, sc.GetSupplementalGroups())
+	})
+
+	t.Run("should pass an unconfined seccomp profile through", func(t *testing.T) {
+		cfg := ContainerConfig(testConfig(), &framework.ContainerSpec{
+			Name:           "ctr0",
+			SeccompProfile: &framework.SeccompProfile{Type: framework.SeccompUnconfined},
+		})
+
+		sc := cfg.GetLinux().GetSecurityContext()
+		require.NotNil(t, sc)
+		require.Equal(t, runtimeapi.SecurityProfile_Unconfined,
+			sc.GetSeccomp().GetProfileType())
+	})
+
+	t.Run("should pass a runtime-default seccomp profile through", func(t *testing.T) {
+		cfg := ContainerConfig(testConfig(), &framework.ContainerSpec{
+			Name:           "ctr0",
+			SeccompProfile: &framework.SeccompProfile{Type: framework.SeccompRuntimeDefault},
+		})
+
+		require.Equal(t, runtimeapi.SecurityProfile_RuntimeDefault,
+			cfg.GetLinux().GetSecurityContext().GetSeccomp().GetProfileType())
+	})
+}
+
+func TestContainerConfigCarriesOOMScoreAdj(t *testing.T) {
+	t.Run("should pass a non-default adjustment through", func(t *testing.T) {
+		// A pointer, not a bare int64: zero is CRI's own default, so a value
+		// type could not tell "set to zero" from "not set" -- and zero is
+		// exactly the value a vacuity-prone test would reach for.
+		adj := int64(-17)
+		cfg := ContainerConfig(testConfig(), &framework.ContainerSpec{
+			Name:        "ctr0",
+			OOMScoreAdj: &adj,
+		})
+
+		require.NotNil(t, cfg.GetLinux().GetResources(),
+			"the resources section has to be created for the adjustment alone")
+		require.Equal(t, int64(-17), cfg.GetLinux().GetResources().GetOomScoreAdj())
+	})
+}
+
+func TestContainerConfigOmitsUnsetInputs(t *testing.T) {
+	t.Run("should produce what it did before the input fields existed", func(t *testing.T) {
+		// The guard on every existing conformance test: a spec that sets none of
+		// the new fields must reach the runtime exactly as it used to, or this
+		// task changed the behaviour of the whole suite rather than adding to it.
+		cfg := ContainerConfig(testConfig(), &framework.ContainerSpec{Name: "ctr0"})
+
+		require.Empty(t, cfg.CDIDevices)
+		require.Nil(t, cfg.Linux,
+			"with no resources and no namespace options there was no linux section")
+	})
+
+	t.Run("should produce no linux pod section for a bare pod", func(t *testing.T) {
+		cfg := PodSandboxConfig(testConfig(), &framework.PodSpec{Name: "pod0"})
+
+		require.Nil(t, cfg.Linux)
+	})
+}
+
+func TestSeccompProfileRefusesAnUnknownType(t *testing.T) {
+	t.Run("should not quietly become the runtime default", func(t *testing.T) {
+		// CRI's RUNTIME_DEFAULT is the zero value, so a typo'd type silently
+		// becoming the default would send the runtime one profile while the
+		// fidelity test still expected the other -- and the suite would publish
+		// "this runtime misreports seccomp_profile" about a runtime that
+		// reported faithfully.
+		require.Panics(t, func() {
+			ContainerConfig(testConfig(), &framework.ContainerSpec{
+				Name:           "ctr0",
+				SeccompProfile: &framework.SeccompProfile{Type: "Unconfined"},
+			})
+		}, "a wrong-case type must not pass for the runtime default")
+	})
+}
