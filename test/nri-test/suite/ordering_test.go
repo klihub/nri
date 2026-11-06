@@ -66,8 +66,7 @@ func TestMultiPluginOrdering(t *testing.T) {
 	orderingTable := func(event framework.EventType, subscriptions ...string) func(*testing.T) {
 		return func(t *testing.T) {
 			s := framework.NewSuite(t, "order-"+string(event))
-			framework.RequireCaps(t,
-				framework.CapContainerLifecycle|framework.CapUpdateContainerResources)
+			requireUpdatesIfSubscribed(t, subscriptions...)
 
 			mask := api.MustParseEventMask(subscriptions...)
 
@@ -118,8 +117,6 @@ func TestMultiPluginOrdering(t *testing.T) {
 
 	t.Run("should invoke every subscribed plugin exactly once per event", func(t *testing.T) {
 		s := framework.NewSuite(t, "order-once")
-		framework.RequireCaps(t,
-			framework.CapContainerLifecycle|framework.CapUpdateContainerResources)
 
 		mask := api.MustParseEventMask("RunPodSandbox")
 

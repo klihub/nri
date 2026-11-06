@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
 
 	"github.com/containerd/nri/test/nri-test/framework"
 )
@@ -30,7 +31,7 @@ func testConfig() *framework.Config {
 
 func TestPodSandboxConfig(t *testing.T) {
 	t.Run("should carry the pod's identity", func(t *testing.T) {
-		cfg := PodSandboxConfig(&framework.PodSpec{
+		cfg := PodSandboxConfig(testConfig(), &framework.PodSpec{
 			Name:      "pod0",
 			Namespace: "nri-test",
 			UID:       "uid0",
@@ -42,7 +43,7 @@ func TestPodSandboxConfig(t *testing.T) {
 	})
 
 	t.Run("should carry labels and annotations", func(t *testing.T) {
-		cfg := PodSandboxConfig(&framework.PodSpec{
+		cfg := PodSandboxConfig(testConfig(), &framework.PodSpec{
 			Name:        "pod0",
 			Labels:      map[string]string{"a": "1"},
 			Annotations: map[string]string{"b": "2"},
@@ -53,7 +54,7 @@ func TestPodSandboxConfig(t *testing.T) {
 	})
 
 	t.Run("should set the cgroup parent when given", func(t *testing.T) {
-		cfg := PodSandboxConfig(&framework.PodSpec{
+		cfg := PodSandboxConfig(testConfig(), &framework.PodSpec{
 			Name:         "pod0",
 			CgroupParent: "/kubepods",
 		})
@@ -208,5 +209,43 @@ func TestContainerResources(t *testing.T) {
 		require.Equal(t, "0", r.Linux.CpusetMems)
 		require.Equal(t, int64(1<<21), r.Linux.MemoryLimitInBytes)
 		require.Equal(t, "1048576", r.Linux.Unified["memory.high"])
+	})
+}
+
+func TestNamespaceOptions(t *testing.T) {
+	k8s := testConfig()
+	k8s.CRINamespaces = framework.NamespacesK8s
+
+	t.Run("should send kubelet's options in k8s mode", func(t *testing.T) {
+		pod := PodSandboxConfig(k8s, &framework.PodSpec{Name: "pod0"})
+		ctr := ContainerConfig(k8s, &framework.ContainerSpec{Name: "ctr0"})
+
+		for _, o := range []*runtimeapi.NamespaceOption{
+			pod.Linux.SecurityContext.NamespaceOptions,
+			ctr.Linux.SecurityContext.NamespaceOptions,
+		} {
+			require.Equal(t, runtimeapi.NamespaceMode_CONTAINER, o.Pid)
+			require.Equal(t, runtimeapi.NamespaceMode_POD, o.Network)
+			require.Equal(t, runtimeapi.NamespaceMode_POD, o.Ipc)
+		}
+	})
+
+	t.Run("should keep the cgroup parent and resources in k8s mode", func(t *testing.T) {
+		pod := PodSandboxConfig(k8s, &framework.PodSpec{Name: "pod0", CgroupParent: "/kubepods"})
+		ctr := ContainerConfig(k8s, &framework.ContainerSpec{
+			Name:      "ctr0",
+			Resources: &framework.Resources{CPUShares: 512},
+		})
+
+		require.Equal(t, "/kubepods", pod.Linux.CgroupParent)
+		require.Equal(t, int64(512), ctr.Linux.Resources.CpuShares)
+	})
+
+	t.Run("should send none in cri mode", func(t *testing.T) {
+		cri := testConfig()
+		cri.CRINamespaces = framework.NamespacesCRI
+
+		require.Nil(t, PodSandboxConfig(cri, &framework.PodSpec{Name: "pod0"}).Linux)
+		require.Nil(t, ContainerConfig(cri, &framework.ContainerSpec{Name: "ctr0"}).Linux)
 	})
 }

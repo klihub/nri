@@ -25,8 +25,11 @@ import (
 type Capability uint
 
 const (
-	// CapContainerLifecycle means containers can be created, started, stopped
-	// and removed individually, rather than only as part of a pod.
+	// CapContainerLifecycle means containers can be created in a pod that
+	// already exists, and started, stopped and removed apart from it, rather
+	// than only as part of a pod. No test needs this to do its job, so it is
+	// not a gate for ordinary tests: they create pods with their containers.
+	// It is for a test whose subject is the gap between those steps.
 	CapContainerLifecycle Capability = 1 << iota
 	// CapObserveOpError means an operation's error is surfaced verbatim to the
 	// caller, so a test can assert that an operation failed.
@@ -44,6 +47,14 @@ const (
 	// depended on; renumbering an existing one silently changes what a stored or
 	// logged capability set means.
 	CapExec
+	// CapRawResources means a container's resources are applied exactly as
+	// the test states them: a cpuset, CPU shares. CRI takes them verbatim. A
+	// Kubernetes pod derives them from requests and limits, and cannot pin a
+	// cpuset at all without a static CPU manager policy.
+	CapRawResources
+	// CapContainerMetadata means a container can carry labels and annotations
+	// of its own. A Kubernetes container cannot: its metadata is its pod's.
+	CapContainerMetadata
 )
 
 var capabilityNames = []struct {
@@ -55,6 +66,8 @@ var capabilityNames = []struct {
 	{CapUpdateContainerResources, "UpdateContainerResources"},
 	{CapUpdatePodResources, "UpdatePodResources"},
 	{CapExec, "Exec"},
+	{CapRawResources, "RawResources"},
+	{CapContainerMetadata, "ContainerMetadata"},
 }
 
 // Has reports whether all capabilities in o are present in c.
@@ -85,9 +98,10 @@ type Driver interface {
 	// Capabilities returns what this driver can express.
 	Capabilities() Capability
 
-	// CreatePod creates a pod, and any containers p.Containers carries. A
-	// driver with CapContainerLifecycle may instead be handed containers one
-	// at a time via CreateContainer.
+	// CreatePod creates a pod, and any containers p.Containers carries, which
+	// the returned Pod lists even if creation failed part way. A driver with
+	// CapContainerLifecycle may also be handed containers one at a time via
+	// CreateContainer.
 	CreatePod(ctx context.Context, p *PodSpec) (*Pod, error)
 	// UpdatePodResources updates a pod's resources.
 	UpdatePodResources(ctx context.Context, p *Pod, r *Resources) error
@@ -98,7 +112,9 @@ type Driver interface {
 
 	// CreateContainer creates a container in a pod.
 	CreateContainer(ctx context.Context, p *Pod, c *ContainerSpec) (*Container, error)
-	// StartContainer starts a created container.
+	// StartContainer starts a created container. A driver whose containers
+	// start on their own makes this wait until the container is running, so
+	// that the same test works with either kind.
 	StartContainer(ctx context.Context, c *Container) error
 	// UpdateContainerResources updates a container's resources.
 	UpdateContainerResources(ctx context.Context, c *Container, r *Resources) error

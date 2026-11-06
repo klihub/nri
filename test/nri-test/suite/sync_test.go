@@ -29,14 +29,9 @@ import (
 func TestPluginSynchronization(t *testing.T) {
 	t.Run("should synchronize a late-joining plugin with existing workloads", func(t *testing.T) {
 		s := framework.NewSuite(t, "sync-late-join")
-		framework.RequireCaps(t, framework.CapContainerLifecycle)
 
-		var (
-			pod0 = s.CreatePod(s.PodSpec("pod0"))
-			pod1 = s.CreatePod(s.PodSpec("pod1"))
-			ctr0 = s.CreateContainer(pod0, s.CtrSpec("ctr0"))
-			ctr1 = s.CreateContainer(pod1, s.CtrSpec("ctr1"))
-		)
+		pod0, ctr0 := s.CreatePodWithContainer("pod0", s.CtrSpec("ctr0"))
+		pod1, ctr1 := s.CreatePodWithContainer("pod1", s.CtrSpec("ctr1"))
 
 		s.StartContainer(ctr0)
 		s.StartContainer(ctr1)
@@ -85,15 +80,15 @@ func TestPluginSynchronization(t *testing.T) {
 
 	t.Run("should describe synchronized containers faithfully", func(t *testing.T) {
 		s := framework.NewSuite(t, "sync-ctr-fields")
-		framework.RequireCaps(t, framework.CapContainerLifecycle)
-
-		pod := s.CreatePod(s.PodSpec("pod0"))
 
 		ctrSpec := s.CtrSpec("ctr0")
 		ctrSpec.Env = map[string]string{"NRI_TEST_SYNC": "yes"}
-		ctrSpec.Annotations["nri-test.containerd.io/sync"] = "annotated"
+		ownMetadata := s.Driver().Capabilities().Has(framework.CapContainerMetadata)
+		if ownMetadata {
+			ctrSpec.Annotations["nri-test.containerd.io/sync"] = "annotated"
+		}
 
-		ctr := s.CreateContainer(pod, ctrSpec)
+		pod, ctr := s.CreatePodWithContainer("pod0", ctrSpec)
 		s.StartContainer(ctr)
 
 		plugin := s.NewPlugin("ctrfields", "00", 0)
@@ -124,7 +119,7 @@ func TestPluginSynchronization(t *testing.T) {
 				"Synchronize; got env %v",
 				framework.RuntimeName(), got.GetEnv())
 		}
-		if got.GetAnnotations()["nri-test.containerd.io/sync"] != "annotated" {
+		if ownMetadata && got.GetAnnotations()["nri-test.containerd.io/sync"] != "annotated" {
 			t.Errorf("runtime %s does not report container annotations during "+
 				"Synchronize; got annotations %v",
 				framework.RuntimeName(), got.GetAnnotations())

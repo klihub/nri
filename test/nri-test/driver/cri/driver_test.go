@@ -52,7 +52,9 @@ type fakeRuntime struct {
 	stopped []string
 	removed []string
 	stopErr map[string]error
-	rmErr   map[string]error
+	// createCtrErr is what CreateContainer fails with, by container name.
+	createCtrErr map[string]error
+	rmErr        map[string]error
 
 	podResourceUpdates []*runtimeapi.UpdatePodSandboxResourcesRequest
 
@@ -165,6 +167,17 @@ func (f *fakeRuntime) RunPodSandbox(_ context.Context, cfg *runtimeapi.PodSandbo
 	f.sandboxHandlers = append(f.sandboxHandlers, runtimeHandler)
 
 	return cfg.GetMetadata().GetName(), nil
+}
+
+// CreateContainer names the container after its config and fails for any
+// container named in createCtrErr.
+func (f *fakeRuntime) CreateContainer(_ context.Context, _ string, cfg *runtimeapi.ContainerConfig, _ *runtimeapi.PodSandboxConfig) (string, error) {
+	name := cfg.GetMetadata().GetName()
+	if err := f.createCtrErr[name]; err != nil {
+		return "", err
+	}
+
+	return "ctr-" + name, nil
 }
 
 func (f *fakeRuntime) Status(_ context.Context, verbose bool) (*runtimeapi.StatusResponse, error) {
@@ -632,6 +645,36 @@ func TestDriverStalePods(t *testing.T) {
 		require.NoError(t, err)
 
 		require.Equal(t, []string{"p1"}, staleIDs(d.StalePods()))
+	})
+}
+
+func TestCreatePodReturnsTheContainersItCreated(t *testing.T) {
+	// The suite attributes leaked containers to the case that created them, which
+	// it can only do for the ones CreatePod tells it about.
+	specs := []*framework.ContainerSpec{{Name: "a"}, {Name: "b"}, {Name: "c"}}
+
+	t.Run("lists them in spec order", func(t *testing.T) {
+		pod, err := testDriver(scopedConfig(), &fakeRuntime{}).CreatePod(context.Background(),
+			&framework.PodSpec{Name: "p0", Namespace: "nri-test", Containers: specs})
+		require.NoError(t, err)
+
+		var ids []string
+		for _, c := range pod.Containers {
+			require.Equal(t, "p0", c.PodID)
+			ids = append(ids, c.ID)
+		}
+
+		require.Equal(t, []string{"ctr-a", "ctr-b", "ctr-c"}, ids)
+	})
+
+	t.Run("lists the ones made before a failure", func(t *testing.T) {
+		rt := &fakeRuntime{createCtrErr: map[string]error{"c": errors.New("refused")}}
+
+		pod, err := testDriver(scopedConfig(), rt).CreatePod(context.Background(),
+			&framework.PodSpec{Name: "p0", Namespace: "nri-test", Containers: specs})
+		require.Error(t, err)
+		require.NotNil(t, pod, "the pod exists and must be returned to be cleaned up")
+		require.Len(t, pod.Containers, 2)
 	})
 }
 

@@ -74,6 +74,10 @@
 #   ENDPOINT      CRI endpoint; empty lets the suite autodetect
 #   NRI_SOCKET    NRI socket (default /run/nri/nri.sock)
 #   TIMEOUT       -nri-test.timeout value (default 60s)
+#   DRIVER        -nri-test.driver value: cri (default) or k8s. The k8s driver
+#                 needs kubelet running, so this script leaves it alone then.
+#   K8S_KUBECONFIG  kubeconfig on the node for the k8s driver (default
+#                 /etc/kubernetes/admin.conf)
 
 set -o errexit -o nounset -o pipefail
 
@@ -83,6 +87,8 @@ REMOTE_BIN="${REMOTE_BIN:-/tmp/nri-test}"
 ENDPOINT="${ENDPOINT:-}"
 NRI_SOCKET="${NRI_SOCKET:-/run/nri/nri.sock}"
 TIMEOUT="${TIMEOUT:-60s}"
+DRIVER="${DRIVER:-cri}"
+K8S_KUBECONFIG="${K8S_KUBECONFIG:-/etc/kubernetes/admin.conf}"
 
 # The handler is positional and first, so a flag in that slot is taken as a
 # handler name: `run-nri-test.sh -test.run=TestSmoke` becomes
@@ -387,12 +393,17 @@ on_node sudo systemctl is-active --quiet kubelet || kubelet_rc=$?
 
 case $kubelet_rc in
 0)
-    kubelet_was_active=yes
-    echo "--- stopping kubelet for the run"
-    on_node sudo systemctl stop kubelet || {
-        echo "ERROR: failed to stop kubelet on $NODE" >&2
-        exit 1
-    }
+    if [ "$DRIVER" = k8s ]; then
+        # The k8s driver is kubelet's client: stopping it would stop the run.
+        echo "--- DRIVER=k8s: leaving kubelet running"
+    else
+        kubelet_was_active=yes
+        echo "--- stopping kubelet for the run"
+        on_node sudo systemctl stop kubelet || {
+            echo "ERROR: failed to stop kubelet on $NODE" >&2
+            exit 1
+        }
+    fi
     ;;
 3)
     # systemd's documented "inactive" status. Nothing to stop, so nothing to
@@ -419,6 +430,9 @@ args=(
 )
 [ -n "$ENDPOINT" ] && args+=(-runtime-endpoint "$ENDPOINT")
 [ -n "$handler" ] && args+=(-nri-test.runtime-handler "$handler")
+if [ "$DRIVER" != cri ]; then
+    args+=(-nri-test.driver "$DRIVER" -nri-test.kubeconfig "$K8S_KUBECONFIG")
+fi
 
 # Two details of this invocation are load-bearing, and neither is about ssh's
 # options as such.

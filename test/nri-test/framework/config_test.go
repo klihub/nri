@@ -52,6 +52,17 @@ func TestConfigComplete(t *testing.T) {
 		require.Equal(t, "unix:///run/other.sock", c.ImageEndpoint)
 	})
 
+	t.Run("should default the CRI namespaces to kubelet's", func(t *testing.T) {
+		c := &Config{RuntimeEndpoint: "unix:///dev/null"}
+		require.NoError(t, c.Complete())
+		require.Equal(t, NamespacesK8s, c.CRINamespaces)
+	})
+
+	t.Run("should refuse an unknown CRI namespaces mode", func(t *testing.T) {
+		c := &Config{RuntimeEndpoint: "unix:///dev/null", CRINamespaces: "host"}
+		require.Error(t, c.Complete())
+	})
+
 	t.Run("should fail when no runtime endpoint can be found", func(t *testing.T) {
 		c := &Config{endpointCandidates: []string{"unix:///nonexistent/nri-test.sock"}}
 		require.Error(t, c.Complete())
@@ -118,4 +129,24 @@ func TestConfigNamespace(t *testing.T) {
 		require.NoError(t, c.Complete())
 		require.Equal(t, "custom-ns", c.Namespace)
 	})
+}
+
+func TestStopGrace(t *testing.T) {
+	c := &Config{}
+	require.NoError(t, c.Complete())
+	require.Zero(t, c.StopGrace, "an explicit zero must stay zero: it means kill at once")
+
+	c = &Config{StopGrace: 5 * time.Second}
+	require.NoError(t, c.Complete())
+	require.Equal(t, int64(5), c.StopGraceSeconds())
+
+	require.Error(t, (&Config{StopGrace: -time.Second}).Complete())
+}
+
+func TestProcView(t *testing.T) {
+	c := &Config{}
+	require.NoError(t, c.Complete())
+	require.Equal(t, ProcViewSelf, c.ProcView)
+
+	require.Error(t, (&Config{ProcView: "nonsense"}).Complete())
 }
