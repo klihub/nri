@@ -520,6 +520,48 @@ func (t *Timeline) Totals() (samples []time.Duration, skipped int) {
 // follows which, so it is meaningful for a teardown whose event order has not
 // been established. A negative offset would mean the phase's declared anchor
 // is not actually first, which Negatives counts rather than hides.
+// Arrivals returns how long after the burst's first event each pod reached
+// the given stage, and how many never did.
+//
+// Offsets below measures the same stage from each pod's own anchor, which
+// answers a different question and cannot see queueing: when every pod's
+// anchor is delayed by the same queue, subtracting it cancels the delay
+// out. Against a runtime that serialized NRI requests, the per-pod spread
+// of CreateContainer was 4ms while the spread from the burst's start was
+// 3.2s, and for a stage that is itself a pod's first event -- StopContainer
+// in teardown -- the per-pod offset is zero by construction.
+//
+// So this is the measurement that says what a burst cost; Offsets says what
+// one pod's own journey cost. A report wants both.
+func (t *Timeline) Arrivals(stage EventType) (samples []time.Duration, skipped int) {
+	var first time.Time
+
+	for _, p := range t.Pods {
+		if at, ok := p.Anchor(t.Phase); ok {
+			if first.IsZero() || at.Before(first) {
+				first = at
+			}
+		}
+	}
+
+	if first.IsZero() {
+		return nil, len(t.Pods)
+	}
+
+	for _, p := range t.Pods {
+		at, ok := p.Stage(stage)
+		if !ok {
+			skipped++
+
+			continue
+		}
+
+		samples = append(samples, at.Sub(first))
+	}
+
+	return samples, skipped
+}
+
 func (t *Timeline) Offsets(stage EventType) (samples []time.Duration, skipped int) {
 	for _, p := range t.Pods {
 		d, ok := p.Total(t.Phase, stage)
@@ -679,6 +721,13 @@ func NewScaleReport(iteration, replicas int, t *Timeline) *ScaleReport {
 		if skipped > 0 {
 			r.Skipped[name] = skipped
 		}
+	}
+
+	// From the burst's first event, one per stage. This is the one that
+	// shows queueing, and the one whose max is the stage's ladder rung.
+	for _, st := range t.Phase.Stages {
+		samples, sk := t.Arrivals(st)
+		add(fmt.Sprintf("burst..%s", st), samples, sk)
 	}
 
 	// Offsets from the phase anchor, one per stage. Order-free, so this is the

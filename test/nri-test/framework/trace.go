@@ -337,7 +337,8 @@ func WriteHookStats(b *strings.Builder, stats []HookStat) {
 	}
 
 	fmt.Fprintf(b, "\n  NRI calls as the runtime's spans saw them:\n\n")
-	fmt.Fprintf(b, "    %-22s %-7s %5s %9s %9s %9s\n", "hook", "scope", "n", "p50", "p90", "max")
+	fmt.Fprintf(b, "    %-22s %-7s %5s %9s %9s %9s %9s\n",
+		"hook", "scope", "n", "p50", "p90", "p99", "max")
 
 	for _, s := range stats {
 		name := string(s.Hook)
@@ -350,8 +351,8 @@ func WriteHookStats(b *strings.Builder, stats []HookStat) {
 				continue
 			}
 
-			fmt.Fprintf(b, "    %-22s %-7s %5d %9s %9s %9s\n",
-				name, row.scope, row.st.N, row.st.P50, row.st.P90, row.st.Max)
+			fmt.Fprintf(b, "    %-22s %-7s %5d %9s %9s %9s %9s\n",
+				name, row.scope, row.st.N, row.st.P50, row.st.P90, row.st.P99, row.st.Max)
 
 			name = ""
 		}

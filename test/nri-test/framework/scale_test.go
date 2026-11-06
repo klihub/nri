@@ -17,6 +17,7 @@
 package framework
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -588,4 +589,93 @@ func TestScaleReportPathLeavesTheFirstIterationAlone(t *testing.T) {
 	require.Equal(t, "/tmp/burst.json", ScaleReportPath("/tmp/burst.json", 1),
 		"a single-iteration run writes exactly the path it was given")
 	require.Equal(t, "/tmp/burst.json.2", ScaleReportPath("/tmp/burst.json", 2))
+}
+
+// TestArrivalsMeasureTheBurstNotThePod pins why Arrivals exists beside
+// Offsets.
+//
+// Two pods whose own journeys to CreateContainer are identical, but which
+// started a second apart because one waited for the other. Offsets, which
+// subtracts each pod's own anchor, reports the same number for both and so
+// cannot see the wait. Arrivals, measured from the burst's first event, can.
+//
+// Against a runtime that serialized NRI requests this was the difference
+// between a 4ms spread and a 3.2s one, so an implementation that collapsed
+// the two would report that a lock costs nothing.
+func TestArrivalsMeasureTheBurstNotThePod(t *testing.T) {
+	tl := &Timeline{
+		Phase:    StartupPhase(),
+		Terminal: CreateContainer,
+		Pods: []*PodTimeline{
+			{PodName: "early", At: map[EventType]time.Time{
+				RunPodSandbox:   at(0),
+				CreateContainer: at(100),
+			}},
+			{PodName: "queued", At: map[EventType]time.Time{
+				RunPodSandbox:   at(1000),
+				CreateContainer: at(1100),
+			}},
+		},
+	}
+
+	offsets, skipped := tl.Offsets(CreateContainer)
+	require.Zero(t, skipped)
+	require.Equal(t,
+		[]time.Duration{100 * time.Millisecond, 100 * time.Millisecond}, offsets,
+		"per-pod offsets cannot see that one pod waited for the other")
+
+	arrivals, skipped := tl.Arrivals(CreateContainer)
+	require.Zero(t, skipped)
+	require.Equal(t,
+		[]time.Duration{100 * time.Millisecond, 1100 * time.Millisecond}, arrivals,
+		"arrivals are measured from the burst's first event")
+}
+
+// TestArrivalsAgreeWithTheLadder keeps the two descriptions of a burst from
+// drifting: a stage's ladder rung is the last arrival at that stage, so it
+// must be the largest sample Arrivals reports.
+func TestArrivalsAgreeWithTheLadder(t *testing.T) {
+	tl := &Timeline{
+		Phase:    StartupPhase(),
+		Terminal: CreateContainer,
+		Pods: []*PodTimeline{
+			{PodName: "a", At: map[EventType]time.Time{
+				RunPodSandbox: at(0), CreateContainer: at(300),
+			}},
+			{PodName: "b", At: map[EventType]time.Time{
+				RunPodSandbox: at(50), CreateContainer: at(900),
+			}},
+			{PodName: "c", At: map[EventType]time.Time{
+				RunPodSandbox: at(20), CreateContainer: at(500),
+			}},
+		},
+	}
+
+	arrivals, _ := tl.Arrivals(CreateContainer)
+	rung, _, _ := tl.BurstTo(CreateContainer)
+
+	require.Equal(t, rung, slices.Max(arrivals),
+		"the ladder's rung is the last arrival at that stage")
+}
+
+// TestArrivalsCountPodsThatNeverReachedTheStage makes a pod that dropped out
+// visible as a skip rather than silently shrinking the sample.
+func TestArrivalsCountPodsThatNeverReachedTheStage(t *testing.T) {
+	tl := &Timeline{
+		Phase:    StartupPhase(),
+		Terminal: CreateContainer,
+		Pods: []*PodTimeline{
+			{PodName: "a", At: map[EventType]time.Time{
+				RunPodSandbox: at(0), CreateContainer: at(100),
+			}},
+			{PodName: "lost", At: map[EventType]time.Time{
+				RunPodSandbox: at(10),
+			}},
+		},
+	}
+
+	arrivals, skipped := tl.Arrivals(CreateContainer)
+
+	require.Len(t, arrivals, 1)
+	require.Equal(t, 1, skipped)
 }
