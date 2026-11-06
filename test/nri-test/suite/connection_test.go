@@ -136,7 +136,7 @@ func TestNRIVersionExchange(t *testing.T) {
 	t.Run("should report a usable NRI version", func(t *testing.T) {
 		version := framework.RuntimeNRIVersion()
 		if version == "" || version == api.UnknownVersion {
-			t.Skipf("runtime %s %s neither advertises nor allows inferring an NRI version",
+			framework.Skipped(t, "runtime %s %s neither advertises nor allows inferring an NRI version",
 				framework.RuntimeName(), framework.RuntimeVersion())
 		}
 
@@ -153,13 +153,13 @@ func TestNRIVersionExchange(t *testing.T) {
 	t.Run("should agree with the version inferred from the runtime version", func(t *testing.T) {
 		advertised := framework.RuntimeNRIVersion()
 		if advertised == "" || advertised == api.UnknownVersion || advertised == api.DevelVersion {
-			t.Skipf("runtime NRI version is %q; nothing to cross-check", advertised)
+			framework.Skipped(t, "runtime NRI version is %q; nothing to cross-check", advertised)
 		}
 
 		inferred, err := api.InferVersionFromRuntime(
 			framework.RuntimeName(), framework.RuntimeVersion())
 		if err != nil {
-			t.Skipf("cannot infer an NRI version for %s %s: %v",
+			framework.Skipped(t, "cannot infer an NRI version for %s %s: %v",
 				framework.RuntimeName(), framework.RuntimeVersion(), err)
 		}
 

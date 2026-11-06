@@ -158,7 +158,7 @@ func TestPodResourceUpdateEvents(t *testing.T) {
 		// it, drop this skip, subscribe to
 		// "UpdatePodSandbox,PostUpdatePodSandbox", call
 		// Driver.UpdatePodResources, and assert both events arrive for the pod.
-		t.Skip("pod resource updates are not verified in any runtime yet; " +
+		framework.Skipped(t, "pod resource updates are not verified in any runtime yet; "+
 			"see TODO in TestPodResourceUpdateEvents")
 
 		s := framework.NewSuite(t, "events-pod-update")

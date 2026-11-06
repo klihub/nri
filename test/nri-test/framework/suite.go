@@ -43,6 +43,11 @@ var (
 	runtimeName       string
 	runtimeVersion    string
 	runtimeNRIVersion string
+	// runtimeHandlers are the selectable low-level runtimes the node has
+	// installed, as discovery found them. Empty means either that nothing was
+	// discovered or that the driver could not be asked; a gate treats both the
+	// same, since neither can confirm a handler is there.
+	runtimeHandlers []string
 )
 
 // DriverFactory builds the driver and inspector a run uses. The suite package
@@ -96,12 +101,44 @@ func Setup(cfg *Config, newDriver DriverFactory) error {
 		return err
 	}
 
+	// Before anything that creates or touches a workload: a kubelet that
+	// garbage-collects this run's sandboxes must be caught before the first one
+	// exists. The driver is what declares the sensitivity, hence after it is built.
+	if err := checkKubelet(cfg, driver); err != nil {
+		return err
+	}
+
+	// Before preflight, and deliberately so. The plan this task came from put it
+	// after, on the grounds that the probe's timeout budget must not pay for a CRI
+	// Status call -- which is satisfied by the withTimeout below wherever the phase
+	// sits. Placed after preflight it would be unreachable on any host whose
+	// runtime cannot accept a plugin connection, so a mistyped handler would be
+	// reported as "no NRI plugin could connect" and the refusal below could never
+	// be observed at all. Validating a flag's value is input validation, and that
+	// belongs before network work.
+	if err := withTimeout(cfg.Timeout, func(ctx context.Context) error {
+		return selectRuntimeHandler(ctx, cfg)
+	}); err != nil {
+		return err
+	}
+
 	if err := checkExecCapability(); err != nil {
 		return err
 	}
 
 	if err := withTimeout(cfg.Timeout, func(ctx context.Context) error {
 		return preflight(ctx, cfg)
+	}); err != nil {
+		return err
+	}
+
+	// After the NRI probe, because a runtime that cannot accept a plugin is the
+	// more fundamental problem and must be reported as itself. Before pullImage
+	// and before any test, because a runtime that refuses the pods this run's
+	// configuration asks for makes every later test fail for one reason, and 68
+	// identical refusals say less than one diagnosis.
+	if err := withTimeout(cfg.Timeout, func(ctx context.Context) error {
+		return checkPodCreation(ctx, cfg)
 	}); err != nil {
 		return err
 	}
@@ -177,6 +214,130 @@ func checkExecCapability() error {
 
 	return nil
 }
+
+// runtimeHandlerLister is implemented by a driver that can say which low-level
+// runtimes the node has installed.
+//
+// Optional, and discovered by type assertion exactly as versioner, imagePuller
+// and kubeletConflicter are. A requested handler cannot be checked against a
+// driver that does not implement it, which selectRuntimeHandler refuses rather
+// than ignores.
+type runtimeHandlerLister interface {
+	RuntimeHandlers(ctx context.Context) ([]string, error)
+}
+
+// selectRuntimeHandler discovers the node's installed low-level runtimes and
+// verifies that the one the run asked for is among them.
+//
+// Three rules, and which is which is the point:
+//
+//   - An empty Config.RuntimeHandler is the runtime's default and is never
+//     validated. The default is legitimate, it is what every ordinary run uses,
+//     and it is never in the discovered list -- CRI-O reports it as an entry with
+//     no name at all. Validating it would refuse every default run.
+//   - A requested handler absent from the discovered list fails the run here,
+//     with one message naming what was asked for and what is installed. Left to
+//     the tests it is a per-test CreatePod failure that names neither.
+//   - A discovery that could not be done -- the driver cannot list, or the call
+//     failed -- is fatal only when a handler was requested. A run that asked for
+//     nothing gets the default and does not care what Status would have said.
+//
+// The discovered list is recorded before validation, so the refusal and
+// SkipUnlessRuntimeHandler describe the node from the same set.
+func selectRuntimeHandler(ctx context.Context, cfg *Config) error {
+	// Reset first: Setup may run more than once in a process (the framework's own
+	// tests do), and a stale list would let a gate skip or admit on the previous
+	// run's node.
+	runtimeHandlers = nil
+
+	lister, ok := driver.(runtimeHandlerLister)
+	if !ok {
+		if cfg.RuntimeHandler == "" {
+			return nil
+		}
+
+		return fmt.Errorf("-nri-test.runtime-handler=%s was requested, but driver %q "+
+			"cannot list the runtime handlers this node has installed, so the request "+
+			"cannot be honoured or checked; drop the flag to use the runtime's default "+
+			"handler", cfg.RuntimeHandler, driver.Name())
+	}
+
+	handlers, err := lister.RuntimeHandlers(ctx)
+	if err != nil {
+		if cfg.RuntimeHandler == "" {
+			return nil
+		}
+
+		return fmt.Errorf("-nri-test.runtime-handler=%s was requested, but the runtime "+
+			"handlers this node has installed could not be listed, so the request cannot "+
+			"be checked: %w", cfg.RuntimeHandler, err)
+	}
+
+	runtimeHandlers = handlers
+
+	if cfg.RuntimeHandler == "" {
+		return nil
+	}
+
+	if !slices.Contains(runtimeHandlers, cfg.RuntimeHandler) {
+		return fmt.Errorf("-nri-test.runtime-handler=%s is not installed on this node, "+
+			"which reports %s; the runtime would refuse every workload of this run. %s",
+			cfg.RuntimeHandler, installedHandlers(), handlerRemedy())
+	}
+
+	return nil
+}
+
+// handlerRemedy is the advice a not-installed refusal ends with.
+//
+// Branched, because on a node whose runtime advertises nothing there is no "one
+// of those" to select: telling an operator to pick from an empty list is the
+// message that reads as a bug in the suite rather than as a fact about the node,
+// and that node is precisely the one this refusal is most likely to be read on.
+// Read through RuntimeHandlers(), as the gate is, so that one run's refusal and
+// its skips cannot come to disagree about which handlers the node has.
+func handlerRemedy() string {
+	if len(RuntimeHandlers()) == 0 {
+		return "This runtime names no handlers at all, so no handler can be " +
+			"selected here: drop the flag to use its default, or run the suite on a " +
+			"node whose runtime reports the handler you want."
+	}
+
+	return "Select one of those handlers, or drop the flag to use the runtime's " +
+		"default."
+}
+
+// installedHandlers describes the discovered handlers for a message that has to
+// say what the node has.
+//
+// Shared by Setup's refusal and by SkipUnlessRuntimeHandler's skip reason, so the
+// two cannot describe the same node differently. The empty case says what it
+// means rather than printing an empty list: a runtime that advertises no handlers
+// is not a runtime with no low-level runtime, it is one that does not say.
+//
+// Read through RuntimeHandlers() for the reason handlerRemedy's note gives.
+func installedHandlers() string {
+	handlers := RuntimeHandlers()
+	if len(handlers) == 0 {
+		return "no selectable runtime handlers at all"
+	}
+
+	return "runtime handler(s) " + strings.Join(handlers, ", ")
+}
+
+// RuntimeHandlers returns the selectable low-level runtimes the node has
+// installed, as discovery found them. Empty when the runtime advertises none or
+// the driver cannot be asked.
+func RuntimeHandlers() []string { return slices.Clone(runtimeHandlers) }
+
+// RuntimeHandler returns the low-level runtime the run was configured to use, or
+// "" when none was asked for and the runtime's default applies.
+//
+// What was configured, not what was verified: it answers from Config alone, so it
+// says the same thing before Setup has run, after a Setup that refused the
+// handler, and on the -test.list path that never calls Setup at all. Only
+// RuntimeHandlers() reflects what the node turned out to have.
+func RuntimeHandler() string { return TestConfig.RuntimeHandler }
 
 // imagePuller is implemented by a driver that can pre-pull the test image. It is
 // optional, and discovered by type assertion exactly as preflight discovers
@@ -264,12 +425,28 @@ func preflight(ctx context.Context, cfg *Config) error {
 	})
 }
 
-// Teardown releases the run's resources. Call it from TestMain after all tests.
+// Teardown releases the run's resources and prints the summary. Call it from
+// TestMain after all tests, passing what m.Run() returned.
+//
+// The exit code is an argument because the summary cannot work it out. Only
+// Suite.Expect* and the recorded driver calls reach a Report; every bare require
+// and t.Errorf in the suite fails its test without recording anything, so an
+// empty report is not the same fact as a clean run and m.Run's verdict is the
+// only thing that can tell them apart. See Header.Failed.
 //
 // Cleanup and Close get separate timeouts for the same reason Setup's phases do:
 // a cleanup that runs long must not leave Close with an already-expired context
 // and so report a failure to close that never happened.
-func Teardown() {
+func Teardown(code int) {
+	// Deferred rather than written at the end: it must print on the no-driver
+	// path too -- a run that collected findings and then failed to produce a
+	// driver must still say what it collected -- and it must print after the
+	// cleanup warnings below, since the summary is meant to be the last thing a
+	// run says.
+	defer func() {
+		TestReport.Print(os.Stdout, summaryHeader(code != 0))
+	}()
+
 	if driver == nil {
 		return
 	}
@@ -282,6 +459,32 @@ func Teardown() {
 
 	if err := withTimeout(TestConfig.Timeout, driver.Close); err != nil {
 		fmt.Printf("WARNING: closing driver failed: %v\n", err)
+	}
+}
+
+// summaryHeader describes the run the summary belongs to.
+//
+// RuntimeHandler is the selected handler, which is also what Suite.PodSpec
+// stamped on every workload, so the header states what actually produced the
+// result. An empty one is the absence of a selection rather than a handler named
+// "", and the summary prints it as the runtime's default; it must not be filled
+// in from the discovered list, since which of those the runtime would have
+// defaulted to is not something this suite knows.
+//
+// Taken through RuntimeHandler() rather than from TestConfig directly, so the
+// header and the accessor cannot come to disagree about one run.
+//
+// failed comes from the caller because nothing in this package knows it: see
+// Teardown and Header.Failed.
+func summaryHeader(failed bool) Header {
+	return Header{
+		Runtime:        runtimeName,
+		RuntimeVersion: runtimeVersion,
+		NRIVersion:     runtimeNRIVersion,
+		RuntimeHandler: RuntimeHandler(),
+		RunID:          TestConfig.RunID,
+		Collecting:     TestConfig.CollectFailures,
+		Failed:         failed,
 	}
 }
 
@@ -401,12 +604,12 @@ func (s *Suite) StartPlugins(plugins ...*TestPlugin) {
 
 	for _, p := range plugins {
 		// Record before asserting, for the reason CreatePod documents: a plugin
-		// whose Start failed part way may still hold a connection, require.NoError
-		// does not return, and only cleanup can stop it.
+		// whose Start failed part way may still hold a connection, fatalf does not
+		// return, and only cleanup can stop it.
 		s.plugins = append(s.plugins, p)
 
 		err := p.Start(s.pluginCtx, TestConfig.NRISocketPath, TestConfig.Timeout)
-		require.NoError(s.t, err, "failed to start plugin %s", p.FullName())
+		s.fatalf("StartPlugins", err, "failed to start plugin %s", p.FullName())
 	}
 }
 
@@ -459,6 +662,16 @@ func (s *Suite) PodSpec(name string, ctrs ...*ContainerSpec) *PodSpec {
 		Labels:      labels,
 		Annotations: maps.Clone(labels),
 		Containers:  ctrs,
+		// Stamped here rather than left to each test, for the same reason the
+		// namespace is: a test that forgot would create its workloads with the
+		// runtime's default handler while the run's summary named the selected one,
+		// which is a false result rather than a missing one. Empty stays empty and
+		// asks the runtime for its default.
+		RuntimeHandler: TestConfig.RuntimeHandler,
+		// Stamped here for the reason the handler is. A runtime configured for
+		// systemd cgroups rejects the cgroupfs-form path it derives when this is
+		// empty, so every pod creation fails rather than one test.
+		CgroupParent: TestConfig.CgroupParent,
 	}
 }
 
@@ -557,11 +770,11 @@ func (s *Suite) CreatePod(spec *PodSpec) *Pod {
 
 	pod, err := driver.CreatePod(ctx, spec)
 	// Record before asserting: a partially created pod must still be cleaned up,
-	// and require.NoError does not return.
+	// and fatalf does not return.
 	if pod != nil {
 		s.pods = append(s.pods, pod)
 	}
-	require.NoError(s.t, err, "failed to create pod %s", spec.Name)
+	s.fatalf("CreatePod", err, "failed to create pod %s", spec.Name)
 
 	return pod
 }
@@ -574,14 +787,14 @@ func (s *Suite) CreateContainer(pod *Pod, spec *ContainerSpec) *Container {
 	defer cancel()
 
 	ctr, err := driver.CreateContainer(ctx, pod, spec)
-	// Record before asserting, for the reason CreatePod documents: require.NoError
-	// does not return, so a container appended after it would never reach the leak
-	// guard -- and a creation that failed part way is exactly the case the container
-	// guard exists for.
+	// Record before asserting, for the reason CreatePod documents: fatalf does not
+	// return, so a container appended after it would never reach the leak guard --
+	// and a creation that failed part way is exactly the case the container guard
+	// exists for.
 	if ctr != nil {
 		s.ctrs = append(s.ctrs, ctr)
 	}
-	require.NoError(s.t, err, "failed to create container %s", spec.Name)
+	s.fatalf("CreateContainer", err, "failed to create container %s", spec.Name)
 
 	return ctr
 }
@@ -594,7 +807,7 @@ func (s *Suite) Inspect(id string) *Observed {
 	defer cancel()
 
 	o, err := inspector.Inspect(ctx, id)
-	require.NoError(s.t, err, "failed to inspect container %s", id)
+	s.fatalf("Inspect", err, "failed to inspect container %s", id)
 
 	return o
 }
@@ -618,7 +831,7 @@ func (s *Suite) Exec(ctr *Container, cmd ...string) string {
 	s.t.Helper()
 
 	stdout, stderr, err := s.TryExec(ctr, cmd...)
-	require.NoError(s.t, err,
+	s.fatalf("Exec", err,
 		"failed to exec %v in container %s (stdout %q, stderr %q)",
 		cmd, ctr.ID, stdout, stderr)
 
@@ -674,6 +887,76 @@ func (s *Suite) ProcSelfStatus(ctr *Container) map[string]string {
 	return ProcStatus(s.Exec(ctr, "cat", "/proc/self/status"))
 }
 
+// expect records an unmet expectation and reports it, ending the case unless
+// the run collects failures.
+//
+// Both modes record the finding: the mode decides when the case stops, not
+// whether the failure is reported, so the run's summary and its exit code are
+// the same either way. Recording before reporting is what makes that true in
+// the default mode as well, where require.NoError does not return.
+//
+// Expectations go through here; driver calls go through fatalf, which records
+// just as this does and then aborts whatever the mode says. A collected
+// CreateContainer failure would leave the body running with a nil *Container,
+// and the derived panics and follow-on findings would bury the one real
+// failure in the summary this exists to make readable.
+func (s *Suite) expect(feature, surface string, err error) {
+	s.t.Helper()
+
+	if err == nil {
+		return
+	}
+
+	TestReport.AddFinding(Finding{
+		Kind:    KindExpectation,
+		Test:    s.t.Name(),
+		Feature: feature,
+		Surface: surface,
+		Err:     err,
+	})
+
+	if TestConfig.CollectFailures {
+		s.t.Errorf("%v", err)
+
+		return
+	}
+
+	require.NoError(s.t, err)
+}
+
+// fatalf records a failed operation and ends the case, unconditionally.
+//
+// The collecting mode does not apply here: what failed is a call the rest of
+// the body depends on, so this records and then aborts, every time. See
+// README.md under "Reporting" for why both halves are needed.
+//
+// format and args are the wrapper's own message, naming the pod or container
+// involved. It goes into the recorded error rather than only to require,
+// because a finding is read in a summary far from the output require writes to;
+// ctrError does the same for expectations and for the same reason.
+func (s *Suite) fatalf(op string, err error, format string, args ...any) {
+	s.t.Helper()
+
+	if err == nil {
+		return
+	}
+
+	// Formatted once and used twice, so the finding and the test's own output
+	// cannot come to describe the same failure differently. testify takes a
+	// single already-formatted string verbatim, which is what keeps each
+	// wrapper's message exactly what it was before it was routed through here.
+	msg := fmt.Sprintf(format, args...)
+
+	TestReport.AddFinding(Finding{
+		Kind:    KindOperation,
+		Test:    s.t.Name(),
+		Feature: op,
+		Err:     fmt.Errorf("%s: %w", msg, err),
+	})
+
+	require.NoError(s.t, err, msg)
+}
+
 // ExpectAnnotation fails the case unless the container's OCI spec carries the
 // annotation. See ExpectAnnotation for which surface this reads and why -- in
 // particular, that it verifies an NRI adjustment rather than a CRI annotation.
@@ -681,7 +964,7 @@ func (s *Suite) ExpectAnnotation(ctr *Container, key, want string) {
 	s.t.Helper()
 
 	err := ExpectAnnotation(s.Inspect(ctr.ID).Spec, key, want)
-	require.NoError(s.t, err, "container %s", ctr.ID)
+	s.expect("annotation", "OCI spec", ctrError(ctr, err))
 }
 
 // ExpectEnv fails the case unless both the container's OCI spec and the
@@ -696,7 +979,8 @@ func (s *Suite) ExpectEnv(ctr *Container, key, want string) {
 	spec := s.Inspect(ctr.ID).Spec
 	environ := s.Exec(ctr, "cat", "/proc/self/environ")
 
-	require.NoError(s.t, ExpectEnv(spec, environ, key, want), "container %s", ctr.ID)
+	s.expect("env", "OCI spec + /proc/self/environ",
+		ctrError(ctr, ExpectEnv(spec, environ, key, want)))
 }
 
 // ExpectMount fails the case unless both the container's OCI spec and the
@@ -710,8 +994,8 @@ func (s *Suite) ExpectMount(ctr *Container, destination string, wantOpts ...stri
 	spec := s.Inspect(ctr.ID).Spec
 	mounts := s.Exec(ctr, "cat", "/proc/self/mounts")
 
-	require.NoError(s.t, ExpectMount(spec, mounts, destination, wantOpts...),
-		"container %s", ctr.ID)
+	s.expect("mount", "OCI spec + /proc/self/mounts",
+		ctrError(ctr, ExpectMount(spec, mounts, destination, wantOpts...)))
 }
 
 // ExpectCpuset fails the case unless the kernel inside the container allows
@@ -722,7 +1006,7 @@ func (s *Suite) ExpectCpuset(ctr *Container, want string) {
 	s.t.Helper()
 
 	err := ExpectCpuset(s.ProcSelfStatus(ctr), want)
-	require.NoError(s.t, err, "container %s", ctr.ID)
+	s.expect("cpuset", "/proc/self/status", ctrError(ctr, err))
 }
 
 // ExpectMems fails the case unless the kernel inside the container allows
@@ -732,7 +1016,20 @@ func (s *Suite) ExpectMems(ctr *Container, want string) {
 	s.t.Helper()
 
 	err := ExpectMems(s.ProcSelfStatus(ctr), want)
-	require.NoError(s.t, err, "container %s", ctr.ID)
+	s.expect("mems", "/proc/self/status", ctrError(ctr, err))
+}
+
+// ctrError names the container an expectation failed for, or returns nil for a
+// met expectation.
+//
+// The id goes in the error itself rather than alongside it: a recorded Finding
+// carries one error, and is read in a summary far from the test's own output.
+func ctrError(ctr *Container, err error) error {
+	if err == nil {
+		return nil
+	}
+
+	return fmt.Errorf("container %s: %w", ctr.ID, err)
 }
 
 // do runs a driver call under a fresh TestConfig.Timeout budget.
@@ -755,7 +1052,7 @@ func (s *Suite) StartContainer(ctr *Container) {
 	err := s.do(func(ctx context.Context) error {
 		return driver.StartContainer(ctx, ctr)
 	})
-	require.NoError(s.t, err, "failed to start container %s", ctr.ID)
+	s.fatalf("StartContainer", err, "failed to start container %s", ctr.ID)
 }
 
 // StopContainer stops a container, failing the case if it cannot.
@@ -765,7 +1062,7 @@ func (s *Suite) StopContainer(ctr *Container) {
 	err := s.do(func(ctx context.Context) error {
 		return driver.StopContainer(ctx, ctr)
 	})
-	require.NoError(s.t, err, "failed to stop container %s", ctr.ID)
+	s.fatalf("StopContainer", err, "failed to stop container %s", ctr.ID)
 }
 
 // RemoveContainer removes a container, failing the case if it cannot.
@@ -775,7 +1072,7 @@ func (s *Suite) RemoveContainer(ctr *Container) {
 	err := s.do(func(ctx context.Context) error {
 		return driver.RemoveContainer(ctx, ctr)
 	})
-	require.NoError(s.t, err, "failed to remove container %s", ctr.ID)
+	s.fatalf("RemoveContainer", err, "failed to remove container %s", ctr.ID)
 }
 
 // UpdateContainerResources updates a container's resources, failing the case if
@@ -786,7 +1083,7 @@ func (s *Suite) UpdateContainerResources(ctr *Container, r *Resources) {
 	err := s.do(func(ctx context.Context) error {
 		return driver.UpdateContainerResources(ctx, ctr, r)
 	})
-	require.NoError(s.t, err, "failed to update resources of container %s", ctr.ID)
+	s.fatalf("UpdateContainerResources", err, "failed to update resources of container %s", ctr.ID)
 }
 
 // StopPod stops a pod, failing the case if it cannot.
@@ -796,7 +1093,7 @@ func (s *Suite) StopPod(pod *Pod) {
 	err := s.do(func(ctx context.Context) error {
 		return driver.StopPod(ctx, pod)
 	})
-	require.NoError(s.t, err, "failed to stop pod %s", pod.ID)
+	s.fatalf("StopPod", err, "failed to stop pod %s", pod.ID)
 }
 
 // RemovePod removes a pod, failing the case if it cannot.
@@ -813,7 +1110,7 @@ func (s *Suite) RemovePod(pod *Pod) {
 	if err == nil {
 		s.markRemoved(pod)
 	}
-	require.NoError(s.t, err, "failed to remove pod %s", pod.ID)
+	s.fatalf("RemovePod", err, "failed to remove pod %s", pod.ID)
 }
 
 func (s *Suite) markRemoved(pod *Pod) {
@@ -938,10 +1235,10 @@ func (s *Suite) cleanup() {
 	}
 
 	// Every outcome is reported, and one failing stage never returns early on
-	// another's behalf. An `err == nil &&` condition in this position is what
-	// disabled the guard once already; a `return` after the first failure is the
-	// same mistake wearing different clothes, since it would hide the second
-	// stage's answer whenever the first could not answer at all.
+	// another's behalf. An `err == nil &&` condition in this position disables
+	// the guard, and a `return` after the first failure is the same mistake
+	// wearing different clothes, since it would hide the second stage's answer
+	// whenever the first could not answer at all.
 	if listErr != nil {
 		s.t.Errorf("leak guard could not list this run's pods: %v", listErr)
 	}
