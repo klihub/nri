@@ -27,6 +27,7 @@ import (
 	rspec "github.com/opencontainers/runtime-spec/specs-go"
 
 	nri "github.com/containerd/nri/pkg/api"
+	"github.com/containerd/nri/pkg/runtime-tools/internal/ocigen"
 )
 
 const (
@@ -88,6 +89,11 @@ type Generator struct {
 	resolveRdt        func(string) (*rspec.LinuxIntelRdt, error)
 	injectCDIDevices  func(*rspec.Spec, []string) error
 	checkResources    func(*rspec.LinuxResources) error
+}
+
+// NewSpecGenerator returns a Generator over spec.
+func NewSpecGenerator(spec *rspec.Spec, opts ...GeneratorOption) *Generator {
+	return SpecGenerator(ocigen.New(spec), opts...)
 }
 
 // SpecGenerator returns a wrapped OCI Spec Generator.
