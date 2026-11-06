@@ -76,7 +76,8 @@ func (r *Runtime) Capabilities() framework.Capability {
 		framework.CapContainerMetadata |
 		framework.CapDevices |
 		framework.CapSysctls |
-		framework.CapSecurityContext
+		framework.CapSecurityContext |
+		framework.CapInTreeAdjustments
 }
 
 // RuntimeVersion returns the mock's name and version.

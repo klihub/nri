@@ -258,3 +258,35 @@ func TestDriverAppliesTheSecurityContext(t *testing.T) {
 		require.NotEmpty(t, m.GetLinux().GetSeccompPolicy().GetSyscalls())
 	})
 }
+
+func TestDriverAppliesTheContainerAnnotations(t *testing.T) {
+	t.Run("should write the container's annotations into the realized spec", func(t *testing.T) {
+		d, i := newTestDriver(t)
+
+		pod, err := d.CreatePod(context.Background(), &framework.PodSpec{
+			Name: "pod0", Namespace: "nri-test",
+			Containers: []*framework.ContainerSpec{{
+				Name:        "ctr0",
+				Annotations: map[string]string{"nri-test.containerd.io/initial": "yes"},
+			}},
+		})
+		require.NoError(t, err)
+
+		o, err := i.Inspect(context.Background(), pod.Containers[0].ID)
+		require.NoError(t, err)
+
+		// An adjustment that overwrites or removes an annotation has nothing to
+		// act on unless the realized spec carries one to begin with.
+		require.Equal(t, "yes", o.Spec.Annotations["nri-test.containerd.io/initial"],
+			"a runtime writes a container's annotations into its spec")
+	})
+}
+
+func TestDriverAdvertisesInTreeAdjustments(t *testing.T) {
+	d, _ := newTestDriver(t)
+
+	// This driver applies adjustments with the in-tree spec generator, which is
+	// the precondition the generate tests gate on.
+	require.True(t, d.Capabilities().Has(framework.CapInTreeAdjustments),
+		"a driver whose spec comes from the in-tree generator has to say so")
+}
