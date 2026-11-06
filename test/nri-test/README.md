@@ -23,7 +23,7 @@ measures is the NRI side of the protocol -- the stub, the proto round trip, the
 merge across plugins, and the in-tree adjustment-to-spec mapping. It is a
 control arm rather than a third runtime: a finding present on a real runtime
 but not here is below NRI, and one present on all three is the suite's own
-expectation.
+expectation. See [`RUNTIME-STATUS.md`](RUNTIME-STATUS.md).
 
 ## Contents
 
@@ -45,6 +45,10 @@ expectation.
 - [Measured facts](#measured-facts)
 - [Input conformance](#input-conformance)
 - [Limitations](#limitations)
+
+Results live in a separate document: [`RUNTIME-STATUS.md`](RUNTIME-STATUS.md)
+records what each measured runtime and version actually does with NRI. This
+file describes the suite; that one describes the runtimes.
 
 ## Why a new tool
 
@@ -1079,6 +1083,45 @@ The file is named for the run and removed by the run that wrote it -- one path,
 never a glob and never a sweep, because `/var/run/cdi` is where anything on the
 node may declare a device. The directory is removed too, but only when the run
 created it and only when it is empty.
+
+### What the runs found
+
+Per-runtime results are in [`RUNTIME-STATUS.md`](RUNTIME-STATUS.md), one
+column per measured runtime and version, with the side-by-side input table.
+They are deliberately not inlined here: a finding there is a fact about CRI-O
+1.37.2 or containerd 2.3.3 rather than about the suite, and it changes every
+time a new runtime or version is measured, while this document should not.
+
+That file is rendered, not written. A run given `-nri-test.status-dir` writes
+a JSON fragment of what it measured, one per runtime, version and runtime
+handler; `hack/run-nri-test.sh` passes the flag for a CRI-driver run and
+brings the fragment back into `test/nri-test/status/fragments`. The prose and
+the layout are in `test/nri-test/status/runtime-status.md.tmpl`, which the
+renderer only ever reads:
+
+```
+make nri-test-status        # render RUNTIME-STATUS.md from the fragments
+make nri-test-status-check   # fail if the committed document is not that render
+```
+
+A hand edit to the document is lost at the next render; edit the template or
+re-run the suite instead.
+
+One distinction that file states and that any reader of a coverage count
+needs: *measured* is not *verified*. A field whose test ran and failed was
+still measured, so the count is what the run looked at rather than what it
+approved.
+
+Two of the findings there exist only because a first version of their test
+could not have found them, and that is a fact about the suite rather than
+about any runtime. The `seccomp_policy` check originally asked for an
+unconfined profile, which means the realized spec carries no seccomp section
+at all, so the only comparison available was "neither side has one" --
+omission, the defect class the whole tier is for, was undetectable by
+construction. And both `pid` checks compared the reported value against an
+oracle that is left at zero when the runtime reports none, so `0 == 0` passed.
+A subset check needs its non-vacuity guard, and an agreement test must not
+arrange the state that hides what it is looking for.
 
 The two CDI assertions are independent on purpose, and that is what makes the
 CDI result attributable: a runtime can report a device it did not inject, or
