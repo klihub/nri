@@ -497,7 +497,15 @@ func Teardown(code int) {
 	// cleanup warnings below, since the summary is meant to be the last thing a
 	// run says.
 	defer func() {
-		TestReport.Print(os.Stdout, summaryHeader(code != 0))
+		hdr := summaryHeader(code != 0)
+		TestReport.Print(os.Stdout, hdr)
+
+		if TestConfig.StatusDir != "" {
+			frag := TestReport.Fragment(hdr, CurrentEnvironment(), selectedTests())
+			if err := WriteFragment(TestConfig.StatusDir, frag, TestConfig.StatusForce); err != nil {
+				fmt.Printf("WARNING: the run's results were not written: %v\n", err)
+			}
+		}
 	}()
 
 	// Before the driver guard, and unconditionally: the spec is written late in
@@ -1131,17 +1139,6 @@ func (s *Suite) capturedAt(p *TestPlugin, hook EventType, podID, ctrID string) *
 
 // expectInput records an input conformance finding under the field's
 // qualified name, taken at hook.
-//
-// A thin wrapper over expectAt so that every input assertion names the field
-// as its Feature and where the answer was read as its Surface. Those two are
-// what make a finding readable in a summary long after the test output
-// scrolled past: "CDI_devices missing from the hook request" and "CDI_devices
-// named in the request but absent from the container" are different findings
-// about a runtime, and only Surface separates them.
-//
-// A field the table does not carry ends the case, as in Covered. Seven bare
-// names occur under more than one message, so a finding under one could not
-// say which field it is about.
 func (s *Suite) expectInput(hook EventType, field, surface string, err error) {
 	s.t.Helper()
 
@@ -1152,8 +1149,7 @@ func (s *Suite) expectInput(hook EventType, field, surface string, err error) {
 	s.expectAt(hook, field, surface, err)
 }
 
-// knownInputField reports whether name is a qualified field in InputFields,
-// ending the case through fatalf under op when it is not.
+// knownInputField reports whether name is a qualified field in InputFields.
 func (s *Suite) knownInputField(op, name string) bool {
 	s.t.Helper()
 

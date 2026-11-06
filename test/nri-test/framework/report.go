@@ -94,9 +94,9 @@ type Finding struct {
 // test gave, which says what went unmeasured and what it would take to measure it.
 type Skip struct {
 	// Test is the name of the test that skipped.
-	Test string
+	Test string `json:"test"`
 	// Reason is the formatted message the test skipped with.
-	Reason string
+	Reason string `json:"reason"`
 }
 
 // Coverage is one input field a run verified.
@@ -107,9 +107,9 @@ type Skip struct {
 type Coverage struct {
 	// Field is the field's qualified name, as InputFields names it:
 	// "Container.CDI_devices".
-	Field string
+	Field string `json:"field"`
 	// Hook is the callback the field was read from.
-	Hook EventType
+	Hook EventType `json:"hook"`
 }
 
 // Header describes the run a summary belongs to.
@@ -120,24 +120,24 @@ type Coverage struct {
 // was collected from.
 type Header struct {
 	// Runtime is the runtime's name, as reported over CRI.
-	Runtime string
+	Runtime string `json:"runtime"`
 	// RuntimeVersion is the runtime's version, as reported over CRI.
-	RuntimeVersion string
+	RuntimeVersion string `json:"runtimeVersion"`
 	// NRIVersion is the runtime's NRI version, advertised or inferred.
-	NRIVersion string
+	NRIVersion string `json:"nriVersion"`
 	// RuntimeHandler is the runtime handler the run's workloads were created
 	// with, or "" when none was selected and the runtime's default applied.
-	RuntimeHandler string
+	RuntimeHandler string `json:"runtimeHandler"`
 	// RunID scopes everything the run created.
-	RunID string
+	RunID string `json:"runId"`
 	// Collecting says whether expectation failures were collected or whether
 	// the run stopped each test at its first one.
-	Collecting bool
+	Collecting bool `json:"collecting"`
 	// NoRuntime says there was no runtime under test: the run measured the
 	// NRI side of the protocol against a driver that plays the runtime
 	// itself. A summary of such a run says so twice, because a reader who
 	// quotes it as a runtime result has been misled by it.
-	NoRuntime bool
+	NoRuntime bool `json:"noRuntime"`
 	// Failed says whether the run failed, as go test's own verdict reported it.
 	//
 	// A Report cannot know this, and that is the point. Most of the suite's
@@ -146,7 +146,7 @@ type Header struct {
 	// report prints as a clean run, which is the one thing this summary must never
 	// say about a failing one. With this, the count section can tell a clean run
 	// from a run it is blind to.
-	Failed bool
+	Failed bool `json:"failed"`
 }
 
 // Report is what a run collected. It is safe for concurrent use.

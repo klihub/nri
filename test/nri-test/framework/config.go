@@ -176,6 +176,12 @@ type Config struct {
 	StopGrace time.Duration
 	// RunID scopes everything this run creates. Generated if empty.
 	RunID string
+	// StatusDir is the directory a run writes its JSON results into. Empty
+	// writes none.
+	StatusDir string
+	// StatusForce lets a run replace a result that measured a field this run
+	// did not, or one that cannot be read.
+	StatusForce bool
 
 	// endpointCandidates is overridable for testing.
 	endpointCandidates []string
@@ -252,6 +258,10 @@ func RegisterFlags() {
 		"timeout for a single operation or event wait")
 	flag.StringVar(&TestConfig.RunID, "nri-test.run-id", "",
 		"run id scoping created workloads; generated when empty")
+	flag.StringVar(&TestConfig.StatusDir, "nri-test.status-dir", "",
+		"directory to write the run's results into as JSON; empty writes none")
+	flag.BoolVar(&TestConfig.StatusForce, "nri-test.status-force", false,
+		"replace an existing result even when it measured a field this run did not, or cannot be read")
 }
 
 // Complete fills in defaults and validates the configuration.
