@@ -262,6 +262,13 @@ func startScalePlugins(t *testing.T, s *framework.Suite) *scaleSource {
 
 		p := framework.NewTestPlugin(fmt.Sprintf("scale-sim%02d", i), fmt.Sprintf("%02d", i),
 			mask, &framework.EventQ{}, s.Scope())
+
+		// Only the simulated plugins, never the recorder: the recorder has no
+		// delay and exists to timestamp callbacks, so making it answer one at
+		// a time would make the instrument the bottleneck and the measurement
+		// would be of that.
+		p.OrderedEvents = cfg.ScaleOrdered
+
 		plan.SimulateWork(p, i)
 
 		plugins = append(plugins, p)
@@ -269,6 +276,14 @@ func startScalePlugins(t *testing.T, s *framework.Suite) *scaleSource {
 
 	for _, line := range plan.Describe() {
 		t.Log(line)
+	}
+
+	// Said out loud, because the same flags otherwise produce two very
+	// different measurements and the report does not name which.
+	if cfg.ScaleOrdered {
+		t.Log("simulated plugins answer one request at a time, in dispatch order")
+	} else {
+		t.Log("simulated plugins answer concurrently")
 	}
 
 	s.StartPlugins(plugins...)

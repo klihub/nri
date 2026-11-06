@@ -71,6 +71,10 @@ type delayPlugin struct {
 	stub  stub.Stub
 	delay func(ctr *api.Container) time.Duration
 
+	// ordered answers one request at a time, in the order the runtime
+	// dispatched them, instead of concurrently.
+	ordered bool
+
 	synced chan struct{}
 	once   sync.Once
 
@@ -131,11 +135,17 @@ func (p *delayPlugin) Seen() []string {
 }
 
 func (p *delayPlugin) start(dir string) error {
-	s, err := stub.New(p,
+	opts := []stub.Option{
 		stub.WithPluginName(p.name),
 		stub.WithPluginIdx(p.idx),
 		stub.WithSocketPath(filepath.Join(dir, "nri.sock")),
-	)
+	}
+
+	if p.ordered {
+		opts = append(opts, stub.WithOrderedEvents())
+	}
+
+	s, err := stub.New(p, opts...)
 	if err != nil {
 		return err
 	}
@@ -161,6 +171,15 @@ type scaleRig struct {
 // startRig brings up an Adaptation with count plugins, each answering after
 // delay, and waits until every one of them is eligible for events.
 func startRig(t *testing.T, count int, delay func(*api.Container) time.Duration) *scaleRig {
+	t.Helper()
+
+	return startRigWith(t, count, delay, false)
+}
+
+// startRigWith is startRig, with a say in whether the plugins answer one
+// request at a time.
+func startRigWith(t *testing.T, count int, delay func(*api.Container) time.Duration,
+	ordered bool) *scaleRig {
 	t.Helper()
 
 	logrus.SetLevel(logrus.ErrorLevel)
@@ -193,6 +212,7 @@ func startRig(t *testing.T, count int, delay func(*api.Container) time.Duration)
 
 	for i := 0; i < count; i++ {
 		p := newDelayPlugin(i, delay)
+		p.ordered = ordered
 		require.NoError(t, p.start(dir))
 		t.Cleanup(p.stop)
 		rig.plugins = append(rig.plugins, p)

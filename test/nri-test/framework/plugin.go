@@ -48,6 +48,14 @@ type TestPlugin struct {
 	// fields the filter keys on has to be done there rather than here.
 	SynchronizeFn func(context.Context, []*api.PodSandbox, []*api.Container) ([]*api.ContainerUpdate, error)
 
+	// OrderedEvents makes this plugin answer streamed requests one at a
+	// time, in the order the runtime dispatched them, rather than
+	// concurrently. Install it before Start.
+	//
+	// It only bites where the runtime took an event stream: over unary calls
+	// there is no order to answer in, since ttrpc decides what arrives when.
+	OrderedEvents bool
+
 	RunPodSandboxFn        func(context.Context, *api.PodSandbox) error
 	UpdatePodSandboxFn     func(context.Context, *api.PodSandbox, *api.LinuxResources, *api.LinuxResources) error
 	PostUpdatePodSandboxFn func(context.Context, *api.PodSandbox) error
@@ -455,13 +463,19 @@ func (p *TestPlugin) Start(ctx context.Context, socket string, timeout time.Dura
 		return c, nil
 	}
 
-	s, err := stub.New(p,
+	opts := []stub.Option{
 		stub.WithPluginName(p.name),
 		stub.WithPluginIdx(p.idx),
 		stub.WithSocketPath(socket),
 		stub.WithDialer(dialer),
 		stub.WithOnClose(p.recordDisconnect),
-	)
+	}
+
+	if p.OrderedEvents {
+		opts = append(opts, stub.WithOrderedEvents())
+	}
+
+	s, err := stub.New(p, opts...)
 	if err != nil {
 		return fmt.Errorf("failed to create stub for plugin %s: %w", p.FullName(), err)
 	}

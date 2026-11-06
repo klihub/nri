@@ -207,6 +207,9 @@ type Config struct {
 	// ScaleChurn runs a churn phase after the startup burst: another set of
 	// pods created while the first set is torn down, measured together.
 	ScaleChurn bool
+	// ScaleOrdered makes the simulated plugins answer one request at a time,
+	// in dispatch order, so the ordering guarantee's cost can be measured.
+	ScaleOrdered bool
 	// ScaleIterations is how many bursts to measure.
 	ScaleIterations int
 	// ScaleSettle bounds how long a burst's events are waited for.
@@ -333,6 +336,10 @@ func RegisterFlags() {
 	flag.StringVar(&TestConfig.ScaleTerminalEvent, "nri-test.scale-terminal",
 		string(PostStartContainer),
 		"stage a burst is measured to: StartContainer or PostStartContainer")
+	flag.BoolVar(&TestConfig.ScaleOrdered, "nri-test.scale-ordered", false,
+		"have the simulated plugins answer one request at a time in the order the "+
+			"runtime dispatched them, instead of concurrently; measures what the "+
+			"ordering guarantee costs")
 	flag.BoolVar(&TestConfig.ScaleChurn, "nri-test.scale-churn", false,
 		"after the startup burst, create another set of pods while tearing the "+
 			"first set down, and measure the two together")
