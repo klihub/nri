@@ -139,7 +139,9 @@ func (d *Driver) Name() string { return "k8s" }
 
 // Capabilities returns what this driver can express: exec, through the API
 // server. See Inspector.
-func (d *Driver) Capabilities() framework.Capability { return framework.CapExec }
+func (d *Driver) Capabilities() framework.Capability {
+	return framework.CapExec | framework.CapObservedRuntimeState
+}
 
 // ConflictsWithKubelet is false: kubelet running is this driver's precondition.
 func (d *Driver) ConflictsWithKubelet() bool { return false }
