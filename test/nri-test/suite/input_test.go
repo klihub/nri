@@ -574,6 +574,7 @@ func TestInputAgreement(t *testing.T) {
 
 	t.Run("should report the container pid at PostStartContainer", func(t *testing.T) {
 		s := framework.NewSuite(t, "agree-pid")
+		framework.RequireCaps(t, framework.CapObservedRuntimeState)
 
 		plugin := inputPlugin(s)
 		_, ctr := s.CreatePodWithContainer("pod0", s.CtrSpec("ctr0"))
@@ -601,6 +602,7 @@ func TestInputAgreement(t *testing.T) {
 
 	t.Run("should report created_at at PostCreateContainer", func(t *testing.T) {
 		s := framework.NewSuite(t, "agree-created-at")
+		framework.RequireCaps(t, framework.CapObservedRuntimeState)
 
 		plugin := inputPlugin(s)
 		_, ctr := s.CreatePodWithContainer("pod0", s.CtrSpec("ctr0"))
@@ -623,6 +625,7 @@ func TestInputAgreement(t *testing.T) {
 
 	t.Run("should report started_at at PostStartContainer", func(t *testing.T) {
 		s := framework.NewSuite(t, "agree-started-at")
+		framework.RequireCaps(t, framework.CapObservedRuntimeState)
 
 		plugin := inputPlugin(s)
 		_, ctr := s.CreatePodWithContainer("pod0", s.CtrSpec("ctr0"))
@@ -642,6 +645,7 @@ func TestInputAgreement(t *testing.T) {
 
 	t.Run("should report pod ips at RunPodSandbox", func(t *testing.T) {
 		s := framework.NewSuite(t, "agree-pod-ips")
+		framework.RequireCaps(t, framework.CapObservedRuntimeState)
 
 		plugin := inputPlugin(s)
 		pod := s.CreatePod(s.PodSpec("pod0"))
@@ -669,6 +673,7 @@ func TestInputAgreement(t *testing.T) {
 
 	t.Run("should report the pod pid at RunPodSandbox", func(t *testing.T) {
 		s := framework.NewSuite(t, "agree-pod-pid")
+		framework.RequireCaps(t, framework.CapObservedRuntimeState)
 
 		plugin := inputPlugin(s)
 		pod := s.CreatePod(s.PodSpec("pod0"))
@@ -948,6 +953,7 @@ func TestInputAgreement(t *testing.T) {
 
 	t.Run("should report the termination reason at RemoveContainer", func(t *testing.T) {
 		s := framework.NewSuite(t, "agree-status-reason")
+		framework.RequireCaps(t, framework.CapObservedRuntimeState)
 		framework.RequireCaps(t, framework.CapContainerLifecycle)
 
 		plugin := inputPlugin(s)
@@ -1002,6 +1008,7 @@ func TestInputAgreement(t *testing.T) {
 
 	t.Run("should report exit status at RemoveContainer", func(t *testing.T) {
 		s := framework.NewSuite(t, "agree-exit")
+		framework.RequireCaps(t, framework.CapObservedRuntimeState)
 		framework.RequireCaps(t, framework.CapContainerLifecycle)
 
 		plugin := inputPlugin(s)
@@ -1040,7 +1047,7 @@ func TestInputStateLadder(t *testing.T) {
 		// lifecycle -- and CONTAINER_UNKNOWN is the enum's zero value, so the
 		// ladder is also the check that the field was set at all.
 		s := framework.NewSuite(t, "input-state-ladder")
-		framework.RequireCaps(t, framework.CapContainerLifecycle)
+		framework.RequireCaps(t, framework.CapContainerLifecycle|framework.CapObservedRuntimeState)
 
 		plugin := inputPlugin(s)
 		pod, ctr := s.CreatePodWithContainer("pod0", s.CtrSpec("ctr0"))
@@ -1124,4 +1131,38 @@ func TestInputCDIDevices(t *testing.T) {
 				"yes", s.Exec(ctr, "sh", "-c",
 					"test -c /dev/test-null && echo yes || echo no")))
 	})
+}
+
+// A field the driver itself authors cannot be checked against the driver: the
+// subject and the oracle would be the same code, so the check could not fail.
+// Those fields must print as not exercised rather than as passes, which is
+// what this test pins -- it fails if one of them is ever counted as measured
+// under a driver that has no runtime behind it.
+func TestSelfAuthoredFieldsAreNotMeasured(t *testing.T) {
+	if framework.TestConfig.Driver != framework.DriverMock {
+		framework.Skipped(t, "only the mock driver authors these values; a real "+
+			"runtime produces them and they are measured against it")
+	}
+
+	measured := map[string]bool{}
+	for _, c := range framework.TestReport.CoverageOf() {
+		measured[c.Field] = true
+	}
+
+	for _, field := range []string{
+		"Container.pid",
+		"PodSandbox.pid",
+		"Container.created_at",
+		"Container.started_at",
+		"Container.finished_at",
+		"Container.exit_code",
+		"Container.state",
+		"PodSandbox.ips",
+		"Container.status_reason",
+		"Container.status_message",
+	} {
+		if measured[field] {
+			t.Errorf("%s is this driver's own value, so a check of it proves nothing", field)
+		}
+	}
 }

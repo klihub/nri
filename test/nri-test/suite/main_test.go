@@ -25,6 +25,7 @@ import (
 
 	"github.com/containerd/nri/test/nri-test/driver/cri"
 	"github.com/containerd/nri/test/nri-test/driver/k8s"
+	"github.com/containerd/nri/test/nri-test/driver/mock"
 	"github.com/containerd/nri/test/nri-test/framework"
 )
 
@@ -50,9 +51,21 @@ func newK8sDriver(ctx context.Context, cfg *framework.Config) (framework.Driver,
 	return d, i, nil
 }
 
+func newMockDriver(ctx context.Context, cfg *framework.Config) (framework.Driver, framework.Inspector, error) {
+	d, i, err := mock.NewDriver(ctx, cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return d, i, nil
+}
+
 func newDriver(ctx context.Context, cfg *framework.Config) (framework.Driver, framework.Inspector, error) {
-	if cfg.Driver == framework.DriverK8s {
+	switch cfg.Driver {
+	case framework.DriverK8s:
 		return newK8sDriver(ctx, cfg)
+	case framework.DriverMock:
+		return newMockDriver(ctx, cfg)
 	}
 
 	return newCRIDriver(ctx, cfg)

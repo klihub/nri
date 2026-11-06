@@ -233,7 +233,7 @@ install-wasm-plugin:
 install-protoc-dependencies:
 	$(Q)GOBIN="$(PROTOC_PATH)/bin" $(GO_INSTALL) google.golang.org/protobuf/cmd/protoc-gen-go
 
-nri-test:
+nri-test: go-generate
 	$(Q)mkdir -p $(BIN_PATH)
 	$(Q)cd test/nri-test && \
 	    $(GO_CMD) test -c -o $(BIN_PATH)/nri-test ./suite

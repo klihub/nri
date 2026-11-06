@@ -72,6 +72,14 @@ const (
 	// CRI takes the paths verbatim; a Kubernetes pod reaches a device only
 	// through a device plugin, so it cannot ask for one by path.
 	CapDevices
+	// CapObservedRuntimeState means the state a test reads back was produced
+	// by a runtime rather than by the driver itself: process ids, timestamps,
+	// lifecycle state, addresses, termination status.
+	//
+	// A driver without it has no runtime behind it, so a check of those
+	// fields would compare the driver against itself and could not fail. The
+	// tests that read them skip, and the fields print as not exercised.
+	CapObservedRuntimeState
 )
 
 var capabilityNames = []struct {
@@ -89,6 +97,7 @@ var capabilityNames = []struct {
 	{CapSysctls, "Sysctls"},
 	{CapSecurityContext, "SecurityContext"},
 	{CapDevices, "Devices"},
+	{CapObservedRuntimeState, "ObservedRuntimeState"},
 }
 
 // Has reports whether all capabilities in o are present in c.

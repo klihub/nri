@@ -150,3 +150,29 @@ func TestProcView(t *testing.T) {
 
 	require.Error(t, (&Config{ProcView: "nonsense"}).Complete())
 }
+func TestCompleteLeavesTheNamespaceAloneOutsideScalabilityMode(t *testing.T) {
+	c := &Config{RunID: "abc123", Namespace: "mine", endpointCandidates: []string{}}
+
+	_ = c.Complete()
+
+	require.Equal(t, "mine", c.Namespace)
+}
+
+// One direction of one burst gets its own budget. The CRI burst used to create
+// grace wait had already spent part of it, so a slow burst left the teardown
+// calls with an expired context -- they failed instantly, their errors were
+// discarded, and the teardown report was noise shaped like data.
+func TestCompleteAcceptsTheMockDriver(t *testing.T) {
+	c := &Config{RuntimeEndpoint: "unix:///dev/null", Driver: DriverMock}
+
+	require.NoError(t, c.Complete())
+	require.Equal(t, DriverMock, c.Driver)
+}
+func TestCompleteRefusesAnUnknownDriver(t *testing.T) {
+	c := &Config{RuntimeEndpoint: "unix:///dev/null", Driver: "pretend"}
+
+	err := c.Complete()
+	require.Error(t, err)
+	require.ErrorContains(t, err, "pretend")
+	require.ErrorContains(t, err, DriverMock, "the message has to name the drivers that exist")
+}
