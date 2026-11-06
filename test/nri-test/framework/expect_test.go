@@ -235,6 +235,39 @@ func TestExpectMount(t *testing.T) {
 	})
 }
 
+func TestExpectMountOptions(t *testing.T) {
+	spec := &rspec.Spec{Mounts: []rspec.Mount{{Destination: "/mnt/m"}}}
+
+	t.Run("should accept an option present in the mount table", func(t *testing.T) {
+		// mount present in both surfaces, ro present in the table
+		require.NoError(t, ExpectMount(spec, "/dev/x /mnt/m ext4 ro,relatime 0 0", "/mnt/m", "ro"))
+	})
+
+	t.Run("should reject an absent option and name the options it has", func(t *testing.T) {
+		// ro absent from the table: the runtime honoured the bind and dropped ro
+		err := ExpectMount(spec, "/dev/x /mnt/m ext4 rw,relatime 0 0", "/mnt/m", "ro")
+		require.ErrorContains(t, err, "ro")
+		require.ErrorContains(t, err, "rw,relatime")
+	})
+
+	t.Run("should not satisfy an option with a substring of another", func(t *testing.T) {
+		// a substring must not satisfy the option
+		err := ExpectMount(spec, "/dev/x /mnt/m ext4 errors=remount-ro 0 0", "/mnt/m", "ro")
+		require.ErrorContains(t, err, "ro")
+	})
+
+	t.Run("should error on a line truncated before the options field", func(t *testing.T) {
+		// a line truncated before the options field errors rather than panicking
+		err := ExpectMount(spec, "/dev/x /mnt/m ext4", "/mnt/m", "ro")
+		require.ErrorContains(t, err, "options")
+	})
+
+	t.Run("should check only the two surfaces when no option is wanted", func(t *testing.T) {
+		// no wantOpts keeps the existing two-surface behaviour
+		require.NoError(t, ExpectMount(spec, "/dev/x /mnt/m ext4 rw 0 0", "/mnt/m"))
+	})
+}
+
 func TestExpectCpuset(t *testing.T) {
 	t.Run("should accept the kernel's allowed list matching", func(t *testing.T) {
 		require.NoError(t, ExpectCpuset(ProcStatus("Cpus_allowed_list:\t0-1\n"), "0-1"))

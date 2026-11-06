@@ -43,6 +43,14 @@ func newCRIDriver(ctx context.Context, cfg *framework.Config) (framework.Driver,
 func TestMain(m *testing.M) {
 	flag.Parse()
 
+	// Listing is static: it must not dial CRI, connect a plugin or pull an
+	// image, or it would need root and a live runtime just to print names. So
+	// this comes before Complete(), whose endpoint autodetection fails on a node
+	// with no runtime socket -- exactly where listing must still work.
+	if framework.ListingOnly() {
+		os.Exit(m.Run())
+	}
+
 	if err := framework.TestConfig.Complete(); err != nil {
 		fmt.Fprintf(os.Stderr, "nri-test: %v\n", err)
 		os.Exit(1)
