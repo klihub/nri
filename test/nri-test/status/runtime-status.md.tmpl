@@ -1,0 +1,203 @@
+{{- define "token" -}}
+{{- if eq .State.String "finding"}}finding
+{{- else if eq .State.String "agreed"}}agreed
+{{- else}}not measured{{end -}}
+{{- end -}}
+{{- define "status" -}}
+{{- if .PerHandler -}}
+{{- range $i, $h := .PerHandler -}}
+{{- if $i}}; {{end}}{{$h.Handler}}: {{template "token" $h -}}
+{{- end -}}
+{{- else}}{{template "token" .}}{{end -}}
+{{- end -}}
+{{- define "detail" -}}
+{{- if .PerHandler -}}
+{{- range $i, $h := .PerHandler -}}
+{{- if eq $h.State.String "finding"}}{{if $i}}; {{end}}{{$h.Handler}}: {{$h.Text}}{{end -}}
+{{- end -}}
+{{- else}}{{.Text}}{{end -}}
+{{- end -}}
+{{- define "handlers" -}}
+{{- range $i, $h := .}}{{if $i}}, {{end}}{{$h}}{{end -}}
+{{- end -}}
+{{- define "values" -}}
+{{- $named := gt (len .) 1 -}}
+{{- range $i, $v := .}}{{if $i}}; {{end}}{{if $named}}{{$v.Handler}}: {{end}}{{$v.Value}}{{end -}}
+{{- end -}}
+{{- define "heads" -}}
+{{- range .}} {{.Runtime}} {{.Version}} |{{end -}}
+{{- end -}}
+{{- define "rule" -}}
+{{- range .}}---|{{end -}}
+{{- end -}}
+# Runtime status
+
+What each runtime the suite has been run against does with the NRI input
+surface, as measured on a real node. A plugin author reads this to find out
+what a runtime can be relied on to report; a runtime maintainer reads their
+own column.
+
+Nothing here is a conformance score. The suite exercises a fraction of NRI,
+so `agreed` means "nothing this suite looked at failed", which is weaker
+than conformant. Columns are not totalled, ranked or graded.
+
+This file is generated: the prose lives in
+`test/nri-test/status/runtime-status.md.tmpl`, the measurements in the JSON
+fragments under `test/nri-test/status/fragments`, and `make nri-test-status`
+renders one from the other. A hand edit here is lost at the next render.
+`README.md` describes the suite itself, and `LIBRARY-DEFECTS.md` records
+what the mock arm found about the in-tree libraries.
+{{- if .Columns}}
+
+## Runs behind this report
+
+| |{{template "heads" .Columns}}
+|---|{{template "rule" .Columns}}
+| Runtime handlers |{{range .Columns}} {{template "handlers" .Handlers}} |{{end}}
+| NRI version negotiated |{{range .Columns}} {{template "values" .NRIVersion}} |{{end}}
+| Kernel |{{range .Columns}} {{template "values" .KernelRelease}} |{{end}}
+| Architecture |{{range .Columns}} {{template "values" .Arch}} |{{end}}
+| Failures reported per test |{{range .Columns}} {{template "values" .Collecting}} |{{end}}
+| Input fields measured, of {{.TotalFields}} |{{range .Columns}} {{template "values" .Measured}} |{{end}}
+| Input fields with a finding |{{range .Columns}} {{template "values" .FieldsWithFinding}} |{{end}}
+
+Every column is one runtime and version, over every handler its fragments
+were measured with, and every run used the CRI driver against the runtime's
+own sockets. A cell naming a handler is one whose handlers' runs disagreed.
+{{if .Selections}}
+**Not every run covered the whole suite.** A filtered run measured only the
+tests its filter selected, so anything this report does not say about such a
+run is unmeasured rather than clean.
+
+| Column | Tests selected |
+|---|---|
+{{- range .Selections}}
+| {{.Column}} | `{{.Tests}}` |
+{{- end}}
+{{end}}
+{{- range .Columns}}
+{{- if .FailedUnseen}}
+**A run in this column failed without recording a finding.** Some test in
+{{.Runtime}} {{.Version}} failed outside the findings below, so this column
+does not account for everything that went wrong in it.
+{{end}}
+{{- end}}
+## The input surface
+
+Every field a plugin is shown, and what each runtime did with it. `finding`
+means the runtime and the suite disagreed; the detail is below the table.
+`not measured` is not a pass.
+
+| Field |{{template "heads" .Columns}}
+|---|{{template "rule" .Columns}}
+{{- range .Rows}}
+| `{{.Field}}`{{if .Note}} [^{{.Field}}]{{end}} |{{range .Cells}} {{template "status" .}} |{{end}}
+{{- end}}
+{{$findings := .RowsWithFinding}}
+{{- if $findings}}
+### Findings in detail
+
+Each reads as the hook it was taken at, then the reason the expectation
+gave. A reason names both the value the plugin was shown and the value it
+was compared against, except where there was no oracle to compare with.
+{{range $row := $findings}}
+- **`{{$row.Field}}`**
+{{- range $i, $cell := $row.Cells}}
+{{- if eq $cell.State.String "finding"}}
+  - {{(index $.Columns $i).Runtime}} {{(index $.Columns $i).Version}}: {{template "detail" $cell}}
+{{- end}}
+{{- end}}
+{{- end}}
+{{end}}
+{{- $noted := false}}
+{{- range .Rows}}{{if .Note}}{{$noted = true}}{{end}}{{end}}
+{{- if $noted}}
+### Notes on individual fields
+{{range .Rows}}
+{{- if .Note}}
+[^{{.Field}}]: {{.Note}}
+{{end}}
+{{- end}}
+{{- end}}
+## What was not measured
+
+A report that hides its gaps overstates itself.
+{{$asymmetric := false}}
+{{- range .RowsUnmeasured}}{{if .MeasuredIn}}{{$asymmetric = true}}{{end}}{{end}}
+{{- if $asymmetric}}
+These fields one column measured and another did not, so a measurement one
+run made is not lost among the fields nobody reached. The table above shows
+every other unmeasured field.
+{{range .RowsUnmeasured}}
+{{- if .MeasuredIn}}
+- `{{.Field}}` -- not measured by {{template "handlers" .UnmeasuredIn}}; measured with no finding by {{template "handlers" .MeasuredIn}}
+{{- end}}
+{{- end}}
+{{end}}
+{{- if .Skips}}
+These tests skipped, grouped by why. A skip in one run alone is a gap in
+that runtime's results; the same skip in every run is a gap in the suite.
+
+| Tests | Skipped in | Reason |
+|---|---|---|
+{{- range .SkipGroups}}
+| {{if gt (len .Tests) 1}}{{len .Tests}} tests{{else}}`{{index .Tests 0}}`{{end}} | {{template "handlers" .Columns}} | {{.Reason}} |
+{{- end}}
+
+A group of several tests names no test: they skipped for one reason, and
+the reason is what a reader of this report needs.
+{{else}}
+No test skipped{{if .Selections}} among the tests the selected runs ran{{end}}.
+{{end}}
+The runtime handler's own version is not recorded, because CRI does not
+report it. Two columns naming the same handler may have run different
+builds of it. Neither is the build of the suite that measured a column,
+so two columns may have been measured by different builds of it as well:
+a column is re-measured on its own, and a difference between two columns
+is evidence about the runtimes only as far as that.
+
+## Failures outside the input surface
+{{$expectations := .OtherExpectations}}
+{{- if $expectations}}
+Findings about a runtime's behaviour rather than about an input field: hook
+delivery, subscription, creation adjustments, mounts, the event ladder, or
+the leak and cleanup guards.
+
+| Column | Test | Feature | Surface | Finding |
+|---|---|---|---|---|
+{{- range $expectations}}
+| {{.Column}} | `{{.Test}}` | `{{.Feature}}` | {{.Surface}} | {{.Text}} |
+{{- end}}
+{{else}}
+The behavioural conformance tests recorded no finding{{if .Selections}} among
+the tests the selected runs ran{{end}}.
+{{end}}
+{{- $operations := .OtherOperations}}
+{{- if $operations}}
+These driver calls were refused, which ended their tests and left those
+tests' expectations unevaluated. What they would have measured is unknown
+rather than correct, and none is a finding about NRI behaviour.
+
+| Column | Test | Operation | Error |
+|---|---|---|---|
+{{- range $operations}}
+| {{.Column}} | `{{.Test}}` | `{{.Feature}}` | {{.Text}} |
+{{- end}}
+{{end}}
+## Reading the counts
+
+"Input fields measured" counts the fields a run's tests recorded coverage
+for. It is not everything the run looked at, and it does not bound the row
+below it: a finding can be recorded against a field no coverage call named.
+Neither row is summed across a column's handlers, because a sum would grow
+with the number of runs rather than with what the runtime does.
+
+A column's failure-reporting mode decides how much a run could have found.
+With `-nri-test.collect-failures` a test reports every expectation it
+checked; without it a test stops at its first failure, so a column in that
+mode may have more findings than it recorded.
+{{- else}}
+
+There are no fragments, so this report records no measurement. Run the suite
+with `-nri-test.status-dir` against a runtime and render again.
+{{- end}}
