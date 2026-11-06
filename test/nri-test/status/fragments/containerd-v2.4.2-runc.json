@@ -1,0 +1,290 @@
+{
+  "schema": 1,
+  "header": {
+    "runtime": "containerd",
+    "runtimeVersion": "v2.4.2",
+    "nriVersion": "v0.12.3",
+    "runtimeHandler": "runc",
+    "runId": "ffea462432751e9e",
+    "collecting": true,
+    "noRuntime": false,
+    "failed": true
+  },
+  "environment": {
+    "driver": "cri",
+    "kernelRelease": "6.17.1-300.fc43.x86_64",
+    "arch": "amd64"
+  },
+  "selection": "",
+  "findings": [
+    {
+      "kind": "expectation",
+      "test": "TestInputFidelity/should_report_sysctls_at_CreateContainer",
+      "feature": "LinuxContainer.sysctl",
+      "surface": "hook request",
+      "hook": "CreateContainer",
+      "error": "sysctl: the test set [net.ipv4.ip_forward=\"1\" is absent]; the plugin was shown []",
+      "reason": "the test set [net.ipv4.ip_forward=\"1\" is absent]; the plugin was shown []",
+      "plugin": "map[]",
+      "expected": "map[net.ipv4.ip_forward:1]"
+    },
+    {
+      "kind": "expectation",
+      "test": "TestInputAgreement/should_report_the_termination_reason_at_RemoveContainer",
+      "feature": "Container.status_reason",
+      "surface": "CRI status",
+      "hook": "RemoveContainer",
+      "error": "status_reason: the plugin was shown , the container has Error",
+      "reason": "the plugin was shown , the container has Error",
+      "plugin": "",
+      "expected": "Error"
+    },
+    {
+      "kind": "expectation",
+      "test": "TestInputStateLadder/should_report_the_state_each_hook_implies",
+      "feature": "Container.state",
+      "surface": "hook request",
+      "hook": "RemoveContainer",
+      "error": "state: the plugin was shown CONTAINER_UNKNOWN, wanted CONTAINER_STOPPED",
+      "reason": "the plugin was shown CONTAINER_UNKNOWN, wanted CONTAINER_STOPPED",
+      "plugin": "CONTAINER_UNKNOWN",
+      "expected": "CONTAINER_STOPPED"
+    }
+  ],
+  "skips": [
+    {
+      "test": "TestGenerateAdjustsEnv/should_replace_the_value_of_a_variable_the_spec_already_has",
+      "reason": "driver \"cri\" lacks required capabilities: need InTreeAdjustments, have ContainerLifecycle,ObserveOpError,UpdateContainerResources,Exec,RawResources,ContainerMetadata,CDIDevices,Sysctls,SecurityContext,Devices,ObservedRuntimeState"
+    },
+    {
+      "test": "TestGenerateAdjustsEnv/should_append_a_variable_the_spec_does_not_have",
+      "reason": "driver \"cri\" lacks required capabilities: need InTreeAdjustments, have ContainerLifecycle,ObserveOpError,UpdateContainerResources,Exec,RawResources,ContainerMetadata,CDIDevices,Sysctls,SecurityContext,Devices,ObservedRuntimeState"
+    },
+    {
+      "test": "TestGenerateAdjustsEnv/should_leave_the_arguments_alone_when_the_adjustment_sets_none",
+      "reason": "driver \"cri\" lacks required capabilities: need InTreeAdjustments, have ContainerLifecycle,ObserveOpError,UpdateContainerResources,Exec,RawResources,ContainerMetadata,CDIDevices,Sysctls,SecurityContext,Devices,ObservedRuntimeState"
+    },
+    {
+      "test": "TestGenerateAdjustsArgs/should_replace_the_arguments_the_spec_already_has",
+      "reason": "driver \"cri\" lacks required capabilities: need InTreeAdjustments, have ContainerLifecycle,ObserveOpError,UpdateContainerResources,Exec,RawResources,ContainerMetadata,CDIDevices,Sysctls,SecurityContext,Devices,ObservedRuntimeState"
+    },
+    {
+      "test": "TestGenerateAdjustsAnnotations/should_overwrite_an_annotation_the_spec_already_has",
+      "reason": "driver \"cri\" lacks required capabilities: need InTreeAdjustments, have ContainerLifecycle,ObserveOpError,UpdateContainerResources,Exec,RawResources,ContainerMetadata,CDIDevices,Sysctls,SecurityContext,Devices,ObservedRuntimeState"
+    },
+    {
+      "test": "TestGenerateAdjustsAnnotations/should_drop_an_annotation_marked_for_removal",
+      "reason": "driver \"cri\" lacks required capabilities: need InTreeAdjustments, have ContainerLifecycle,ObserveOpError,UpdateContainerResources,Exec,RawResources,ContainerMetadata,CDIDevices,Sysctls,SecurityContext,Devices,ObservedRuntimeState"
+    },
+    {
+      "test": "TestGenerateAdjustsSysctl/should_add_a_sysctl_the_spec_does_not_have",
+      "reason": "driver \"cri\" lacks required capabilities: need InTreeAdjustments, have ContainerLifecycle,ObserveOpError,UpdateContainerResources,Exec,RawResources,ContainerMetadata,CDIDevices,Sysctls,SecurityContext,Devices,ObservedRuntimeState"
+    },
+    {
+      "test": "TestGenerateAdjustsSysctl/should_drop_a_sysctl_marked_for_removal",
+      "reason": "driver \"cri\" lacks required capabilities: need InTreeAdjustments, have ContainerLifecycle,ObserveOpError,UpdateContainerResources,Exec,RawResources,ContainerMetadata,CDIDevices,Sysctls,SecurityContext,Devices,ObservedRuntimeState"
+    },
+    {
+      "test": "TestGenerateAdjustsMounts/should_replace_a_mount_at_a_destination_the_spec_already_has",
+      "reason": "driver \"cri\" lacks required capabilities: need InTreeAdjustments, have ContainerLifecycle,ObserveOpError,UpdateContainerResources,Exec,RawResources,ContainerMetadata,CDIDevices,Sysctls,SecurityContext,Devices,ObservedRuntimeState"
+    },
+    {
+      "test": "TestGenerateAdjustsMounts/should_drop_a_mount_marked_for_removal",
+      "reason": "driver \"cri\" lacks required capabilities: need InTreeAdjustments, have ContainerLifecycle,ObserveOpError,UpdateContainerResources,Exec,RawResources,ContainerMetadata,CDIDevices,Sysctls,SecurityContext,Devices,ObservedRuntimeState"
+    },
+    {
+      "test": "TestGenerateAdjustsNamespaces/should_replace_a_namespace_of_a_type_the_spec_already_has",
+      "reason": "driver \"cri\" lacks required capabilities: need InTreeAdjustments, have ContainerLifecycle,ObserveOpError,UpdateContainerResources,Exec,RawResources,ContainerMetadata,CDIDevices,Sysctls,SecurityContext,Devices,ObservedRuntimeState"
+    },
+    {
+      "test": "TestGenerateAdjustsNamespaces/should_drop_a_namespace_marked_for_removal",
+      "reason": "driver \"cri\" lacks required capabilities: need InTreeAdjustments, have ContainerLifecycle,ObserveOpError,UpdateContainerResources,Exec,RawResources,ContainerMetadata,CDIDevices,Sysctls,SecurityContext,Devices,ObservedRuntimeState"
+    },
+    {
+      "test": "TestGenerateAdjustsResources/should_replace_the_fields_it_is_given_and_leave_the_rest",
+      "reason": "driver \"cri\" lacks required capabilities: need InTreeAdjustments, have ContainerLifecycle,ObserveOpError,UpdateContainerResources,Exec,RawResources,ContainerMetadata,CDIDevices,Sysctls,SecurityContext,Devices,ObservedRuntimeState"
+    },
+    {
+      "test": "TestGenerateAdjustsRlimits/should_carry_an_adjusted_rlimit_into_the_spec",
+      "reason": "driver \"cri\" lacks required capabilities: need InTreeAdjustments, have ContainerLifecycle,ObserveOpError,UpdateContainerResources,Exec,RawResources,ContainerMetadata,CDIDevices,Sysctls,SecurityContext,Devices,ObservedRuntimeState"
+    },
+    {
+      "test": "TestInputAgreement/should_report_the_OCI_hooks_matching_the_realized_spec",
+      "reason": "this node's runtime adds no OCI hooks to a container, so a report of none cannot be distinguished from an omission"
+    },
+    {
+      "test": "TestSelfAuthoredFieldsAreNotMeasured",
+      "reason": "only the mock driver authors these values; a real runtime produces them and they are measured against it"
+    },
+    {
+      "test": "TestPodResourceUpdateEvents/should_deliver_UpdatePodSandbox_and_PostUpdatePodSandbox",
+      "reason": "pod resource updates are not verified in any runtime yet; see TODO in TestPodResourceUpdateEvents"
+    }
+  ],
+  "coverage": [
+    {
+      "field": "PodSandbox.name",
+      "hook": "RunPodSandbox"
+    },
+    {
+      "field": "PodSandbox.uid",
+      "hook": "RunPodSandbox"
+    },
+    {
+      "field": "PodSandbox.labels",
+      "hook": "RunPodSandbox"
+    },
+    {
+      "field": "PodSandbox.annotations",
+      "hook": "RunPodSandbox"
+    },
+    {
+      "field": "PodSandbox.runtime_handler",
+      "hook": "RunPodSandbox"
+    },
+    {
+      "field": "LinuxPodSandbox.cgroup_parent",
+      "hook": "RunPodSandbox"
+    },
+    {
+      "field": "LinuxPodSandbox.pod_overhead",
+      "hook": "RunPodSandbox"
+    },
+    {
+      "field": "LinuxPodSandbox.pod_resources",
+      "hook": "RunPodSandbox"
+    },
+    {
+      "field": "Container.name",
+      "hook": "CreateContainer"
+    },
+    {
+      "field": "Container.pod_sandbox_id",
+      "hook": "CreateContainer"
+    },
+    {
+      "field": "Container.annotations",
+      "hook": "CreateContainer"
+    },
+    {
+      "field": "Container.labels",
+      "hook": "CreateContainer"
+    },
+    {
+      "field": "Container.args",
+      "hook": "CreateContainer"
+    },
+    {
+      "field": "Container.env",
+      "hook": "CreateContainer"
+    },
+    {
+      "field": "Container.mounts",
+      "hook": "CreateContainer"
+    },
+    {
+      "field": "Container.image",
+      "hook": "CreateContainer"
+    },
+    {
+      "field": "LinuxContainer.sysctl",
+      "hook": "CreateContainer"
+    },
+    {
+      "field": "LinuxContainer.seccomp_profile",
+      "hook": "CreateContainer"
+    },
+    {
+      "field": "LinuxContainer.oom_score_adj",
+      "hook": "CreateContainer"
+    },
+    {
+      "field": "Container.user",
+      "hook": "CreateContainer"
+    },
+    {
+      "field": "Container.rlimits",
+      "hook": "CreateContainer"
+    },
+    {
+      "field": "LinuxContainer.namespaces",
+      "hook": "CreateContainer"
+    },
+    {
+      "field": "LinuxContainer.cgroups_path",
+      "hook": "CreateContainer"
+    },
+    {
+      "field": "LinuxContainer.seccomp_policy",
+      "hook": "CreateContainer"
+    },
+    {
+      "field": "Container.pid",
+      "hook": "PostStartContainer"
+    },
+    {
+      "field": "Container.created_at",
+      "hook": "PostCreateContainer"
+    },
+    {
+      "field": "Container.started_at",
+      "hook": "PostStartContainer"
+    },
+    {
+      "field": "PodSandbox.ips",
+      "hook": "RunPodSandbox"
+    },
+    {
+      "field": "PodSandbox.pid",
+      "hook": "RunPodSandbox"
+    },
+    {
+      "field": "LinuxPodSandbox.cgroups_path",
+      "hook": "RunPodSandbox"
+    },
+    {
+      "field": "LinuxPodSandbox.namespaces",
+      "hook": "RunPodSandbox"
+    },
+    {
+      "field": "LinuxPodSandbox.resources",
+      "hook": "RunPodSandbox"
+    },
+    {
+      "field": "LinuxContainer.devices",
+      "hook": "CreateContainer"
+    },
+    {
+      "field": "LinuxContainer.resources",
+      "hook": "CreateContainer"
+    },
+    {
+      "field": "Container.status_reason",
+      "hook": "RemoveContainer"
+    },
+    {
+      "field": "Container.exit_code",
+      "hook": "RemoveContainer"
+    },
+    {
+      "field": "Container.finished_at",
+      "hook": "RemoveContainer"
+    },
+    {
+      "field": "Container.state",
+      "hook": "PostCreateContainer"
+    },
+    {
+      "field": "Container.state",
+      "hook": "PostStartContainer"
+    },
+    {
+      "field": "Container.state",
+      "hook": "RemoveContainer"
+    },
+    {
+      "field": "Container.CDI_devices",
+      "hook": "CreateContainer"
+    }
+  ]
+}
