@@ -35,6 +35,7 @@ inspector, because the suite runs on the node it observes.
 - [Configuration](#configuration)
 - [Invariants a change must not break](#invariants-a-change-must-not-break)
 - [Measured facts](#measured-facts)
+- [Input conformance](#input-conformance)
 - [Limitations](#limitations)
 
 ## Why a new tool
@@ -203,7 +204,8 @@ test/nri-test/
     |-- sync_test.go          synchronization + Container-proto fidelity
     |-- lifecycle_test.go     runLifecycle helper + subscription-mask table
     |-- ordering_test.go      multi-plugin invocation order by index
-    `-- adjust_test.go        five creation adjustments, spec and kernel
+    |-- adjust_test.go        five creation adjustments, spec and kernel
+    `-- input_test.go         the NRI input surface, per field and tier
 ```
 
 ## Architecture
@@ -251,6 +253,10 @@ is pinned by a test.
 | `CapExec` | yes | yes, through the API server |
 | `CapRawResources` | yes | no -- a pod cannot state a cpuset; the exec smoke test expects the node's full online sets instead |
 | `CapContainerMetadata` | yes | no -- a container has its pod's metadata |
+| `CapCDIDevices` | yes | no -- a pod cannot name a CDI device; those arrive through a device plugin |
+| `CapDevices` | yes | no -- a pod cannot ask for a host device by path |
+| `CapSysctls` | yes | no -- only the sysctls kubelet deems safe, and the rest need node configuration |
+| `CapSecurityContext` | yes | no -- expressible, but through admission and defaulting that can rewrite it |
 
 A test declares what it needs through `RequireCaps`; the framework skips it,
 with a reason, when the active driver lacks them. The CRI driver has every
@@ -487,8 +493,9 @@ with its reason; then a count of both failure kinds.
 1. The gates' own inability-to-evaluate aborts. Deliberate: a suite bug,
    not a runtime result.
 2. Every bare `require.*` and `t.Errorf` in the `suite` package. Only
-   `adjust_test.go` calls `Suite.Expect*` at all, so most tests still fail at
-   their first assertion in both modes. Unconverted, not deliberate.
+   `adjust_test.go` and `input_test.go` call `Suite.Expect*`, so most tests
+   still fail at their first assertion in both modes. Unconverted, not
+   deliberate.
 3. The per-case cleanup and leak guards, including the pod and container leak
    reports. Unconverted.
 
@@ -878,24 +885,6 @@ So they are not re-derived.
   do; those have no sandbox pid at all.
 - **A created-but-not-started container has no cgroup yet**, so any assertion
   about what the kernel applied needs a running container.
-- **CRI pod and container annotations do not reach a container's OCI spec**
-  unless the runtime's passthrough allowlist names them, and those are empty by
-  default -- containerd's `PodAnnotations` and `ContainerAnnotations`. A created
-  container's `spec.annotations` holds only the runtime's own keys. So a test
-  must never use an annotation it set through CRI as evidence that it is
-  looking at the right spec; container *environment* is the right evidence,
-  because it is data the test chooses and both runtimes must carry CRI
-  container env into `spec.process.env`.
-- **A runtime's own spec annotation keys are not portable.** CRI-O uses
-  `io.container.manager`, `io.kubernetes.cri-o.*` and
-  `io.kubernetes.container.*`; containerd uses `io.kubernetes.cri.*`.
-- **CRI-O requires `ContainerConfig.Image.UserSpecifiedImage`.** With it empty
-  it refuses every container creation with "user specified image not specified,
-  cannot verify image signature". containerd does not require it, which is why
-  the omission went unnoticed until the first CRI-O run.
-- **An entry with an empty name in `StatusResponse.RuntimeHandlers` is the
-  runtime's default** and is never selectable. CRI-O 1.37.2 reports `crun`,
-  `runc`, and one entry with no name at all.
 - **The suite's pods get cgroup path `system.slice:crio:<id>`**, not a
   `kubepods-...slice` path, because the suite sets no `CgroupParent`. The
   systemd triple form breaks no expectation.
@@ -906,6 +895,81 @@ So they are not re-derived.
 - **Both runtimes report container environment and annotations during
   `Synchronize`**, so the two fidelity hatches in `sync_test.go` have never
   fired. Two runtimes are not grounds for removing them.
+## Input conformance
+
+What a runtime tells a plugin about a pod and a container, as opposed to what it
+does with what a plugin returns. This is the layer the adjustment tests rest on:
+those inject constants, so they would pass whether or not the `Container` a
+plugin was handed bore any resemblance to the container being created, while a
+real plugin computes its adjustment *from* the input.
+
+`framework/inputspec.go` is the specification. Every field of `PodSandbox`,
+`LinuxPodSandbox`, `Container` and `LinuxContainer` is either in `InputFields`,
+meaning a test verifies it, or in `inputFieldsOutOfScope` with a stated reason.
+A test walks the protocol's own descriptors and fails naming any field in
+neither, so `pkg/api` cannot grow a field that silently goes unlooked-at. The
+same table is what the summary's coverage section is computed from, which is why
+it is data rather than a set of test names.
+
+Each field carries the earliest hook by which the runtime must have populated
+it. Before that hook, absence is not a finding; at or after it, absence is. The
+strictness is a first guess held deliberately -- most fields are expected
+already at `CreateContainer`, and whether a runtime that fills one in only by
+`PostStartContainer` should fail is a question runs against more runtimes will
+answer. `RequiredAt` is one declaration per field so that moving a row costs one
+line.
+
+Two assertion forms, and the difference matters to what a failure means.
+
+**Fidelity** sets the value over CRI and reads it back off the hook request, so
+a failure is a runtime that did not report what it was given. Every value is one
+a stock container would not have: an `oom_score_adj` of zero is CRI's own
+default and would pass without the runtime reading the field at all.
+
+**Agreement** compares the plugin's view against what the runtime realized --
+the OCI spec it wrote, or CRI's own status -- so a failure is a report and a
+container that disagree. The comparison is subset, not equality: NRI projects
+the OCI spec rather than copying it, and a runtime adds defaults of its own, so
+equality would fail every runtime on things that are not defects. Subset alone
+cannot fail for a runtime that reports *nothing*, since the empty set is a
+subset of anything, so every agreement check pairs it with a non-vacuity guard.
+Omission is the defect class this layer exists for. Where a field may
+legitimately be empty the subtest omits the guard and says why; the omission is
+a claim that has to be argued, not a default.
+
+`Container.state` is neither form. It is populated at every hook with a
+different correct value at each, so it gets a ladder -- `CONTAINER_CREATED` at
+`PostCreateContainer`, `CONTAINER_RUNNING` at `PostStartContainer`,
+`CONTAINER_STOPPED` at `RemoveContainer`. `CONTAINER_UNKNOWN` is the enum's zero
+value, so the ladder is also the check that the field was set at all.
+
+### The CDI spec, and the one piece of node state
+
+A CDI device named on a CRI call has to resolve or the runtime refuses the
+creation, so the run writes a CDI spec and removes it again. It is the only node
+state outside a workload that this suite creates, and three conditions make that
+acceptable: the file goes in `/var/run/cdi`, which is transient, never
+`/etc/cdi`; the vendor is `nri-test.containerd.io`, so the devices are
+recognisable as ours on a shared node; and the devices are `/dev/null` and
+`/dev/zero` exposed as `/dev/test-null` and `/dev/test-zero`, so a fixture that
+outlived its run could not hand a container anything that matters.
+
+The file is named for the run and removed by the run that wrote it -- one path,
+never a glob and never a sweep, because `/var/run/cdi` is where anything on the
+node may declare a device. The directory is removed too, but only when the run
+created it and only when it is empty.
+
+The two CDI assertions are independent on purpose, and that is what makes the
+CDI result attributable: a runtime can report a device it did not inject, or
+inject one it did not report, and only running both says which happened.
+
+Two rows in the field table go unexercised and the coverage section names them
+every run: `Container.hooks`, which CRI cannot ask for and no runtime adds on
+its own here, and `Container.status_message`, which no runtime fills in for a
+container that merely exits non-zero. Both subtests skip rather than record the
+field as measured: a comparison where both sides are empty cannot fail, and
+counting it would inflate the coverage number with a check that proved
+nothing.
 
 ## Limitations
 
@@ -922,3 +986,7 @@ So they are not re-derived.
 - The default (non-collecting) mode has unit tests behind it and has never been
   run against a node.
 - CI wiring. `hack/run-nri-test.sh` is the committed manual-invocation path.
+- CRI's `localhost` seccomp profile type is absent. It names a profile file that
+  would have to exist on the node, and tells an input test nothing that
+  `unconfined` does not: `unconfined` is already distinguishable from the
+  runtime default, which is all a fidelity assertion needs.
