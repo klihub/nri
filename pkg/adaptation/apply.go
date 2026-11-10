@@ -261,10 +261,10 @@ func (a *applier) drain(seq seqNo) {
 	//
 	// What keeps a plugin from attaching here for good is the plugin
 	// request timeout: a plugin is placed at seq only while it owes an
-	// answer on it, and every relay bounds that wait by
-	// getPluginRequestTimeout(), after which the request's call drops its
-	// entry and the lowest number the plugin owes an answer on moves above
-	// seq.
+	// answer on it, and getPluginRequestTimeout() bounds every request
+	// from the moment it reaches the plugin, after which the request's
+	// call drops its entry and the lowest number the plugin owes an answer
+	// on moves above seq.
 	for {
 		a.mu.Lock()
 

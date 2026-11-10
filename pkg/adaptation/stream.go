@@ -82,6 +82,18 @@ type streamCall struct {
 	seq      seqNo
 	ordered  bool
 	forgiven bool
+
+	// after is closed once the call written before this one is done with
+	// the plugin, and settled once this one is. A plugin takes the
+	// requests on its stream one at a time and in the order they were
+	// written, so this call is what the plugin is working on from the
+	// moment the call before it settles.
+	//
+	// after is taken in the call's turn and read by nothing but the
+	// call's own caller; settled is closed by that caller and waited on
+	// by the call written after this one.
+	after   <-chan struct{}
+	settled chan struct{}
 }
 
 // pluginStream is one plugin's event stream.
@@ -113,6 +125,11 @@ type pluginStream struct {
 	// order.
 	owed map[seqNo]int
 
+	// settled is what the next ordered call written waits for: the one
+	// written before it being done with the plugin. Closed to begin with,
+	// because the first request written to a plugin waits behind nothing.
+	settled <-chan struct{}
+
 	// closing says the stream has ended and its pending entries have been
 	// closed, so no further entry is made for anything to wait on.
 	closing bool
@@ -127,6 +144,9 @@ var _ api.PluginService = &pluginStream{}
 func newPluginStream(p *plugin, srv api.StreamingRuntime_StartEventStreamServer) *pluginStream {
 	// Until the plugin joins the live list, nothing is dispatched to it and
 	// there is no order to keep.
+	settled := make(chan struct{})
+	close(settled)
+
 	return &pluginStream{
 		p:         p,
 		srv:       srv,
@@ -135,6 +155,7 @@ func newPluginStream(p *plugin, srv api.StreamingRuntime_StartEventStreamServer)
 		order:     &gate{},
 		pending:   make(map[uint64]*streamCall),
 		owed:      make(map[seqNo]int),
+		settled:   settled,
 		done:      make(chan struct{}),
 	}
 }
@@ -406,9 +427,18 @@ func (s *pluginStream) shutdown(err error) {
 func (s *pluginStream) call(ctx context.Context, msg *api.RuntimeMessage) (*api.PluginMessage, error) {
 	// A request whose context ends first takes its entry with it, so what
 	// the stream is still waiting for is what someone is still waiting on.
-	// Every caller here arrives with the plugin request timeout already on
-	// its context, so that wait is bounded.
-	c := &streamCall{msg: msg, reply: make(chan *api.PluginMessage, 1)}
+	// What bounds that wait is the plugin request timeout: a request that
+	// waits for a turn is given it once the plugin has got to it, and one
+	// that waits for no turn arrives with it already on its context.
+	c := &streamCall{
+		msg:     msg,
+		reply:   make(chan *api.PluginMessage, 1),
+		settled: make(chan struct{}),
+	}
+
+	// Closed however this call ends, which is what the call written after
+	// it waits for before it starts its own clock.
+	defer close(c.settled)
 
 	var handed bool
 
@@ -437,7 +467,10 @@ func (s *pluginStream) call(ctx context.Context, msg *api.RuntimeMessage) (*api.
 	// the plugin answers: a stream write does not wait for a reply, which
 	// is the whole reason a stream can carry an order a unary call cannot.
 	if ordered {
-		s.order.run(seq, hand)
+		s.order.run(seq, func() {
+			s.chain(c)
+			hand()
+		})
 	} else {
 		hand()
 	}
@@ -448,6 +481,13 @@ func (s *pluginStream) call(ctx context.Context, msg *api.RuntimeMessage) (*api.
 		}
 
 		return nil, s.closed()
+	}
+
+	if ordered {
+		var cancel context.CancelFunc
+
+		ctx, cancel = s.handling(ctx, c)
+		defer cancel()
 	}
 
 	select {
@@ -477,6 +517,44 @@ func (s *pluginStream) call(ctx context.Context, msg *api.RuntimeMessage) (*api.
 
 		return nil, ctx.Err()
 	}
+}
+
+// chain places c behind the ordered call written before it.
+//
+// Must be called in c's turn.
+func (s *pluginStream) chain(c *streamCall) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// The gate hands one turn over at a time and in the order the calls
+	// are written, so a turn is where that order can be read off. The
+	// writer has the same order and has it too late -- a caller is past
+	// here by the time the writer has its call.
+
+	c.after, s.settled = s.settled, c.settled
+}
+
+// handling returns ctx bounded by the plugin request timeout from the
+// moment the plugin has got to c, and the function that releases what the
+// bound holds.
+func (s *pluginStream) handling(ctx context.Context, c *streamCall) (context.Context, context.CancelFunc) {
+	// A plugin takes the requests on its stream one at a time and in the
+	// order they were written, so the wait for the calls ahead of c is a
+	// wait for a turn and no part of the plugin's handling of c. A request
+	// charged for that wait as well expires in a burst longer than the
+	// timeout at the plugin's rate, and takes the plugin with it as one
+	// that went dead.
+	//
+	// A stream that ends and a caller that gives up are both answered by
+	// the wait for c's reply, so neither is given a bound here.
+	select {
+	case <-c.after:
+		return context.WithTimeout(ctx, getPluginRequestTimeout())
+	case <-s.done:
+	case <-ctx.Done():
+	}
+
+	return ctx, func() {}
 }
 
 // answered returns what a request was answered with: the reply itself, the

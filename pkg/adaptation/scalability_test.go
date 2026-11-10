@@ -18,29 +18,37 @@ package adaptation_test
 
 // A measurement rig for the cost of ordering NRI requests.
 //
-// Adaptation holds one mutex across a whole request, every plugin round
-// trip included, so N concurrent requests against P plugins that each take
-// d to answer retire in N*P*d: the last one in waits out everyone else.
-// Nothing below Adaptation imposes that. ttrpc multiplexes concurrent
-// calls, and the stub answers each in its own goroutine.
+// Adaptation holds its lock for reading across a request, so requests run
+// alongside each other and pipeline through the plugins: N concurrent
+// requests against P plugins that each take d to answer retire in about
+// (N+P)*d rather than N*P*d. What is left of the N is a plugin answering
+// the requests it is shown one at a time, which is the order it processes
+// them in rather than anything above it serialising them. ttrpc
+// multiplexes concurrent calls, and the stub takes every request as it
+// arrives.
 //
-// What the lock buys is an order. The property a runtime needs is that if a
-// plugin processed two requests in some order, their answers are applied in
-// that same order -- otherwise the older decision lands last and wins.
-// Serialising whole requests gets there by leaving only one request in
-// flight, which is also why it costs N*P*d.
+// The property a runtime needs is that if a plugin processed two requests
+// in some order, their answers are applied in that same order --
+// otherwise the older decision lands last and wins. One sequence number
+// per request is what buys it: the applier serves the numbers in order,
+// and a request's answer waits for the answer of every number below it to
+// have been applied.
 //
-// The tests here measure that cost and pin the property, so a change that
-// buys the time back can be told from one that drops the guarantee:
+// The tests here measure the cost and pin the property, so a change that
+// buys time back can be told from one that drops the guarantee:
 //
-//   - TestScalabilityMatrix prints wall time over a grid of N and P. The
-//     signature of request-level serialisation is time linear in both.
-//   - TestScalabilityPathological is the case the lock is worst for.
+//   - TestScalabilityMatrix prints wall time over a grid of N and P,
+//     against what request-level serialisation would have cost. The
+//     signature of that serialisation is time linear in both.
+//   - TestScalabilityPathological is the case request-level serialisation
+//     is worst for.
+//   - TestScalabilityBurstDoesNotExpireQueuedRequests pins what the
+//     per-request timeout bounds, which a burst longer than it decides.
+//   - TestApplyRunsInArrivalOrder pins the order the applies run in, which
+//     is observable from out here because an apply runs inside the order.
 //
-// The ordering guarantee itself is checked in ordering_internal_test.go,
-// not here: what has to hold is the order of the commit sections, and from
-// outside NRI a request that committed second can still be written down
-// first. A test built out here would be measuring the scheduler.
+// The applier's own tests are in apply_internal_test.go, where the gate
+// and the applies attached to a number are reachable directly.
 
 import (
 	"context"
@@ -509,14 +517,19 @@ func TestScalabilityMatrix(t *testing.T) {
 	}
 }
 
-// TestScalabilityPathological is the case the lock is worst for: one plugin
-// that takes a long time, and a burst of creations and stops issued at
-// once.
+// TestScalabilityPathological is the case request-level serialisation is
+// worst for: one plugin that takes a long time, and a burst of creations
+// and stops issued at once.
 //
 // Both are requests a plugin can answer with a change, so both are
-// ordered, and under the lock all 100 of them queue behind each other for
-// 100*100ms. There is no reason they should: the plugin answers them
-// concurrently, and only applying the answers has to be kept in order.
+// ordered. All 100 of them reach the plugin alongside each other and only
+// their applies are kept in order, so what the burst waits out is the
+// plugin answering them one at a time.
+//
+// The burst takes the plugin longer than the plugin request timeout, and
+// that costs it nothing: the timeout bounds the plugin's handling of a
+// request and not its wait behind the requests ahead of it. The log says
+// how many of the burst it answered.
 func TestScalabilityPathological(t *testing.T) {
 	const (
 		creates = 50
@@ -584,6 +597,67 @@ func TestScalabilityPathological(t *testing.T) {
 	t.Logf("  one at a time %v (%d x %v)", serial, n, delay)
 	t.Logf("  speedup      %.1fx", float64(serial)/float64(total))
 	t.Logf("  plugin saw   %d requests, %d failed", len(rig.plugins[0].Seen()), failed)
+}
+
+// TestScalabilityBurstDoesNotExpireQueuedRequests pins what the per-request
+// timeout bounds: a plugin's handling of a request and not its wait for a
+// turn.
+//
+// A plugin on an event stream takes the requests written to it one at a
+// time, so a burst of them queues behind one another. The burst here is
+// longer than the timeout at the plugin's rate -- 50 requests of 20ms
+// against a timeout of 500ms -- so a clock that ran while a request waited
+// its turn would expire the requests past the 25th, close the plugin for a
+// deadline it was never given the chance to meet, and answer the rest of
+// the burst with nobody.
+func TestScalabilityBurstDoesNotExpireQueuedRequests(t *testing.T) {
+	const (
+		creates = 50
+		delay   = 20 * time.Millisecond
+		timeout = 500 * time.Millisecond
+	)
+
+	rig := startRig(t, 1, fixedDelay(delay))
+	plugin := rig.plugins[0]
+
+	// Shortened once the rig is up, so that configuration and
+	// synchronization keep the default and only the burst runs against this.
+	nri.SetPluginRequestTimeout(timeout)
+	t.Cleanup(func() { nri.SetPluginRequestTimeout(nri.DefaultPluginRequestTimeout) })
+
+	var wg sync.WaitGroup
+
+	for i := 0; i < creates; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+
+			err := rig.runtime.CreateContainerAndApply(context.Background(),
+				&api.CreateContainerRequest{Pod: pod(), Container: container(i)}, nil)
+			if err != nil {
+				t.Errorf("CreateContainer %s: %v", container(i).Id, err)
+			}
+		}(i)
+	}
+
+	wg.Wait()
+
+	want := make([]string, 0, creates)
+	for i := 0; i < creates; i++ {
+		want = append(want, container(i).Id)
+	}
+
+	require.ElementsMatch(t, want, plugin.Seen(),
+		"the plugin was not shown every request in the burst")
+
+	// One more request, because a plugin the burst closed is dropped from
+	// the runtime's list and a request after it reaches nobody and succeeds
+	// all the same.
+	require.NoError(t, rig.runtime.CreateContainerAndApply(context.Background(),
+		&api.CreateContainerRequest{Pod: pod(), Container: container(creates)}, nil))
+
+	require.Contains(t, plugin.Seen(), container(creates).Id,
+		"the burst cost the runtime its plugin")
 }
 
 // TestApplyRunsInArrivalOrder is the guarantee as a runtime sees it.

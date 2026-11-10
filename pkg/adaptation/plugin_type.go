@@ -88,6 +88,22 @@ func (p *pluginType) isBuiltin() bool {
 	return p.builtinImpl != nil
 }
 
+// withRequestTimeout returns ctx with the plugin request timeout on it, and
+// the function that releases what the timeout holds.
+//
+// A plugin on an event stream gets ctx as it stands: that plugin takes the
+// requests on its stream one at a time, so the timeout goes on once the
+// plugin has got to the request and bounds its handling of it. Every other
+// transport takes a request as it is relayed and waits for no turn, so
+// relaying a request and the plugin starting on it are the one moment.
+func (p *pluginType) withRequestTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	if p.streamingImpl != nil {
+		return ctx, func() {}
+	}
+
+	return context.WithTimeout(ctx, getPluginRequestTimeout())
+}
+
 // Synchronize handles type-specific details of relaying a plugin Synchronize
 // request.
 func (p *pluginType) Synchronize(ctx context.Context, req *SynchronizeRequest) (*SynchronizeResponse, error) {

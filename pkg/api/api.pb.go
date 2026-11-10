@@ -1696,7 +1696,10 @@ type ConfigureRequest struct {
 	RuntimeVersion string `protobuf:"bytes,3,opt,name=runtime_version,json=runtimeVersion,proto3" json:"runtime_version,omitempty"`
 	// Configured registration timeout in milliseconds.
 	RegistrationTimeout int64 `protobuf:"varint,4,opt,name=registration_timeout,json=registrationTimeout,proto3" json:"registration_timeout,omitempty"`
-	// Configured request processing timeout in milliseconds.
+	// Configured request processing timeout in milliseconds. It is how long
+	// the plugin has to handle a request, measured from the moment the
+	// request reaches the plugin and not from the moment the runtime
+	// started relaying it.
 	RequestTimeout int64 `protobuf:"varint,5,opt,name=request_timeout,json=requestTimeout,proto3" json:"request_timeout,omitempty"`
 	// Version of NRI used by the runtime.
 	NRIVersion string `protobuf:"bytes,6,opt,name=NRI_version,json=NRIVersion,proto3" json:"NRI_version,omitempty"`
