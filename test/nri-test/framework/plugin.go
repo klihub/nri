@@ -259,6 +259,17 @@ func (p *TestPlugin) RuntimeNRIVersion() string {
 	return p.stub.RuntimeNRIVersion()
 }
 
+// Streaming reports whether the runtime carries this plugin's requests on an
+// event stream. It is the transport the runtime settled on, not a preference,
+// and is false until the plugin has started.
+func (p *TestPlugin) Streaming() bool {
+	if p.stub == nil {
+		return false
+	}
+
+	return p.stub.Streaming()
+}
+
 // RegistrationTimeout returns the registration timeout the runtime advertised.
 func (p *TestPlugin) RegistrationTimeout() time.Duration {
 	if p.stub == nil {

@@ -273,6 +273,27 @@ func startScalePlugins(t *testing.T, s *framework.Suite) *scaleSource {
 
 	s.StartPlugins(plugins...)
 
+	// Reported from what the runtime settled on, not from what was asked
+	// for: a runtime may decline a stream, and a plugin on unary calls is
+	// answered concurrently and in no particular order.
+	streaming := 0
+
+	for _, p := range plugins {
+		if p.Streaming() {
+			streaming++
+		}
+	}
+
+	if streaming == len(plugins) {
+		t.Logf("all %d plugins are on an event stream and answer one request "+
+			"at a time, in dispatch order", streaming)
+	} else {
+		t.Logf("%d of %d plugins are on an event stream and answer one request "+
+			"at a time, in dispatch order; the other %d are on unary calls and "+
+			"answer concurrently, in no particular order",
+			streaming, len(plugins), len(plugins)-streaming)
+	}
+
 	return src
 }
 
