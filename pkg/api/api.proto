@@ -300,6 +300,12 @@ message ConfigureRequest {
 }
 
 message ConfigureResponse {
+  // Whether the plugin handles the events it subscribes to in parallel,
+  // rather than one at a time in the order the runtime dispatched them.
+  // The runtime then asks this plugin about several requests at once, and
+  // orders neither its answers nor its unsolicited container updates
+  // against each other. The answers are still applied in request order.
+  bool parallel_events = 1;
   // Events to subscribe the plugin for. Each bit set corresponds to an
   // enumerated Event.
   int32 events = 2;

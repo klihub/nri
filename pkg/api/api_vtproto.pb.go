@@ -1217,6 +1217,16 @@ func (m *ConfigureResponse) MarshalToSizedBufferVT(dAtA []byte) (int, error) {
 		i--
 		dAtA[i] = 0x10
 	}
+	if m.ParallelEvents {
+		i--
+		if m.ParallelEvents {
+			dAtA[i] = 1
+		} else {
+			dAtA[i] = 0
+		}
+		i--
+		dAtA[i] = 0x8
+	}
 	return len(dAtA) - i, nil
 }
 
@@ -6742,6 +6752,9 @@ func (m *ConfigureResponse) SizeVT() (n int) {
 	}
 	var l int
 	_ = l
+	if m.ParallelEvents {
+		n += 2
+	}
 	if m.Events != 0 {
 		n += 1 + sov(uint64(m.Events))
 	}
@@ -11124,6 +11137,26 @@ func (m *ConfigureResponse) UnmarshalVT(dAtA []byte) error {
 			return fmt.Errorf("proto: ConfigureResponse: illegal tag %d (wire type %d)", fieldNum, wire)
 		}
 		switch fieldNum {
+		case 1:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field ParallelEvents", wireType)
+			}
+			var v int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				v |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			m.ParallelEvents = bool(v != 0)
 		case 2:
 			if wireType != 0 {
 				return fmt.Errorf("proto: wrong wireType = %d for field Events", wireType)

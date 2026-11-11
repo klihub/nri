@@ -17,6 +17,7 @@
 package adaptation
 
 import (
+	"context"
 	"math/rand"
 	"sync"
 	"testing"
@@ -497,4 +498,47 @@ func TestListingAPluginArmsItsStream(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the stream waited for a number issued before its plugin was listed")
 	}
+}
+
+// parallelStreamingPlugin returns a plugin on a stream that handles its
+// events in parallel.
+func parallelStreamingPlugin() *plugin {
+	p := streamingPlugin(nil)
+	p.impl.streamingImpl = newPluginStream(p, nil)
+	p.impl.parallel.Store(true)
+
+	return p
+}
+
+func TestAParallelPluginsRequestIsNotInTheOrder(t *testing.T) {
+	// What takes a parallel plugin's requests out of the order is that they
+	// carry no number: pluginStream.call reads everything it does off that
+	// number -- the turn on the writer, the owed entry, the chain behind the
+	// request written before it -- so a request without one is a request the
+	// runtime orders in no way at all.
+	p := parallelStreamingPlugin()
+
+	ctx, cancel := p.impl.withRequestTimeout(withSeq(context.Background(), 7))
+	defer cancel()
+
+	_, ordered := seqFrom(ctx)
+	require.False(t, ordered,
+		"a parallel plugin's request still carries a place in the order")
+}
+
+func TestAParallelPluginsRequestIsBoundedWhereItIsRelayed(t *testing.T) {
+	// A plugin that waits for no turn starts on a request as it is relayed,
+	// so that is where the request's clock starts. A plugin taking its
+	// requests one at a time is bounded later instead, once its turn has
+	// come; a parallel plugin left to that clock would be bounded by the
+	// settling of a request it never waited for.
+	p := parallelStreamingPlugin()
+
+	ctx, cancel := p.impl.withRequestTimeout(withSeq(context.Background(), 7))
+	defer cancel()
+
+	deadline, ok := ctx.Deadline()
+	require.True(t, ok, "a parallel plugin's request is bounded by nothing")
+	require.WithinDuration(t, time.Now().Add(getPluginRequestTimeout()), deadline,
+		time.Second, "the bound is not the plugin request timeout")
 }

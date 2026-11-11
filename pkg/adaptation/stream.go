@@ -376,7 +376,14 @@ func (s *pluginStream) placed(ctx context.Context, msg *api.PluginMessage) conte
 	// An unarmed stream has no place to give: nothing is dispatched to a
 	// plugin before it joins the live list, so it has made no decision that
 	// is in the order and its update is ordered against nothing.
-	if !s.order.isArmed() {
+	//
+	// A plugin handling its events in parallel has none either, for the same
+	// reason: its requests carry no number, so nothing it decides is in the
+	// order and there is no place to read. Given one, the update would be
+	// placed above the request the plugin is answering as it sends it -- the
+	// set of answers it owes being empty -- and then wait for an apply that
+	// waits for that answer.
+	if !s.order.isArmed() || s.p.impl.parallel.Load() {
 		return ctx
 	}
 

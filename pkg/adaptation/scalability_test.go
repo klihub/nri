@@ -99,6 +99,9 @@ type delayPlugin struct {
 	// as well as to the events it answers. Read by Configure, so a test
 	// sets it before the plugin starts.
 	validates bool
+	// parallel asks the stub for parallel event processing. Read by start,
+	// so a test sets it before the plugin starts.
+	parallel bool
 
 	mu   sync.Mutex
 	seen []string
@@ -281,6 +284,10 @@ func (p *delayPlugin) start(dir string) error {
 		stub.WithSocketPath(filepath.Join(dir, "nri.sock")),
 	}
 
+	if p.parallel {
+		opts = append(opts, stub.WithParallelEvents())
+	}
+
 	s, err := stub.New(p, opts...)
 	if err != nil {
 		return err
@@ -321,6 +328,16 @@ func validatesAdjustments(idx int) rigOption {
 	return func(i int, p *delayPlugin) {
 		if i == idx {
 			p.validates = true
+		}
+	}
+}
+
+// processesInParallel returns an option that has plugin idx ask for parallel
+// event processing.
+func processesInParallel(idx int) rigOption {
+	return func(i int, p *delayPlugin) {
+		if i == idx {
+			p.parallel = true
 		}
 	}
 }
@@ -1038,5 +1055,212 @@ func TestAFailedRequestReleasesItsNumber(t *testing.T) {
 		require.NoError(t, err)
 	case <-time.After(10 * time.Second):
 		t.Fatal("the request after a failed one never got its turn")
+	}
+}
+
+func TestAParallelPluginTakesARequestWhileAnotherIsInItsHandler(t *testing.T) {
+	// What the opt-in is for, and the one thing it gives up. With ordered
+	// processing the second request waits in the plugin's queue until the
+	// first has been answered, so a plugin holding the first would never be
+	// given the second at all.
+	//
+	// Held rather than timed: the second request arriving while the first is
+	// parked in the handler is the claim, and a delay long enough to make
+	// that likely is not the same as making it certain.
+	rig := startRig(t, 1, fixedDelay(0), processesInParallel(0))
+	plugin := rig.plugins[0]
+
+	require.True(t, plugin.stub.Streaming(),
+		"this test is about the stream; the plugin is not on one")
+
+	held := plugin.holdCreate(container(0).Id)
+
+	create := func(ctr *api.Container) chan error {
+		errC := make(chan error, 1)
+
+		go func() {
+			errC <- rig.runtime.CreateContainerAndApply(context.Background(),
+				&api.CreateContainerRequest{Pod: pod(), Container: ctr},
+				func(*api.CreateContainerResponse) error { return nil })
+		}()
+
+		return errC
+	}
+
+	errA := create(container(0))
+
+	// A is in the handler before B is issued, so B is the higher number of
+	// the two and an ordered plugin would be given it only after A.
+	waitForObserved(t, plugin, 1)
+
+	errB := create(container(1))
+
+	waitForObserved(t, plugin, 2)
+
+	require.Positive(t, plugin.Overlap(),
+		"the plugin was never given two requests at once")
+
+	close(held)
+
+	for _, errC := range []chan error{errA, errB} {
+		select {
+		case err := <-errC:
+			require.NoError(t, err)
+		case <-time.After(30 * time.Second):
+			t.Fatal("a request to a parallel plugin never finished")
+		}
+	}
+}
+
+func TestAParallelPluginsAnswersApplyInRequestOrder(t *testing.T) {
+	// A parallel plugin answers in whatever order its handlers finish, but
+	// the applier orders by the number taken at entry, so the applies are
+	// still in request order. This is what the opt-in does not give up, and
+	// it is why a parallel plugin's own answers stay usable.
+	//
+	// The second plugin is ordered, which is what makes the request order
+	// observable from out here: it is dispatched to in that order, so what it
+	// saw is what the applies have to match.
+	//
+	// The delays fall as the requests arrive, so the parallel plugin finishes
+	// them close to the reverse of the order it was given them. An applier
+	// following the answers rather than the numbers is caught rather than
+	// raced with.
+	const (
+		count = 16
+		step  = 5 * time.Millisecond
+	)
+
+	delay := func(ctr *api.Container) time.Duration {
+		i, err := strconv.Atoi(ctr.Id[len("ctr-"):])
+		if err != nil {
+			return step
+		}
+
+		return time.Duration(count-i) * step
+	}
+
+	rig := startRig(t, 2, delay, processesInParallel(0))
+	parallel, ordered := rig.plugins[0], rig.plugins[1]
+
+	var (
+		mu      sync.Mutex
+		applied []string
+		wg      sync.WaitGroup
+		release = make(chan struct{})
+	)
+
+	want := make([]string, 0, count)
+
+	for i := 0; i < count; i++ {
+		ctr := container(i)
+		want = append(want, ctr.Id)
+
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			<-release
+
+			err := rig.runtime.CreateContainerAndApply(context.Background(),
+				&api.CreateContainerRequest{Pod: pod(), Container: ctr},
+				func(*api.CreateContainerResponse) error {
+					mu.Lock()
+					applied = append(applied, ctr.Id)
+					mu.Unlock()
+
+					return nil
+				})
+			require.NoError(t, err)
+		}()
+	}
+
+	for i := 0; i < count; i++ {
+		release <- struct{}{}
+	}
+
+	wg.Wait()
+
+	require.Positive(t, parallel.Overlap(),
+		"the parallel plugin answered one at a time, so this proves nothing")
+
+	seen := ordered.Seen()
+
+	require.ElementsMatch(t, want, seen,
+		"the ordered plugin did not see every request")
+	require.Equal(t, seen, applied,
+		"a parallel plugin's answers were applied out of request order")
+}
+
+func TestAParallelPluginsUpdateDoesNotWaitForTheOrder(t *testing.T) {
+	// A parallel plugin's decisions are not in the order, so an unsolicited
+	// update of its own is given no place in it and applies as it arrives.
+	// That is the same as a plugin on unary calls gets, and it is the other
+	// half of what the opt-in gives up: the update is no longer ordered
+	// against this plugin's answer to any request.
+	//
+	// Placed in the order instead, the update would wait for every number
+	// below its own, so what pins this is a request whose apply cannot run.
+	// Request A is held in the second, ordered plugin, which leaves A's apply
+	// outstanding and the order sitting at A's number. The parallel plugin
+	// then answers B and asks for an update from B's handler: placed anywhere
+	// in the order -- below B, which is the only answer it owes, or above
+	// every number taken so far -- that update waits for A and never applies.
+	rig := startRig(t, 2, fixedDelay(0), processesInParallel(0))
+	parallel, ordered := rig.plugins[0], rig.plugins[1]
+
+	applied := make(chan string, 4)
+	rig.update = func(_ context.Context, u []*nri.ContainerUpdate) ([]*nri.ContainerUpdate, error) {
+		for _, update := range u {
+			applied <- update.GetContainerId()
+		}
+
+		return nil, nil
+	}
+
+	held := ordered.holdCreate(container(0).Id)
+
+	create := func(ctr *api.Container) chan error {
+		errC := make(chan error, 1)
+
+		go func() {
+			errC <- rig.runtime.CreateContainerAndApply(context.Background(),
+				&api.CreateContainerRequest{Pod: pod(), Container: ctr},
+				func(*api.CreateContainerResponse) error { return nil })
+		}()
+
+		return errC
+	}
+
+	errA := create(container(0))
+
+	// A has reached the second plugin and is parked in its handler, so the
+	// parallel plugin has already answered A and the order cannot reach A's
+	// apply. Asking for the update is switched on only now, so the update
+	// this test waits for is the one from B's handler.
+	waitForObserved(t, ordered, 1)
+
+	parallel.updateFromHandler.Store(true)
+
+	errB := create(container(1))
+
+	select {
+	case id := <-applied:
+		require.Equal(t, "unsolicited", id,
+			"something other than the plugin's own update was applied")
+	case <-time.After(30 * time.Second):
+		t.Fatal("a parallel plugin's update waited for an order it is not in")
+	}
+
+	close(held)
+
+	for _, errC := range []chan error{errA, errB} {
+		select {
+		case err := <-errC:
+			require.NoError(t, err)
+		case <-time.After(30 * time.Second):
+			t.Fatal("a request to a parallel plugin never finished")
+		}
 	}
 }

@@ -617,6 +617,16 @@ func (p *plugin) configure(ctx context.Context, name, version, config string) (e
 	}
 	p.events = events
 
+	parallel := rpl.GetParallelEvents()
+	p.impl.parallel.Store(parallel)
+
+	// Logged because the runtime cannot check it: a plugin whose handlers
+	// are not in fact independent corrupts its own state with nothing to
+	// show for it, so which plugins asked for this belongs in the record.
+	if parallel {
+		log.Infof(ctx, "plugin %q handles its events in parallel", p.name())
+	}
+
 	return nil
 }
 

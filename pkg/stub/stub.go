@@ -236,6 +236,33 @@ func WithOnClose(onClose func()) Option {
 	}
 }
 
+// WithParallelEvents has the plugin handle several of the runtime's requests
+// at once, instead of one at a time in the order the runtime dispatched them.
+//
+// Only use this if every handler this plugin implements decides from the
+// request it is given and from nothing else. Check, before asking for it,
+// that no handler reads state another handler writes: no cache of containers
+// seen, no running total, no map keyed by container, no coupling between one
+// container's request and another's. A plugin that asks for this and does
+// keep such state corrupts it, with no error anywhere -- the runtime cannot
+// tell whether a plugin's handlers are independent, so this is the plugin's
+// assertion to make and the plugin's alone.
+//
+// What the plugin gives up is the order of its own decisions. Two requests
+// for one container may be handled at once and in either order, and an
+// unsolicited UpdateContainers is no longer ordered against this plugin's
+// answer to any request. What it keeps is that the runtime still applies its
+// answers in the order the requests arrived.
+//
+// Not the default. A plugin that says nothing handles requests one at a time
+// in dispatch order, which is what a plugin holding state needs.
+func WithParallelEvents() Option {
+	return func(s *stub) error {
+		s.parallelEvents = true
+		return nil
+	}
+}
+
 // WithPluginName sets the name to use in plugin registration.
 func WithPluginName(name string) Option {
 	return func(s *stub) error {
@@ -319,6 +346,11 @@ type stub struct {
 	rpcs       *ttrpc.Server
 	rpcc       *ttrpc.Client
 	started    bool
+
+	// parallelEvents handles several of the runtime's requests at once. See
+	// WithParallelEvents. Set before the plugin starts and never written
+	// after, so the stream reader reads it without taking the stub's lock.
+	parallelEvents bool
 
 	// runtime is the unary client, and nil if this plugin got a stream.
 	// stream is the event stream the runtime took, and nil if it took none.
@@ -819,7 +851,8 @@ func (stub *stub) Configure(ctx context.Context, req *api.ConfigureRequest) (rpl
 	}
 
 	return &api.ConfigureResponse{
-		Events: int32(events),
+		Events:         int32(events),
+		ParallelEvents: stub.parallelEvents,
 	}, nil
 }
 

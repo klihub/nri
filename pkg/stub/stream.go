@@ -156,9 +156,9 @@ func (stub *stub) startStream(ctx context.Context, rpcc *ttrpc.Client) {
 }
 
 // serveStream answers the runtime's requests off the stream, one at a time
-// and in the order the runtime wrote them, answers a validation as it
-// arrives, and hands each answer to one of this plugin's own requests to
-// its caller.
+// and in the order the runtime wrote them, or several at once for a plugin
+// that asked for parallel events, answers a validation as it arrives, and
+// hands each answer to one of this plugin's own requests to its caller.
 func (stub *stub) serveStream(rs *runtimeStream) {
 	ctx := context.Background()
 
@@ -210,6 +210,14 @@ func (stub *stub) serveStream(rs *runtimeStream) {
 		// handler of a request numbered above the one the runtime is
 		// waiting on, which is the one dependency the order excludes.
 		if isValidation(msg) {
+			go stub.answerNow(ctx, rs, msg)
+
+			continue
+		}
+
+		// A plugin that asked for parallel events waits for no turn either,
+		// so its handlers run as the requests arrive and several at once.
+		if stub.parallelEvents {
 			go stub.answerNow(ctx, rs, msg)
 
 			continue

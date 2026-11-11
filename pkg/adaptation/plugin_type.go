@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 
 	"github.com/containerd/nri/pkg/api"
 	"google.golang.org/grpc/codes"
@@ -44,6 +45,14 @@ type pluginType struct {
 	builtinImpl   api.PluginService // in-process plugin built into the runtime
 	deprecated    map[Event]bool    // deprecations collected
 	warned        map[Event]bool    // deprecations we have warned about
+
+	// parallel says this plugin handles the events it subscribes to in
+	// parallel, which it declares in its configure reply.
+	//
+	// Atomic because the plugin's own stream reader reads it while the
+	// configure reply that sets it is still being handled: the reply travels
+	// on the stream the reader is reading.
+	parallel atomic.Bool
 }
 
 var (
@@ -88,15 +97,27 @@ func (p *pluginType) isBuiltin() bool {
 	return p.builtinImpl != nil
 }
 
-// withRequestTimeout returns ctx with the plugin request timeout on it, and
-// the function that releases what the timeout holds.
+// withRequestTimeout returns ctx with the plugin request timeout on it and
+// with the place in the order this plugin's requests take, and the function
+// that releases what the timeout holds.
 //
-// A plugin on an event stream gets ctx as it stands: that plugin takes the
-// requests on its stream one at a time, so the timeout goes on once the
-// plugin has got to the request and bounds its handling of it. Every other
-// transport takes a request as it is relayed and waits for no turn, so
-// relaying a request and the plugin starting on it are the one moment.
+// A plugin on an event stream that handles its events in order gets ctx as
+// it stands: that plugin takes the requests on its stream one at a time, so
+// the timeout goes on once the plugin has got to the request and bounds its
+// handling of it. Every other transport, and a plugin that handles its
+// events in parallel, takes a request as it is relayed and waits for no
+// turn, so relaying a request and the plugin starting on it are the one
+// moment.
+//
+// A plugin handling its events in parallel is given no place in the order,
+// which is what takes its requests out of it: a request with no number waits
+// for no turn on the plugin's stream, is not counted among the answers the
+// plugin owes, and is not chained behind the request written before it.
 func (p *pluginType) withRequestTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	if p.parallel.Load() {
+		return context.WithTimeout(withoutSeq(ctx), getPluginRequestTimeout())
+	}
+
 	if p.streamingImpl != nil {
 		return ctx, func() {}
 	}

@@ -34,6 +34,19 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
+// streamingPlugin returns a plugin of runtime r that can hold an event
+// stream.
+//
+// The plugin type comes with it because a plugin has one before it can offer
+// a stream at all: the connection sets it up, and the stream is installed
+// into it.
+func streamingPlugin(r *Adaptation) *plugin {
+	p := &plugin{r: r}
+	p.impl = &pluginType{}
+
+	return p
+}
+
 // blockingStreamServer takes every message and never answers one.
 //
 // A plugin that owes an answer for as long as the test wants one owed,
@@ -154,7 +167,7 @@ func TestAStreamPlacesAnUpdateBeforeItReadsAgain(t *testing.T) {
 	}, func() { placed <- r.applies.attachments(1) })
 	defer close(srv.stop)
 
-	s := newPluginStream(&plugin{r: r}, srv)
+	s := newPluginStream(streamingPlugin(r), srv)
 	s.arm(1)
 
 	go func() { _ = s.run(context.Background()) }()
@@ -195,7 +208,7 @@ func TestAnAbandonedCallLeavesNothingBehind(t *testing.T) {
 	srv := newBlockingStreamServer()
 	defer close(srv.stop)
 
-	s := newPluginStream(&plugin{}, srv)
+	s := newPluginStream(streamingPlugin(nil), srv)
 	go func() { _ = s.run(context.Background()) }()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -243,7 +256,7 @@ func TestWhatAStreamSaysItsPluginOwes(t *testing.T) {
 	srv := newBlockingStreamServer()
 	defer close(srv.stop)
 
-	s := newPluginStream(&plugin{}, srv)
+	s := newPluginStream(streamingPlugin(nil), srv)
 	s.arm(1)
 
 	go func() { _ = s.run(context.Background()) }()
@@ -302,7 +315,7 @@ func TestACallWaitingForItsTurnIsAlreadyOwed(t *testing.T) {
 	srv := newBlockingStreamServer()
 	defer close(srv.stop)
 
-	s := newPluginStream(&plugin{}, srv)
+	s := newPluginStream(streamingPlugin(nil), srv)
 	s.arm(1)
 
 	go func() { _ = s.run(context.Background()) }()
@@ -337,7 +350,7 @@ func TestADrainedPluginStreamTakesNoFurtherEntry(t *testing.T) {
 	srv := newBlockingStreamServer()
 	defer close(srv.stop)
 
-	s := newPluginStream(&plugin{}, srv)
+	s := newPluginStream(streamingPlugin(nil), srv)
 
 	s.shutdown(errors.New("the plugin died"))
 
@@ -360,7 +373,7 @@ func TestACallNumberedAfterTheStreamDiedFailsAtOnce(t *testing.T) {
 	srv := newBlockingStreamServer()
 	defer close(srv.stop)
 
-	s := newPluginStream(&plugin{}, srv)
+	s := newPluginStream(streamingPlugin(nil), srv)
 
 	// No writer: the test is the writer, which is how the call is held
 	// between handing itself over and being numbered.

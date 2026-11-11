@@ -59,8 +59,10 @@ type SyncCB func(context.Context, []*PodSandbox, []*Container) ([]*ContainerUpda
 // order its plugin decided it, so this runs wherever the order reaches that
 // place: on another request's goroutine where that request brings the order
 // to the place, and on the goroutine the stream reader answers the update
-// on where the order is at the place already. Two rules it is held to,
-// because the order runs across it:
+// on where the order is at the place already. An update from a plugin
+// handling its events in parallel has no place to reach and runs on that
+// second goroutine straight away. Two rules it is held to, because the
+// order runs across it:
 //
 //   - it must not call back into Adaptation. A nested request takes a later
 //     number and waits for a turn that cannot come until this returns, and
@@ -440,14 +442,20 @@ func (r *Adaptation) releaseOrderLocked(seq seqNo) {
 //     containers has to reach its own state directly, not through NRI.
 //
 //   - UpdateContainers from a plugin on an event stream applies in the
-//     order that plugin decided it. A plugin's successive decisions take
-//     effect in the order it made them, so a plugin that answers a request
-//     and then asks for a further update of the same container has the
-//     answer applied first. An update asked for from inside a handler
-//     cannot deadlock: it is placed below everything its plugin owes an
-//     answer on, so it never waits on the handler that is waiting for it.
-//     A request counts as owed from the moment it takes its number, so one
-//     the plugin has not been handed yet counts too.
+//     order that plugin decided it, unless the plugin asked for parallel
+//     event handling. A plugin's successive decisions take effect in the
+//     order it made them, so a plugin that answers a request and then asks
+//     for a further update of the same container has the answer applied
+//     first. An update asked for from inside a handler cannot deadlock: it
+//     is placed below everything its plugin owes an answer on, so it never
+//     waits on the handler that is waiting for it. A request counts as
+//     owed from the moment it takes its number, so one the plugin has not
+//     been handed yet counts too.
+//
+//     A plugin handling its events in parallel has no decision in the
+//     order to place an update against, so its updates apply as they
+//     arrive. That plugin's answers are still applied in request order;
+//     what it gives up is the order of its own successive decisions.
 func (r *Adaptation) CreateContainerAndApply(ctx context.Context, req *CreateContainerRequest,
 	apply func(*CreateContainerResponse) error) error {
 	defer r.removeClosed()
