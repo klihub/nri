@@ -77,7 +77,7 @@ func TestAnAbandonedCallLeavesNothingBehind(t *testing.T) {
 	srv := newBlockingStreamServer()
 	defer close(srv.stop)
 
-	s := newPluginStream(nil, srv)
+	s := newPluginStream(&plugin{}, srv)
 	go func() { _ = s.run() }()
 
 	ctx, cancel := context.WithCancel(context.Background())

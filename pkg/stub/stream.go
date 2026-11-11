@@ -158,21 +158,21 @@ func (stub *stub) startStream(ctx context.Context, rpcc *ttrpc.Client) {
 // and in the order the runtime wrote them, answers a validation as it
 // arrives, and hands each answer to one of this plugin's own requests to
 // its caller.
-//
-// A stream delivers in the order the runtime wrote, and each request waits
-// for the one before it to be answered, which is what turns that order into
-// the order this plugin processes them in. Reading is what that wait does
-// not hold up: an answer this plugin is itself waiting for arrives on the
-// same stream as the requests it is answering, so a request answered by the
-// reader could not wait for one.
-//
-// So a request waits for its turn in a goroutine of its own, rather than in
-// the socket. How many there can be is how many requests the runtime has in
-// flight for this plugin, which is the same count it is already spending a
-// goroutine of its own on at the other end.
 func (stub *stub) serveStream(rs *runtimeStream) {
 	ctx := context.Background()
 
+	// A stream delivers in the order the runtime wrote, and each request
+	// waits for the one before it to be answered, which is what turns that
+	// order into the order this plugin processes them in. Reading is what
+	// that wait does not hold up: an answer this plugin is itself waiting
+	// for arrives on the same stream as the requests it is answering, so a
+	// request answered by the reader could not wait for one.
+	//
+	// So a request waits for its turn in a goroutine of its own, rather
+	// than in the socket. How many there can be is how many requests the
+	// runtime has in flight for this plugin, which is the same count it is
+	// already spending a goroutine of its own on at the other end.
+	//
 	// Each request is answered once the one before it has been, and nothing
 	// came before the first.
 	answered := make(chan struct{})
@@ -384,21 +384,20 @@ func (s *runtimeStream) sender() {
 
 // number gives c the next number this plugin mints and makes the entry its
 // answer is looked up in.
-//
-// A caller that gave up while c was on its way to the sender is owed
-// nothing, so it gets no entry, and neither does one whose stream has
-// already ended: shutdown closes the entries it finds, and one made after
-// that would be waited on for an answer that cannot arrive. The number is
-// taken either way, because leaving one out of the wire would look to the
-// runtime like a request it had missed.
 func (s *runtimeStream) number(c *streamCall) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// The number is taken whatever happens, because leaving one out of the
+	// wire would look to the runtime like a request it had missed.
 	s.seq++
 	c.msg.Seq = s.seq
 	c.id = s.seq
 
+	// A caller that gave up while c was on its way to the sender is owed
+	// nothing, so it gets no entry, and neither does one whose stream has
+	// already ended: shutdown closes the entries it finds, and one made
+	// after that would be waited on for an answer that cannot arrive.
 	if !c.abandoned && !s.closing {
 		s.pending[c.id] = c
 	}

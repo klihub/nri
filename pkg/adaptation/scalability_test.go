@@ -364,11 +364,21 @@ func startRig(t *testing.T, count int, delay func(*api.Container) time.Duration,
 		}
 	}
 
-	// Synchronize returning is not the same as being eligible for events;
-	// taking the sync block and dropping it again waits out that window.
-	runtime.BlockPluginSync().Unblock()
+	rig.waitEligible()
 
 	return rig
+}
+
+// waitEligible waits until every plugin that has been synchronized is
+// eligible for events.
+//
+// Synchronize returning is not the same as being eligible: the runtime
+// lists a plugin as live after its synchronization, and a request numbered
+// in between takes the plugin list without that plugin in it and reaches
+// nobody. Taking the sync block and dropping it again waits out that
+// window, because the runtime holds it across both steps.
+func (r *scaleRig) waitEligible() {
+	r.runtime.BlockPluginSync().Unblock()
 }
 
 // pod returns the sandbox every request in these tests names.

@@ -386,8 +386,10 @@ func isPluginRequest(msg *api.PluginMessage) bool {
 
 // handle answers one request the plugin originated.
 //
-// Registration is the one such request and happens once per stream, so
-// answering it in the reader delays nothing.
+// Registration is the one such request and the one answer to it reaches
+// a plugin once, so the reader answers it itself. The answer waits for
+// the writer to take it, which makes a plugin that asks for more than it
+// reads the plugin whose reader stalls: its own, and nothing beyond it.
 func (s *pluginStream) handle(msg *api.PluginMessage) {
 	rpl := s.answer(msg)
 	rpl.Seq = msg.GetSeq()
@@ -406,6 +408,10 @@ func (s *pluginStream) handle(msg *api.PluginMessage) {
 func (s *pluginStream) answer(msg *api.PluginMessage) *api.RuntimeMessage {
 	switch m := msg.GetMsg().(type) {
 	case *api.PluginMessage_RegisterPluginRequest:
+		if err := s.p.claimRegistration(m.RegisterPluginRequest.GetPluginName()); err != nil {
+			return &api.RuntimeMessage{Error: err.Error()}
+		}
+
 		if _, err := s.p.register(noCtx, m.RegisterPluginRequest); err != nil {
 			return &api.RuntimeMessage{Error: err.Error()}
 		}

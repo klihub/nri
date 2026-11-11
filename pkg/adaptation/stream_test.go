@@ -33,9 +33,27 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// streamReadyWait is how long a plugin waits for the runtime to accept
+// its event stream before deciding it will not.
+//
+// It mirrors pkg/stub's streamReadyTimeout, which is not exported. Raising
+// that one without raising this one leaves handshakeTimeout below what a
+// handshake is allowed to take.
+const streamReadyWait = 2 * time.Second
+
 // handshakeTimeout is how long a test waits for a plugin to get through
-// the handshake.
-const handshakeTimeout = 10 * time.Second
+// the handshake: every wait the handshake is allowed to make, and as much
+// again as slack.
+//
+// Derived rather than chosen, because a deadline close to the sum of the
+// timeouts under it fails a handshake that is merely slow -- a machine
+// running several of these tests at once is enough -- and reads as a
+// number nothing explains. The waits are the plugin's for its event
+// stream, its registration timeout, and the request timeout of the
+// Configure and Synchronize that follow it.
+const handshakeTimeout = 2 * (streamReadyWait +
+	api.DefaultPluginRegistrationTimeout +
+	2*api.DefaultPluginRequestTimeout)
 
 // TestEventStreamNegotiation pins which transport a plugin ends up on.
 //
@@ -86,6 +104,22 @@ type rawPlugin struct {
 func connectRawPlugin(t *testing.T, dir string) *rawPlugin {
 	t.Helper()
 
+	p := dialRawPlugin(t, dir)
+
+	// The runtime says it took the stream before the plugin registers, so
+	// waiting for that is waiting for the transport to be settled.
+	msg, err := p.stream.Recv()
+	require.NoError(t, err)
+	require.NotNil(t, msg.GetStreamReady(), "the runtime did not accept the event stream")
+
+	return p
+}
+
+// dialRawPlugin returns a plugin connected to the runtime in dir, with an
+// event stream it has offered and the runtime has yet to answer.
+func dialRawPlugin(t *testing.T, dir string) *rawPlugin {
+	t.Helper()
+
 	conn, err := stdnet.Dial("unix", filepath.Join(dir, "nri.sock"))
 	require.NoError(t, err)
 
@@ -110,12 +144,6 @@ func connectRawPlugin(t *testing.T, dir string) *rawPlugin {
 	}
 	t.Cleanup(p.close)
 
-	// The runtime says it took the stream before the plugin registers, so
-	// waiting for that is waiting for the transport to be settled.
-	msg, err := stream.Recv()
-	require.NoError(t, err)
-	require.NotNil(t, msg.GetStreamReady(), "the runtime did not accept the event stream")
-
 	return p
 }
 
@@ -133,6 +161,36 @@ func (p *rawPlugin) registration() *api.RegisterPluginRequest {
 		PluginName: "raw",
 		PluginIdx:  "10",
 		NRIVersion: api.DevelVersion,
+	}
+}
+
+// register puts this plugin's registration on the event stream, numbered
+// seq.
+func (p *rawPlugin) register(t *testing.T, seq uint64) {
+	t.Helper()
+
+	require.NoError(t, p.stream.Send(&api.PluginMessage{
+		Seq: seq,
+		Msg: &api.PluginMessage_RegisterPluginRequest{
+			RegisterPluginRequest: p.registration(),
+		},
+	}))
+}
+
+// await fails the test with what if fn reports an error or does not
+// finish in time.
+func (p *rawPlugin) await(t *testing.T, what string, fn func() error) {
+	t.Helper()
+
+	done := make(chan error, 1)
+
+	go func() { done <- fn() }()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err, what)
+	case <-time.After(handshakeTimeout):
+		t.Fatal(what)
 	}
 }
 
@@ -187,6 +245,75 @@ func (p *rawPlugin) handshake() error {
 	}
 }
 
+// servePods answers the runtime's pod requests on the event stream until
+// the runtime has refused the given number of this plugin's requests and
+// has driven one pod request through, and reports what went wrong if it
+// does not.
+func (p *rawPlugin) servePods(refusals int) error {
+	var refused, served int
+
+	for refused < refusals || served == 0 {
+		msg, err := p.stream.Recv()
+		if err != nil {
+			return fmt.Errorf("event stream ended: %w", err)
+		}
+
+		switch {
+		case msg.GetError() != "":
+			refused++
+
+		case msg.GetRunPodSandboxRequest() != nil:
+			err = p.reply(msg, &api.PluginMessage{
+				Msg: &api.PluginMessage_RunPodSandboxResponse{
+					RunPodSandboxResponse: &api.RunPodSandboxResponse{},
+				},
+			})
+			if err != nil {
+				return err
+			}
+
+			served++
+
+		default:
+			return fmt.Errorf("unexpected %T on the event stream", msg.GetMsg())
+		}
+	}
+
+	return nil
+}
+
+// registrationTaken reports whether the runtime took the registration
+// this plugin put on its event stream.
+//
+// A stream that ends before any answer arrives reports the registration
+// not taken: a refusal on the other transport takes the plugin down with
+// it, which is an answer by other means.
+func (p *rawPlugin) registrationTaken() bool {
+	for {
+		msg, err := p.stream.Recv()
+		if err != nil {
+			return false
+		}
+
+		switch {
+		case msg.GetRegisterPluginResponse() != nil:
+			return true
+
+		case msg.GetMsg() == nil && msg.GetError() != "":
+			return false
+		}
+	}
+}
+
+// registerUnary registers this plugin with a unary call, with no deadline
+// of its own, and reports what the runtime answered.
+func (p *rawPlugin) registerUnary() error {
+	_, err := api.NewRuntimeClient(p.client).RegisterPlugin(context.Background(),
+		p.registration())
+
+	return err
+}
+
 // reply answers one of the runtime's requests, echoing its sequence number.
 func (p *rawPlugin) reply(req *api.RuntimeMessage, rpl *api.PluginMessage) error {
 	rpl.Seq = req.GetSeq()
@@ -200,22 +327,57 @@ func TestAStreamingPluginRegistersOnItsStream(t *testing.T) {
 	rig := startRig(t, 0, fixedDelay(0))
 	plugin := connectRawPlugin(t, rig.dir)
 
-	require.NoError(t, plugin.stream.Send(&api.PluginMessage{
-		Seq: 1,
-		Msg: &api.PluginMessage_RegisterPluginRequest{
-			RegisterPluginRequest: plugin.registration(),
-		},
-	}))
+	plugin.register(t, 1)
+	plugin.await(t, "a plugin that registered on its stream was never synchronized",
+		plugin.handshake)
+}
 
-	done := make(chan error, 1)
+func TestFurtherRegistrationsOnAStreamAreRefused(t *testing.T) {
+	// A plugin may be as stupid as it likes and still must not be able to
+	// stop the runtime. A registration is reported on a channel with one
+	// slot, so a second registration that reached it would fill the slot
+	// and a third would block the reader that answers everything else
+	// this plugin asks for.
+	//
+	// The refusals are half the claim; the other half is that the runtime
+	// still drives the plugin afterwards.
+	const refusals = 3
 
-	go func() { done <- plugin.handshake() }()
+	rig := startRig(t, 0, fixedDelay(0))
+	plugin := connectRawPlugin(t, rig.dir)
+
+	plugin.register(t, 1)
+	plugin.await(t, "the plugin did not get through the handshake", plugin.handshake)
+
+	// The pod request below has to reach this plugin for the second half of
+	// the claim to say anything, and a request numbered before the plugin
+	// is eligible for events reaches nobody at all.
+	rig.waitEligible()
+
+	for seq := uint64(2); seq < 2+refusals; seq++ {
+		plugin.register(t, seq)
+	}
+
+	pods := make(chan error, 1)
+
+	go func() {
+		pods <- rig.runtime.RunPodSandbox(context.Background(),
+			&api.RunPodSandboxRequest{Pod: pod()})
+	}()
+
+	// That an error came back, and not what it says: the wording of a
+	// refusal is nothing the plugin is promised. Both halves are named,
+	// because servePods waits for both and a message naming one of them
+	// reads as a claim about which half failed.
+	plugin.await(t,
+		"the runtime did not refuse a plugin that registered again and ask it for a pod",
+		func() error { return plugin.servePods(refusals) })
 
 	select {
-	case err := <-done:
-		require.NoError(t, err, "the plugin did not get through the handshake")
+	case err := <-pods:
+		require.NoError(t, err, "a request to a plugin that registered again")
 	case <-time.After(handshakeTimeout):
-		t.Fatal("a plugin that registered on its stream was never synchronized")
+		t.Fatal("a plugin that registered again stopped the runtime driving it")
 	}
 }
 
@@ -238,6 +400,69 @@ func TestAUnaryRegistrationIsRefusedOnceAStreamExists(t *testing.T) {
 	// is as often a closed connection as the status.
 	require.Error(t, err,
 		"a plugin holding an event stream registered with a unary call")
+}
+
+func TestFurtherUnaryRegistrationsAreRefused(t *testing.T) {
+	// The registration channel has one slot and one reader, and that
+	// reader takes its value when the plugin registers. A second
+	// registration that reported itself on that channel would never
+	// return, so what this test watches for is a call that comes back at
+	// all.
+	rig := startRig(t, 0, fixedDelay(0))
+	plugin := connectRawPlugin(t, rig.dir)
+
+	plugin.register(t, 1)
+	plugin.await(t, "the plugin did not get through the handshake", plugin.handshake)
+
+	for i := 0; i < 2; i++ {
+		errC := make(chan error, 1)
+
+		go func() { errC <- plugin.registerUnary() }()
+
+		select {
+		case err := <-errC:
+			require.Error(t, err, "a registered plugin registered again")
+		case <-time.After(handshakeTimeout):
+			t.Fatalf("unary registration %d never came back", i+1)
+		}
+	}
+}
+
+func TestRegistrationsOnBothTransportsTakeOneRegistration(t *testing.T) {
+	// A plugin registering on both transports at once offers two
+	// registrations to one plugin, each on its own goroutine inside the
+	// runtime. One of them is taken, the other is refused, and both come
+	// back.
+	rig := startRig(t, 0, fixedDelay(0))
+	plugin := connectRawPlugin(t, rig.dir)
+
+	unary := make(chan error, 1)
+
+	go func() { unary <- plugin.registerUnary() }()
+
+	plugin.register(t, 1)
+
+	taken := make(chan bool, 1)
+
+	go func() { taken <- plugin.registrationTaken() }()
+
+	var onStream bool
+
+	select {
+	case onStream = <-taken:
+	case <-time.After(handshakeTimeout):
+		t.Fatal("the registration on the event stream was never answered")
+	}
+
+	select {
+	case err := <-unary:
+		// Both taken is the failure. Which one was taken is the race, and
+		// the runtime answers the other with an error either way.
+		require.False(t, onStream && err == nil,
+			"the plugin registered twice, once on each transport")
+	case <-time.After(handshakeTimeout):
+		t.Fatal("the unary registration never came back")
+	}
 }
 
 func TestPluginObservesRequestsInDispatchOrder(t *testing.T) {

@@ -211,7 +211,8 @@ func TestListingAPluginArmsItsStream(t *testing.T) {
 		r.seq.take()
 	}
 
-	p := &plugin{impl: &pluginType{streamingImpl: newPluginStream(nil, nil)}}
+	p := &plugin{}
+	p.impl = &pluginType{streamingImpl: newPluginStream(p, nil)}
 
 	r.addPlugins(p)
 

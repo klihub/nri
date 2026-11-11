@@ -64,10 +64,15 @@ type plugin struct {
 	rpcs   *ttrpc.Server
 	events EventMask
 	closed bool
-	regC   chan error
-	closeC chan struct{}
-	r      *Adaptation
-	impl   *pluginType
+
+	// registered says a registration has been taken from this plugin, on
+	// whichever transport carried it. Read and written under the plugin's
+	// lock.
+	registered bool
+	regC       chan error
+	closeC     chan struct{}
+	r          *Adaptation
+	impl       *pluginType
 }
 
 // SetPluginRegistrationTimeout sets the timeout for plugin registration.
@@ -488,6 +493,10 @@ func (p *plugin) qualifiedName() string {
 // the runtime is driving it on a stream says the two ends disagree about
 // which transport this plugin got.
 func (p *plugin) RegisterPlugin(ctx context.Context, req *RegisterPluginRequest) (*RegisterPluginResponse, error) {
+	if err := p.claimRegistration(req.PluginName); err != nil {
+		return &RegisterPluginResponse{}, err
+	}
+
 	if p.impl.isStreaming() {
 		err := fmt.Errorf("plugin %q registered with a unary call while holding an event stream",
 			req.PluginName)
@@ -497,6 +506,30 @@ func (p *plugin) RegisterPlugin(ctx context.Context, req *RegisterPluginRequest)
 	}
 
 	return p.register(ctx, req)
+}
+
+// claimRegistration takes this plugin's one registration, and returns an
+// error naming name if it has already been taken.
+//
+// The attempt takes it, not the registration succeeding: an attempt
+// reports itself on a channel with one slot and one reader whether it
+// succeeded or not, so a second attempt that got this far would block the
+// caller that carried it for good. Nothing a plugin does may stop the
+// runtime, and a plugin registers once.
+//
+// The name comes from the request rather than from the plugin, whose own
+// name is what a registration in flight is in the middle of setting.
+func (p *plugin) claimRegistration(name string) error {
+	p.Lock()
+	defer p.Unlock()
+
+	if p.registered {
+		return fmt.Errorf("plugin %q is already registered", name)
+	}
+
+	p.registered = true
+
+	return nil
 }
 
 // register records what a plugin registered as and reports it eligible for
