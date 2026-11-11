@@ -47,7 +47,7 @@ func TestApplierAppliesInTurn(t *testing.T) {
 
 	var (
 		s       sequencer
-		a       = newApplier(s.upcoming())
+		a       applier
 		mu      sync.Mutex
 		applied []seqNo
 		inside  int
@@ -108,7 +108,8 @@ func TestApplierAppliesInTurn(t *testing.T) {
 func TestApplierSurvivesAReleasedNumber(t *testing.T) {
 	var s sequencer
 
-	a := newApplier(s.upcoming())
+	var a applier
+	_ = s.upcoming()
 
 	first, second := s.take(), s.take()
 
@@ -133,7 +134,7 @@ func TestApplierSurvivesAReleasedNumber(t *testing.T) {
 func TestApplierFirstNumberWaitsForNobody(t *testing.T) {
 	var s sequencer
 
-	a := newApplier(s.upcoming())
+	var a applier
 
 	done := make(chan error, 1)
 
@@ -154,7 +155,7 @@ func TestApplierFirstNumberWaitsForNobody(t *testing.T) {
 func TestApplierPassesTheApplyError(t *testing.T) {
 	var s sequencer
 
-	a := newApplier(s.upcoming())
+	var a applier
 	refused := errors.New("apply refused")
 
 	err := a.apply(context.Background(), s.take(), func() error { return refused })
@@ -167,7 +168,7 @@ func TestApplierPassesTheApplyError(t *testing.T) {
 func TestApplierContextEndedBeforeItsTurn(t *testing.T) {
 	var s sequencer
 
-	a := newApplier(s.upcoming())
+	var a applier
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

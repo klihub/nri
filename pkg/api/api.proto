@@ -88,6 +88,14 @@ message RuntimeMessage {
         RemoveContainerRequest remove_container_request = 17;
         ValidateContainerAdjustmentRequest validate_container_adjustment_request = 18;
 
+        // StreamReady is the first message the runtime puts on a stream,
+        // and says it accepted it. A plugin waits for this before it
+        // registers, so that by the time the runtime starts driving the
+        // plugin it has already settled on the stream. A runtime too old
+        // to know this service fails the call instead, which is the same
+        // answer by other means: use unary calls.
+        Empty stream_ready = 19;
+
         // Replies to the requests a plugin originates.
         Empty register_plugin_response = 21;
         UpdateContainersResponse update_containers_response = 22;

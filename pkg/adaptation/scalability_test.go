@@ -18,35 +18,29 @@ package adaptation_test
 
 // A measurement rig for the cost of ordering NRI requests.
 //
-// Adaptation holds its lock for reading across a request, so requests run
-// alongside each other and pipeline through the plugins: N concurrent
-// requests against P plugins that each take d to answer retire in about
-// (N+P)*d rather than N*P*d. What is left of the N is a plugin answering
-// the requests it is shown one at a time, which is the order it processes
-// them in rather than anything above it serialising them. ttrpc
-// multiplexes concurrent calls, and the stub takes every request as it
-// arrives.
+// Adaptation holds one mutex across a whole request, every plugin round
+// trip included, so N concurrent requests against P plugins that each take
+// d to answer retire in N*P*d: the last one in waits out everyone else.
+// Nothing below Adaptation imposes that. ttrpc multiplexes concurrent
+// calls, and the stub answers each in its own goroutine.
 //
-// The property a runtime needs is that if a plugin processed two requests
-// in some order, their answers are applied in that same order --
-// otherwise the older decision lands last and wins. One sequence number
-// per request is what buys it: the applier serves the numbers in order,
-// and a request's answer waits for the answer of every number below it to
-// have been applied.
+// What the lock buys is an order. The property a runtime needs is that if a
+// plugin processed two requests in some order, their answers are applied in
+// that same order -- otherwise the older decision lands last and wins.
+// Serialising whole requests gets there by leaving only one request in
+// flight, which is also why it costs N*P*d.
 //
-// The tests here measure the cost and pin the property, so a change that
-// buys time back can be told from one that drops the guarantee:
+// The tests here measure that cost and pin the property, so a change that
+// buys the time back can be told from one that drops the guarantee:
 //
-//   - TestScalabilityMatrix prints wall time over a grid of N and P,
-//     against what request-level serialisation would have cost. The
-//     signature of that serialisation is time linear in both.
-//   - TestScalabilityPathological is the case request-level serialisation
-//     is worst for.
-//   - TestApplyRunsInArrivalOrder pins the order the applies run in, which
-//     is observable from out here because an apply runs inside the order.
+//   - TestScalabilityMatrix prints wall time over a grid of N and P. The
+//     signature of request-level serialisation is time linear in both.
+//   - TestScalabilityPathological is the case the lock is worst for.
 //
-// The applier's own tests are in apply_internal_test.go, where the gate
-// and the applies attached to a number are reachable directly.
+// The ordering guarantee itself is checked in ordering_internal_test.go,
+// not here: what has to hold is the order of the commit sections, and from
+// outside NRI a request that committed second can still be written down
+// first. A test built out here would be measuring the scheduler.
 
 import (
 	"context"
@@ -70,9 +64,9 @@ import (
 // delayPlugin answers CreateContainer and StopContainer after a delay, and
 // records the order it saw them in.
 //
-// It keeps no per-container state beyond that record, so it models a plugin
-// that can answer concurrently. A plugin that serialises internally would
-// hide the thing being measured.
+// It keeps no per-container state beyond that record and does no locking
+// of its own around a handler, so any overlap between handlers is the
+// stub's doing.
 type delayPlugin struct {
 	name  string
 	idx   string
@@ -89,9 +83,23 @@ type delayPlugin struct {
 	// inside the CreateContainer handler, synchronously, while the request
 	// that is being answered still holds its place in the order.
 	updateFromHandler atomic.Bool
+	// validates subscribes this plugin to container adjustment validation
+	// as well as to the events it answers. Read by Configure, so a test
+	// sets it before the plugin starts.
+	validates bool
 
 	mu   sync.Mutex
 	seen []string
+	// validated is the containers this plugin was asked to validate the
+	// adjustment of, in order.
+	validated []string
+	// held holds a CreateContainer handler open until the test closes the
+	// channel it was given for that container.
+	held map[string]chan struct{}
+	// inside is how many CreateContainer handlers are running right now,
+	// and overlap counts the handlers that started while another ran.
+	inside  int
+	overlap int
 }
 
 func newDelayPlugin(idx int, delay func(*api.Container) time.Duration) *delayPlugin {
@@ -104,7 +112,12 @@ func newDelayPlugin(idx int, delay func(*api.Container) time.Duration) *delayPlu
 }
 
 func (p *delayPlugin) Configure(context.Context, string, string, string) (stub.EventMask, error) {
-	return api.MustParseEventMask("CreateContainer", "StopContainer"), nil
+	events := []string{"CreateContainer", "StopContainer"}
+	if p.validates {
+		events = append(events, "ValidateContainerAdjustment")
+	}
+
+	return api.MustParseEventMask(events...), nil
 }
 
 func (p *delayPlugin) Synchronize(context.Context, []*api.PodSandbox, []*api.Container) ([]*api.ContainerUpdate, error) {
@@ -118,6 +131,11 @@ func (p *delayPlugin) CreateContainer(_ context.Context, _ *api.PodSandbox, ctr 
 	}
 
 	p.observe(ctr.Id)
+	p.enter()
+	defer p.leave()
+
+	p.waitHeld(ctr.Id)
+
 	time.Sleep(p.delay(ctr))
 
 	if p.updateFromHandler.Load() {
@@ -144,12 +162,88 @@ func (p *delayPlugin) StopContainer(_ context.Context, _ *api.PodSandbox, ctr *a
 	return nil, nil
 }
 
+// ValidateContainerAdjustment approves every adjustment it is asked about,
+// and records that it was asked.
+func (p *delayPlugin) ValidateContainerAdjustment(_ context.Context, req *api.ValidateContainerAdjustmentRequest) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.validated = append(p.validated, req.GetContainer().GetId())
+
+	return nil
+}
+
+// Validated returns the container ids this plugin was asked to validate
+// the adjustment of, in order.
+func (p *delayPlugin) Validated() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return append([]string(nil), p.validated...)
+}
+
+// holdCreate returns a channel that keeps id's CreateContainer handler in
+// the plugin until the channel is closed.
+func (p *delayPlugin) holdCreate(id string) chan struct{} {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.held == nil {
+		p.held = map[string]chan struct{}{}
+	}
+
+	held := make(chan struct{})
+	p.held[id] = held
+
+	return held
+}
+
+// waitHeld returns once nothing holds id's CreateContainer handler.
+func (p *delayPlugin) waitHeld(id string) {
+	p.mu.Lock()
+	held := p.held[id]
+	p.mu.Unlock()
+
+	if held != nil {
+		<-held
+	}
+}
+
 // observe records that this plugin has taken ctr's request, before the
 // delay rather than after, so seen is the order the plugin started them in.
 func (p *delayPlugin) observe(id string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.seen = append(p.seen, id)
+}
+
+// enter records that a CreateContainer handler has started.
+func (p *delayPlugin) enter() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.inside > 0 {
+		p.overlap++
+	}
+
+	p.inside++
+}
+
+// leave records that a CreateContainer handler has finished.
+func (p *delayPlugin) leave() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.inside--
+}
+
+// Overlap returns how many CreateContainer handlers started while another
+// one was running.
+func (p *delayPlugin) Overlap() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return p.overlap
 }
 
 // Seen returns the container ids this plugin took requests for, in order.
@@ -160,11 +254,13 @@ func (p *delayPlugin) Seen() []string {
 }
 
 func (p *delayPlugin) start(dir string) error {
-	s, err := stub.New(p,
+	opts := []stub.Option{
 		stub.WithPluginName(p.name),
 		stub.WithPluginIdx(p.idx),
 		stub.WithSocketPath(filepath.Join(dir, "nri.sock")),
-	)
+	}
+
+	s, err := stub.New(p, opts...)
 	if err != nil {
 		return err
 	}
@@ -186,14 +282,32 @@ type scaleRig struct {
 	runtime *nri.Adaptation
 	plugins []*delayPlugin
 
+	// dir holds the runtime's socket, so a test can connect a plugin of
+	// its own to it.
+	dir string
+
 	// update stands in for the runtime's UpdateFn when a test sets it, so a
 	// plugin's unsolicited updates can be observed.
 	update func(context.Context, []*nri.ContainerUpdate) ([]*nri.ContainerUpdate, error)
 }
 
+// rigOption prepares the i'th plugin of a rig before it starts.
+type rigOption func(i int, p *delayPlugin)
+
+// validatesAdjustments returns an option that subscribes plugin idx to
+// container adjustment validation as well as to the events it answers.
+func validatesAdjustments(idx int) rigOption {
+	return func(i int, p *delayPlugin) {
+		if i == idx {
+			p.validates = true
+		}
+	}
+}
+
 // startRig brings up an Adaptation with count plugins, each answering after
-// delay, and waits until every one of them is eligible for events.
-func startRig(t *testing.T, count int, delay func(*api.Container) time.Duration) *scaleRig {
+// delay and prepared by every option given, and waits until every one of
+// them is eligible for events.
+func startRig(t *testing.T, count int, delay func(*api.Container) time.Duration, opts ...rigOption) *scaleRig {
 	t.Helper()
 
 	logrus.SetLevel(logrus.ErrorLevel)
@@ -205,7 +319,7 @@ func startRig(t *testing.T, count int, delay func(*api.Container) time.Duration)
 
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "etc", "nri"), 0o755))
 
-	rig := &scaleRig{}
+	rig := &scaleRig{dir: dir}
 
 	sync := func(ctx context.Context, cb nri.SyncCB) error {
 		_, err := cb(ctx, nil, nil)
@@ -232,6 +346,11 @@ func startRig(t *testing.T, count int, delay func(*api.Container) time.Duration)
 
 	for i := 0; i < count; i++ {
 		p := newDelayPlugin(i, delay)
+
+		for _, opt := range opts {
+			opt(i, p)
+		}
+
 		require.NoError(t, p.start(dir))
 		t.Cleanup(p.stop)
 		rig.plugins = append(rig.plugins, p)
@@ -367,19 +486,14 @@ func TestScalabilityMatrix(t *testing.T) {
 	}
 }
 
-// TestScalabilityPathological is the case request-level serialisation is
-// worst for: one plugin that takes a long time, and a burst of creations
-// and stops issued at once.
+// TestScalabilityPathological is the case the lock is worst for: one plugin
+// that takes a long time, and a burst of creations and stops issued at
+// once.
 //
 // Both are requests a plugin can answer with a change, so both are
-// ordered. All 100 of them reach the plugin alongside each other and only
-// their applies are kept in order, so what the burst waits out is the
-// plugin answering them one at a time.
-//
-// A burst that takes the plugin longer than the plugin request timeout
-// costs it the plugin: the requests it has not got to time out, the
-// runtime closes it, and the rest of the burst is answered by nobody. The
-// log says how many of them it answered.
+// ordered, and under the lock all 100 of them queue behind each other for
+// 100*100ms. There is no reason they should: the plugin answers them
+// concurrently, and only applying the answers has to be kept in order.
 func TestScalabilityPathological(t *testing.T) {
 	const (
 		creates = 50

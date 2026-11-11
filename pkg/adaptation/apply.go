@@ -33,13 +33,11 @@ import "context"
 // ordered requests and another for the rest.
 
 // applier runs applies in the order their requests arrived.
+//
+// Usable as a zero value: the first number is 1, which is where the
+// sequencer starts.
 type applier struct {
-	gate *gate
-}
-
-// newApplier returns an applier whose first number is first.
-func newApplier(first seqNo) *applier {
-	return &applier{gate: newGate(first)}
+	gate gate
 }
 
 // apply runs fn once every earlier request has applied, and returns what fn

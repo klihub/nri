@@ -1248,6 +1248,7 @@ func (s *testStub) RequestTimeout() time.Duration      { return 0 }
 func (s *testStub) Logger() nrilog.Logger              { return nil }
 func (s *testStub) RuntimeNRIVersion() string          { return "" }
 func (s *testStub) PluginNRIVersion() string           { return "" }
+func (s *testStub) Streaming() bool                    { return false }
 
 var _ stub.Stub = &testStub{}
 

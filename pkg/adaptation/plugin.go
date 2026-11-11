@@ -309,8 +309,56 @@ func (p *plugin) connect(conn stdnet.Conn) (retErr error) {
 	}
 
 	api.RegisterRuntimeService(p.rpcs, p)
+	api.RegisterStreamingRuntimeService(p.rpcs, &streamingService{p: p})
 
 	return nil
+}
+
+// streamingService serves a plugin's offer of an event stream.
+//
+// A plugin opens the stream; the runtime then sends that plugin's requests
+// down the reply half of it. Server push over a client-initiated call, which
+// is also the whole of the version negotiation: a plugin that cannot stream
+// does not call this, and the runtime goes on using unary calls without
+// having to ask anything or compare any versions.
+type streamingService struct {
+	p *plugin
+}
+
+// StartEventStream uses the stream for this plugin's requests until it ends.
+//
+// It must not return earlier than that: returning closes the stream.
+func (s *streamingService) StartEventStream(_ context.Context, srv api.StreamingRuntime_StartEventStreamServer) error {
+	stream := newPluginStream(s.p, srv)
+
+	if err := s.p.impl.useStream(stream); err != nil {
+		return err
+	}
+
+	log.Infof(noCtx, "plugin %q opened an event stream", s.p.name())
+
+	// Tell the plugin the stream is in use before it registers, so that
+	// which transport this plugin gets is settled once rather than raced
+	// against the first request.
+	if err := srv.Send(&api.RuntimeMessage{
+		Msg: &api.RuntimeMessage_StreamReady{StreamReady: &api.Empty{}},
+	}); err != nil {
+		return fmt.Errorf("failed to accept event stream of plugin %q: %w", s.p.name(), err)
+	}
+
+	err := stream.run()
+
+	log.Infof(noCtx, "event stream of plugin %q ended: %v", s.p.name(), err)
+
+	// A plugin's transport is settled for the life of its connection, so one
+	// that has lost its stream cannot be served over this connection at all:
+	// close it and let the plugin reconnect and negotiate again. Usually the
+	// connection is already gone and this is what reaps the plugin a moment
+	// sooner; where it is not, the alternative is a plugin that answers
+	// nothing while still registered.
+	s.p.close()
+
+	return err
 }
 
 // Start Runtime service, wait for plugin to register, then configure it.
@@ -432,8 +480,28 @@ func (p *plugin) qualifiedName() string {
 	return kind + ":" + idx + "-" + base + pid
 }
 
-// RegisterPlugin handles the plugin's registration request.
+// RegisterPlugin handles a plugin's registration request made with a unary
+// call.
+//
+// A plugin that holds an event stream is refused: all of a plugin's
+// traffic goes one way or the other, and a plugin registering here while
+// the runtime is driving it on a stream says the two ends disagree about
+// which transport this plugin got.
 func (p *plugin) RegisterPlugin(ctx context.Context, req *RegisterPluginRequest) (*RegisterPluginResponse, error) {
+	if p.impl.isStreaming() {
+		err := fmt.Errorf("plugin %q registered with a unary call while holding an event stream",
+			req.PluginName)
+		p.regC <- err
+
+		return &RegisterPluginResponse{}, err
+	}
+
+	return p.register(ctx, req)
+}
+
+// register records what a plugin registered as and reports it eligible for
+// configuration.
+func (p *plugin) register(ctx context.Context, req *RegisterPluginRequest) (*RegisterPluginResponse, error) {
 	if p.isExternal() {
 		if err := api.CheckPluginName(req.PluginName); err != nil {
 			p.regC <- fmt.Errorf("plugin registered with an invalid name: %w", err)
@@ -1021,6 +1089,8 @@ func (p *plugin) warnDeprecatedEvent(ctx context.Context, event Event) {
 // isFatalError returns true if the error is fatal and the plugin connection should be closed.
 func isFatalError(err error) bool {
 	switch {
+	case errors.Is(err, errStreamClosed):
+		return true
 	case errors.Is(err, ttrpc.ErrClosed):
 		return true
 	case errors.Is(err, ttrpc.ErrServerClosed):

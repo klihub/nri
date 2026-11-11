@@ -16,7 +16,10 @@
 
 package adaptation
 
-import "sync"
+import (
+	"context"
+	"sync"
+)
 
 // The order NRI does things in, as one number per request and a gate for
 // each consumer of that order.
@@ -66,6 +69,7 @@ func (s *sequencer) upcoming() seqNo {
 type gate struct {
 	mu     sync.Mutex
 	want   seqNo
+	armed  bool
 	closed bool
 	waiter map[seqNo]chan struct{}
 	hole   map[seqNo]bool
@@ -73,10 +77,58 @@ type gate struct {
 
 // newGate returns a gate whose first number is first.
 func newGate(first seqNo) *gate {
-	return &gate{
-		want:   first,
-		waiter: map[seqNo]chan struct{}{},
-		hole:   map[seqNo]bool{},
+	g := &gate{}
+	g.init(first)
+
+	return g
+}
+
+// arm sets the gate's first number, discarding anything it was told
+// before.
+func (g *gate) arm(first seqNo) {
+	// A plugin's stream opens when it connects, but the plugin only joins
+	// the live list once it has been configured and synchronized. A request
+	// numbered in between reaches neither: not the plugin, which is not yet
+	// listed, and so not the sweep that would announce the hole. Arming
+	// when the plugin joins, under the same lock that lists it, closes that
+	// window -- every number after it either reaches the plugin or is
+	// announced, and every number before it is one this gate ignores.
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	g.init(first)
+	g.want = first
+	g.armed = true
+
+	for seq, ch := range g.waiter {
+		if seq < first {
+			close(ch)
+			delete(g.waiter, seq)
+		}
+	}
+}
+
+// isArmed reports whether this gate orders anything yet.
+func (g *gate) isArmed() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	return g.armed
+}
+
+// init prepares a gate whose first number is first.
+func (g *gate) init(first seqNo) {
+	// Taken by every entry point, so that a zero gate works: an Adaptation
+	// built as a literal rather than by New would otherwise take requests
+	// against a nil map, and the order is not something a caller should
+	// have to remember to switch on.
+	if g.waiter == nil {
+		g.waiter = map[seqNo]chan struct{}{}
+		g.hole = map[seqNo]bool{}
+	}
+
+	if g.want == 0 {
+		g.want = first
 	}
 }
 
@@ -97,6 +149,7 @@ func (g *gate) run(seq seqNo, work func()) {
 // reach this consumer.
 func (g *gate) skip(seq seqNo) {
 	g.mu.Lock()
+	g.init(1)
 
 	if g.closed || seq < g.want {
 		g.mu.Unlock()
@@ -126,6 +179,8 @@ func (g *gate) close(error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
+	g.init(1)
+
 	g.closed = true
 
 	for seq, ch := range g.waiter {
@@ -139,6 +194,7 @@ func (g *gate) close(error) {
 // False means the gate closed while waiting, so the caller runs nothing.
 func (g *gate) await(seq seqNo) bool {
 	g.mu.Lock()
+	g.init(1)
 
 	if g.closed {
 		g.mu.Unlock()
@@ -168,6 +224,8 @@ func (g *gate) advance(seq seqNo) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
+	g.init(1)
+
 	g.want = seq + 1
 
 	for {
@@ -185,4 +243,32 @@ func (g *gate) advance(seq seqNo) {
 
 		return
 	}
+}
+
+// seqCtxKey carries a request's number to the consumers that need it.
+//
+// Request-scoped and nothing else: the alternative is a parameter on all
+// sixteen pluginType methods and the plugin wrappers under them, for a
+// value no implementation of them reads.
+type seqCtxKey struct{}
+
+// withSeq returns ctx carrying seq.
+func withSeq(ctx context.Context, seq seqNo) context.Context {
+	return context.WithValue(ctx, seqCtxKey{}, seq)
+}
+
+// withoutSeq returns ctx carrying no number.
+func withoutSeq(ctx context.Context) context.Context {
+	// For the calls a request makes that are not the request: a validator
+	// is asked to approve an adjustment for the request it was just
+	// dispatched, and the two cannot share a turn. Validators only approve
+	// or refuse, so they are not a decision to be ordered at all.
+	return context.WithValue(ctx, seqCtxKey{}, nil)
+}
+
+// seqFrom returns the number ctx carries, and whether it carried one.
+func seqFrom(ctx context.Context) (seqNo, bool) {
+	seq, ok := ctx.Value(seqCtxKey{}).(seqNo)
+
+	return seq, ok
 }

@@ -62,7 +62,7 @@ type Adaptation struct {
 	// The order they are applied in is seq's and applies' job.
 	sync.RWMutex
 	seq         sequencer
-	applies     *applier
+	applies     applier
 	name        string
 	version     string
 	nriVersion  string
@@ -193,7 +193,6 @@ func New(name, version string, syncFn SyncFn, updateFn UpdateFn, opts ...Option)
 	}
 
 	r := &Adaptation{
-		applies:     newApplier(1),
 		name:        name,
 		version:     version,
 		nriVersion:  nriver.GetFromBuildInfo(),
@@ -254,6 +253,9 @@ func (r *Adaptation) RunPodSandbox(ctx context.Context, req *RunPodSandboxReques
 	r.RLock()
 	defer r.RUnlock()
 
+	ctx, seq := r.enter(ctx)
+	defer r.releaseOrderLocked(seq)
+
 	for _, plugin := range r.plugins {
 		if _, err := plugin.runPodSandbox(ctx, req); err != nil {
 			return err
@@ -269,6 +271,9 @@ func (r *Adaptation) UpdatePodSandbox(ctx context.Context, req *UpdatePodSandbox
 
 	r.RLock()
 	defer r.RUnlock()
+
+	ctx, seq := r.enter(ctx)
+	defer r.releaseOrderLocked(seq)
 
 	for _, plugin := range r.plugins {
 		_, err := plugin.updatePodSandbox(ctx, req)
@@ -287,6 +292,9 @@ func (r *Adaptation) PostUpdatePodSandbox(ctx context.Context, req *PostUpdatePo
 	r.RLock()
 	defer r.RUnlock()
 
+	ctx, seq := r.enter(ctx)
+	defer r.releaseOrderLocked(seq)
+
 	for _, plugin := range r.plugins {
 		_, err := plugin.postUpdatePodSandbox(ctx, req)
 		if err != nil {
@@ -303,6 +311,9 @@ func (r *Adaptation) StopPodSandbox(ctx context.Context, req *StopPodSandboxRequ
 
 	r.RLock()
 	defer r.RUnlock()
+
+	ctx, seq := r.enter(ctx)
+	defer r.releaseOrderLocked(seq)
 
 	for _, plugin := range r.plugins {
 		_, err := plugin.stopPodSandbox(ctx, req)
@@ -321,6 +332,9 @@ func (r *Adaptation) RemovePodSandbox(ctx context.Context, req *RemovePodSandbox
 	r.RLock()
 	defer r.RUnlock()
 
+	ctx, seq := r.enter(ctx)
+	defer r.releaseOrderLocked(seq)
+
 	for _, plugin := range r.plugins {
 		_, err := plugin.removePodSandbox(ctx, req)
 		if err != nil {
@@ -331,9 +345,36 @@ func (r *Adaptation) RemovePodSandbox(ctx context.Context, req *RemovePodSandbox
 	return nil
 }
 
-// takeSeq returns this request's place in the order.
-func (r *Adaptation) takeSeq() seqNo {
-	return r.seq.take()
+// enter gives a request its place in the order and returns a context
+// carrying it, for the consumers of that order to read.
+func (r *Adaptation) enter(ctx context.Context) (context.Context, seqNo) {
+	seq := r.seq.take()
+
+	return withSeq(ctx, seq), seq
+}
+
+// releaseOrderLocked hands seq on wherever it did not arrive.
+//
+// Deferred by every request. A plugin this request was not dispatched to --
+// one not subscribed to the event, or one past the plugin that failed it --
+// would otherwise leave its writer waiting on a number that never comes,
+// and a request that applies nothing would leave the applier waiting. A
+// number a consumer has already served is ignored, so this needs to know
+// nothing about where the request actually got to.
+//
+// The caller holds the lock for reading, so the plugin list is stable. A
+// request cannot take it again here: Go's RWMutex does not allow a reader
+// to lock recursively.
+func (r *Adaptation) releaseOrderLocked(seq seqNo) {
+	r.applies.release(seq)
+
+	for _, p := range r.plugins {
+		p.impl.releaseOrder(seq)
+	}
+
+	for _, p := range r.validators {
+		p.impl.releaseOrder(seq)
+	}
 }
 
 // CreateContainerAndApply relays the request to plugins and calls apply
@@ -373,8 +414,8 @@ func (r *Adaptation) CreateContainerAndApply(ctx context.Context, req *CreateCon
 	r.RLock()
 	defer r.RUnlock()
 
-	seq := r.takeSeq()
-	defer r.applies.release(seq)
+	ctx, seq := r.enter(ctx)
+	defer r.releaseOrderLocked(seq)
 
 	var (
 		result   = collectCreateContainerResult(req)
@@ -425,6 +466,9 @@ func (r *Adaptation) PostCreateContainer(ctx context.Context, req *PostCreateCon
 	r.RLock()
 	defer r.RUnlock()
 
+	ctx, seq := r.enter(ctx)
+	defer r.releaseOrderLocked(seq)
+
 	for _, plugin := range r.plugins {
 		_, err := plugin.postCreateContainer(ctx, req)
 		if err != nil {
@@ -442,6 +486,9 @@ func (r *Adaptation) StartContainer(ctx context.Context, req *StartContainerRequ
 	r.RLock()
 	defer r.RUnlock()
 
+	ctx, seq := r.enter(ctx)
+	defer r.releaseOrderLocked(seq)
+
 	for _, plugin := range r.plugins {
 		_, err := plugin.startContainer(ctx, req)
 		if err != nil {
@@ -458,6 +505,9 @@ func (r *Adaptation) PostStartContainer(ctx context.Context, req *PostStartConta
 
 	r.RLock()
 	defer r.RUnlock()
+
+	ctx, seq := r.enter(ctx)
+	defer r.releaseOrderLocked(seq)
 
 	for _, plugin := range r.plugins {
 		_, err := plugin.postStartContainer(ctx, req)
@@ -479,8 +529,8 @@ func (r *Adaptation) UpdateContainerAndApply(ctx context.Context, req *UpdateCon
 	r.RLock()
 	defer r.RUnlock()
 
-	seq := r.takeSeq()
-	defer r.applies.release(seq)
+	ctx, seq := r.enter(ctx)
+	defer r.releaseOrderLocked(seq)
 
 	result := collectUpdateContainerResult(req)
 	for _, plugin := range r.plugins {
@@ -512,6 +562,9 @@ func (r *Adaptation) PostUpdateContainer(ctx context.Context, req *PostUpdateCon
 	r.RLock()
 	defer r.RUnlock()
 
+	ctx, seq := r.enter(ctx)
+	defer r.releaseOrderLocked(seq)
+
 	for _, plugin := range r.plugins {
 		_, err := plugin.postUpdateContainer(ctx, req)
 		if err != nil {
@@ -532,8 +585,8 @@ func (r *Adaptation) StopContainerAndApply(ctx context.Context, req *StopContain
 	r.RLock()
 	defer r.RUnlock()
 
-	seq := r.takeSeq()
-	defer r.applies.release(seq)
+	ctx, seq := r.enter(ctx)
+	defer r.releaseOrderLocked(seq)
 
 	result := collectStopContainerResult()
 	for _, plugin := range r.plugins {
@@ -565,6 +618,9 @@ func (r *Adaptation) RemoveContainer(ctx context.Context, req *RemoveContainerRe
 	r.RLock()
 	defer r.RUnlock()
 
+	ctx, seq := r.enter(ctx)
+	defer r.releaseOrderLocked(seq)
+
 	for _, plugin := range r.plugins {
 		_, err := plugin.removeContainer(ctx, req)
 		if err != nil {
@@ -582,6 +638,11 @@ func (r *Adaptation) updateContainers(ctx context.Context, req []*ContainerUpdat
 
 // Validate requested container adjustments.
 func (r *Adaptation) validateContainerAdjustment(ctx context.Context, req *ValidateContainerAdjustmentRequest, result *result) (*CreateContainerResponse, error) {
+	// Not part of the request's turn: a validator is asked about the
+	// request it was just dispatched, and one number cannot order a plugin
+	// against itself.
+	ctx = withoutSeq(ctx)
+
 	rpl := result.createContainerResponse()
 
 	if req == nil || len(r.validators) == 0 {
@@ -688,8 +749,8 @@ func (r *Adaptation) startPlugins() (retErr error) {
 		return fmt.Errorf("failed to synchronize pre-installed NRI Plugins: %w", err)
 	}
 
-	r.plugins = plugins
-	r.sortPlugins()
+	r.addPlugins(plugins...)
+
 	return nil
 }
 
@@ -734,6 +795,26 @@ func (r *Adaptation) removeClosed() {
 	defer r.Unlock()
 
 	r.removeClosedPlugins()
+}
+
+// addPlugins lists plugins as live, arming the stream of each as it does.
+//
+// Arming belongs here because this is where a plugin becomes reachable. A
+// request numbered between the arming and the listing reaches neither the
+// plugin, which is not listed yet, nor the sweep that would announce its
+// hole, so the two have to happen under the one lock. Every plugin is
+// listed here: the pre-installed ones through startPlugins and the rest as
+// they connect.
+//
+// The caller holds r.Lock().
+func (r *Adaptation) addPlugins(plugins ...*plugin) {
+	first := r.seq.upcoming()
+	for _, p := range plugins {
+		p.impl.armStream(first)
+	}
+
+	r.plugins = append(r.plugins, plugins...)
+	r.sortPlugins()
 }
 
 func (r *Adaptation) removeClosedPlugins() {
@@ -822,11 +903,10 @@ func (r *Adaptation) acceptPluginConnections(l net.Listener) error {
 				p.close()
 			} else {
 				r.Lock()
-				r.plugins = append(r.plugins, p)
 				if p.isContainerAdjustmentValidator() {
 					r.validators = append(r.validators, p)
 				}
-				r.sortPlugins()
+				r.addPlugins(p)
 				count := len(r.plugins)
 				r.Unlock()
 				r.metrics.UpdatePluginCount(count)

@@ -183,6 +183,16 @@ type Stub interface {
 	// Logger returns the logger used by the stub.
 	Logger() nrilog.Logger
 
+	// Streaming reports whether this plugin's requests arrive on an event
+	// stream rather than as unary calls.
+	//
+	// It is also which ordering this plugin got. On a stream the runtime
+	// delivers in a fixed order and applies the answers in that same order;
+	// over unary calls it promises only the second half. Ordering is a
+	// preference the runtime may decline, so it is not a property a plugin
+	// can rely on having.
+	Streaming() bool
+
 	// RuntimeNRIVersion returns the NRI version used in the runtime, if known.
 	RuntimeNRIVersion() string
 	// PluignNRIVersion returns the NRI version used in the plugin/stub.
@@ -303,10 +313,13 @@ type stub struct {
 	rpcc       *ttrpc.Client
 	runtime    api.RuntimeService
 	started    bool
-	doneC      chan struct{}
-	srvErrC    chan error
-	cfgErrC    chan error
-	syncReq    *api.SynchronizeRequest
+
+	// stream is the event stream the runtime took, and nil if it took none.
+	stream  *runtimeStream
+	doneC   chan struct{}
+	srvErrC chan error
+	cfgErrC chan error
+	syncReq *api.SynchronizeRequest
 
 	registrationTimeout time.Duration
 	requestTimeout      time.Duration
@@ -451,6 +464,12 @@ func (stub *stub) Start(ctx context.Context) (retErr error) {
 
 	stub.runtime = api.NewRuntimeClient(rpcc)
 
+	// Before registering, so the runtime has settled on a transport for
+	// this plugin before it starts driving it. Registering is what makes
+	// it call Configure, and that call should already be going the way
+	// every later one will.
+	stub.startStream(ctx, rpcc)
+
 	if err = stub.register(ctx); err != nil {
 		stub.close()
 		return err
@@ -512,6 +531,15 @@ func (stub *stub) close() {
 	stub.started = false
 	stub.conn = nil
 	stub.syncReq = nil
+	// Which transport this plugin got is settled per connection, so a
+	// reconnect that gets unary calls must not keep reporting the stream
+	// the previous one had. Ending it here is what tells a request still
+	// waiting on it that it is gone, rather than leaving it to find out
+	// from the connection underneath.
+	if stub.stream != nil {
+		stub.stream.shutdown(fmt.Errorf("%w with the plugin's connection", errStreamClosed))
+		stub.stream = nil
+	}
 }
 
 // Run the plugin. Start event processing then wait for an error or getting stopped.
@@ -602,6 +630,10 @@ func (stub *stub) connect() error {
 }
 
 // Register the plugin with NRI.
+//
+// Registration goes the way every later request of this plugin's goes: on
+// the event stream if the runtime took one, and otherwise with a unary
+// call.
 func (stub *stub) register(ctx context.Context) error {
 	nriVersion := stub.PluginNRIVersion()
 	stub.logger.Infof(ctx, "Registering plugin %s using NRI version %s...",
@@ -615,6 +647,18 @@ func (stub *stub) register(ctx context.Context) error {
 		PluginIdx:  stub.idx,
 		NRIVersion: nriVersion,
 	}
+
+	if stub.stream != nil {
+		_, err := stub.stream.call(ctx, &api.PluginMessage{
+			Msg: &api.PluginMessage_RegisterPluginRequest{RegisterPluginRequest: req},
+		})
+		if err != nil {
+			return fmt.Errorf("failed to register with NRI/Runtime: %w", err)
+		}
+
+		return nil
+	}
+
 	if _, err := stub.runtime.RegisterPlugin(ctx, req); err != nil {
 		return fmt.Errorf("failed to register with NRI/Runtime: %w", err)
 	}

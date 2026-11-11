@@ -197,3 +197,38 @@ func TestSequencerUpcomingDoesNotAllocate(t *testing.T) {
 	require.Equal(t, seqNo(1), s.take())
 	require.Equal(t, seqNo(2), s.upcoming())
 }
+
+func TestListingAPluginArmsItsStream(t *testing.T) {
+	// Every plugin is listed through addPlugins, so arming there is what
+	// makes the guarantee hold for a pre-installed plugin as well as for one
+	// that connects later. An unarmed gate is not a stalled plugin, which is
+	// why this needs its own test: pluginStream.call skips the gate when the
+	// gate is not armed, so the plugin takes requests in no order at all
+	// while still reporting that it streams.
+	r := &Adaptation{metrics: &noopMetrics{}}
+
+	for i := 0; i < 3; i++ {
+		r.seq.take()
+	}
+
+	p := &plugin{impl: &pluginType{streamingImpl: newPluginStream(nil, nil)}}
+
+	r.addPlugins(p)
+
+	require.True(t, p.impl.streamingImpl.order.isArmed(),
+		"a plugin listed as live should have its stream armed")
+
+	// The numbers taken above predate this plugin, so its gate owes them
+	// nothing and the next one runs without waiting.
+	done := make(chan struct{})
+	go func() {
+		p.impl.streamingImpl.order.run(4, func() {})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stream waited for a number issued before its plugin was listed")
+	}
+}

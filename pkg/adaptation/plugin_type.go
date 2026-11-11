@@ -19,6 +19,7 @@ package adaptation
 import (
 	"context"
 	"errors"
+	"sync"
 
 	"github.com/containerd/nri/pkg/api"
 	"google.golang.org/grpc/codes"
@@ -26,16 +27,54 @@ import (
 )
 
 type pluginType struct {
-	wasmImpl    api.Plugin        // WASM binary plugin loaded by the runtime
-	ttrpcImpl   api.PluginService // external plugin connected over ttrpc
-	builtinImpl api.PluginService // in-process plugin built into the runtime
-	deprecated  map[Event]bool    // deprecations collected
-	warned      map[Event]bool    // deprecations we have warned about
+	// streamingImpl is an external plugin's event stream.
+	//
+	// Settled before the plugin registers and never changed after, so a
+	// plugin's transport is decided once for its whole life. A plugin
+	// built against an older NRI, or told not to stream, never opens one
+	// and is left to ttrpcImpl below; the old wire protocol is not a
+	// fallback path to maintain, it is what is already here.
+	//
+	// install guards the one write, so a plugin offering a second stream
+	// is refused rather than racing a write past a live reader.
+	streamingImpl *pluginStream
+	install       sync.Mutex
+	wasmImpl      api.Plugin        // WASM binary plugin loaded by the runtime
+	ttrpcImpl     api.PluginService // external plugin connected over ttrpc
+	builtinImpl   api.PluginService // in-process plugin built into the runtime
+	deprecated    map[Event]bool    // deprecations collected
+	warned        map[Event]bool    // deprecations we have warned about
 }
 
 var (
 	errUnknownImpl = errors.New("unknown plugin implementation type")
 )
+
+// useStream makes stream this plugin's transport, or returns an error if it
+// already has one.
+//
+// Called before the plugin registers, so the write is ordered ahead of every
+// dispatch by the lock Adaptation takes to register it.
+func (p *pluginType) useStream(stream *pluginStream) error {
+	p.install.Lock()
+	defer p.install.Unlock()
+
+	if p.streamingImpl != nil {
+		return errors.New("plugin already has an event stream")
+	}
+
+	p.streamingImpl = stream
+
+	return nil
+}
+
+// isStreaming reports whether this plugin's transport is an event stream.
+func (p *pluginType) isStreaming() bool {
+	p.install.Lock()
+	defer p.install.Unlock()
+
+	return p.streamingImpl != nil
+}
 
 func (p *pluginType) isWasm() bool {
 	return p.wasmImpl != nil
@@ -53,6 +92,8 @@ func (p *pluginType) isBuiltin() bool {
 // request.
 func (p *pluginType) Synchronize(ctx context.Context, req *SynchronizeRequest) (*SynchronizeResponse, error) {
 	switch {
+	case p.streamingImpl != nil:
+		return p.streamingImpl.Synchronize(ctx, req)
 	case p.ttrpcImpl != nil:
 		return p.ttrpcImpl.Synchronize(ctx, req)
 	case p.builtinImpl != nil:
@@ -67,6 +108,8 @@ func (p *pluginType) Synchronize(ctx context.Context, req *SynchronizeRequest) (
 // Configure handles type-specific details of relaying a plugin Configure request.
 func (p *pluginType) Configure(ctx context.Context, req *ConfigureRequest) (*ConfigureResponse, error) {
 	switch {
+	case p.streamingImpl != nil:
+		return p.streamingImpl.Configure(ctx, req)
 	case p.ttrpcImpl != nil:
 		return p.ttrpcImpl.Configure(ctx, req)
 	case p.builtinImpl != nil:
@@ -81,6 +124,8 @@ func (p *pluginType) Configure(ctx context.Context, req *ConfigureRequest) (*Con
 // RunPodSandbox handles type-specific deails of relaying a RunPodSandbox request.
 func (p *pluginType) RunPodSandbox(ctx context.Context, req *RunPodSandboxRequest) (*RunPodSandboxResponse, error) {
 	switch {
+	case p.streamingImpl != nil:
+		return p.streamingImpl.RunPodSandbox(ctx, req)
 	case p.ttrpcImpl != nil:
 		rpl, err := p.ttrpcImpl.RunPodSandbox(ctx, req)
 		if err != nil && status.Code(err) == codes.Unimplemented {
@@ -100,6 +145,8 @@ func (p *pluginType) RunPodSandbox(ctx context.Context, req *RunPodSandboxReques
 // request.
 func (p *pluginType) UpdatePodSandbox(ctx context.Context, req *UpdatePodSandboxRequest) (*UpdatePodSandboxResponse, error) {
 	switch {
+	case p.streamingImpl != nil:
+		return p.streamingImpl.UpdatePodSandbox(ctx, req)
 	case p.ttrpcImpl != nil:
 		return p.ttrpcImpl.UpdatePodSandbox(ctx, req)
 	case p.builtinImpl != nil:
@@ -115,6 +162,8 @@ func (p *pluginType) UpdatePodSandbox(ctx context.Context, req *UpdatePodSandbox
 // PostUpdatePodSandbox request.
 func (p *pluginType) PostUpdatePodSandbox(ctx context.Context, req *PostUpdatePodSandboxRequest) (*PostUpdatePodSandboxResponse, error) {
 	switch {
+	case p.streamingImpl != nil:
+		return p.streamingImpl.PostUpdatePodSandbox(ctx, req)
 	case p.ttrpcImpl != nil:
 		rpl, err := p.ttrpcImpl.PostUpdatePodSandbox(ctx, req)
 		if err != nil && status.Code(err) == codes.Unimplemented {
@@ -133,6 +182,8 @@ func (p *pluginType) PostUpdatePodSandbox(ctx context.Context, req *PostUpdatePo
 // StopPodSandbox handles type-specific details of relaying a StopPodSandbox request.
 func (p *pluginType) StopPodSandbox(ctx context.Context, req *StopPodSandboxRequest) (*StopPodSandboxResponse, error) {
 	switch {
+	case p.streamingImpl != nil:
+		return p.streamingImpl.StopPodSandbox(ctx, req)
 	case p.ttrpcImpl != nil:
 		rpl, err := p.ttrpcImpl.StopPodSandbox(ctx, req)
 		if err != nil && status.Code(err) == codes.Unimplemented {
@@ -152,6 +203,8 @@ func (p *pluginType) StopPodSandbox(ctx context.Context, req *StopPodSandboxRequ
 // request.
 func (p *pluginType) RemovePodSandbox(ctx context.Context, req *RemovePodSandboxRequest) (*RemovePodSandboxResponse, error) {
 	switch {
+	case p.streamingImpl != nil:
+		return p.streamingImpl.RemovePodSandbox(ctx, req)
 	case p.ttrpcImpl != nil:
 		rpl, err := p.ttrpcImpl.RemovePodSandbox(ctx, req)
 		if err != nil && status.Code(err) == codes.Unimplemented {
@@ -170,6 +223,8 @@ func (p *pluginType) RemovePodSandbox(ctx context.Context, req *RemovePodSandbox
 // CreateContainer handles type-specific details of relaying a CreateContainer request.
 func (p *pluginType) CreateContainer(ctx context.Context, req *CreateContainerRequest) (*CreateContainerResponse, error) {
 	switch {
+	case p.streamingImpl != nil:
+		return p.streamingImpl.CreateContainer(ctx, req)
 	case p.ttrpcImpl != nil:
 		return p.ttrpcImpl.CreateContainer(ctx, req)
 	case p.builtinImpl != nil:
@@ -185,6 +240,8 @@ func (p *pluginType) CreateContainer(ctx context.Context, req *CreateContainerRe
 // request.
 func (p *pluginType) PostCreateContainer(ctx context.Context, req *PostCreateContainerRequest) (*PostCreateContainerResponse, error) {
 	switch {
+	case p.streamingImpl != nil:
+		return p.streamingImpl.PostCreateContainer(ctx, req)
 	case p.ttrpcImpl != nil:
 		rpl, err := p.ttrpcImpl.PostCreateContainer(ctx, req)
 		if err != nil && status.Code(err) == codes.Unimplemented {
@@ -203,6 +260,8 @@ func (p *pluginType) PostCreateContainer(ctx context.Context, req *PostCreateCon
 // StartContainer handles type-specific details of relaying a StartContainer request.
 func (p *pluginType) StartContainer(ctx context.Context, req *StartContainerRequest) (*StartContainerResponse, error) {
 	switch {
+	case p.streamingImpl != nil:
+		return p.streamingImpl.StartContainer(ctx, req)
 	case p.ttrpcImpl != nil:
 		rpl, err := p.ttrpcImpl.StartContainer(ctx, req)
 		if err != nil && status.Code(err) == codes.Unimplemented {
@@ -222,6 +281,8 @@ func (p *pluginType) StartContainer(ctx context.Context, req *StartContainerRequ
 // request.
 func (p *pluginType) PostStartContainer(ctx context.Context, req *PostStartContainerRequest) (*PostStartContainerResponse, error) {
 	switch {
+	case p.streamingImpl != nil:
+		return p.streamingImpl.PostStartContainer(ctx, req)
 	case p.ttrpcImpl != nil:
 		rpl, err := p.ttrpcImpl.PostStartContainer(ctx, req)
 		if err != nil && status.Code(err) == codes.Unimplemented {
@@ -240,6 +301,8 @@ func (p *pluginType) PostStartContainer(ctx context.Context, req *PostStartConta
 // UpdateContainer handles type-specific details of relaying an UpdateContainer request.
 func (p *pluginType) UpdateContainer(ctx context.Context, req *UpdateContainerRequest) (*UpdateContainerResponse, error) {
 	switch {
+	case p.streamingImpl != nil:
+		return p.streamingImpl.UpdateContainer(ctx, req)
 	case p.ttrpcImpl != nil:
 		return p.ttrpcImpl.UpdateContainer(ctx, req)
 	case p.builtinImpl != nil:
@@ -255,6 +318,8 @@ func (p *pluginType) UpdateContainer(ctx context.Context, req *UpdateContainerRe
 // request.
 func (p *pluginType) PostUpdateContainer(ctx context.Context, req *PostUpdateContainerRequest) (*PostUpdateContainerResponse, error) {
 	switch {
+	case p.streamingImpl != nil:
+		return p.streamingImpl.PostUpdateContainer(ctx, req)
 	case p.ttrpcImpl != nil:
 		rpl, err := p.ttrpcImpl.PostUpdateContainer(ctx, req)
 		if err != nil && status.Code(err) == codes.Unimplemented {
@@ -273,6 +338,8 @@ func (p *pluginType) PostUpdateContainer(ctx context.Context, req *PostUpdateCon
 // StopContainer handles type-specific details of relaying a StopContainer request.
 func (p *pluginType) StopContainer(ctx context.Context, req *StopContainerRequest) (*StopContainerResponse, error) {
 	switch {
+	case p.streamingImpl != nil:
+		return p.streamingImpl.StopContainer(ctx, req)
 	case p.ttrpcImpl != nil:
 		return p.ttrpcImpl.StopContainer(ctx, req)
 	case p.builtinImpl != nil:
@@ -287,6 +354,8 @@ func (p *pluginType) StopContainer(ctx context.Context, req *StopContainerReques
 // RemoveContainer handles type-specific details of relaying a RemoveContainer request.
 func (p *pluginType) RemoveContainer(ctx context.Context, req *RemoveContainerRequest) (*RemoveContainerResponse, error) {
 	switch {
+	case p.streamingImpl != nil:
+		return p.streamingImpl.RemoveContainer(ctx, req)
 	case p.ttrpcImpl != nil:
 		rpl, err := p.ttrpcImpl.RemoveContainer(ctx, req)
 		if err != nil && status.Code(err) == codes.Unimplemented {
@@ -321,6 +390,8 @@ func (p *pluginType) StateChange(ctx context.Context, req *StateChangeEvent) (er
 // ValidateContainerAdjustment request.
 func (p *pluginType) ValidateContainerAdjustment(ctx context.Context, req *ValidateContainerAdjustmentRequest) (*ValidateContainerAdjustmentResponse, error) {
 	switch {
+	case p.streamingImpl != nil:
+		return p.streamingImpl.ValidateContainerAdjustment(ctx, req)
 	case p.ttrpcImpl != nil:
 		return p.ttrpcImpl.ValidateContainerAdjustment(ctx, req)
 	case p.builtinImpl != nil:
@@ -457,4 +528,21 @@ func (o *origImplWrapper) RemoveContainer(ctx context.Context, req *RemoveContai
 		Container: req.GetContainer(),
 	})
 	return &api.RemoveContainerResponse{}, err
+}
+
+// armStream starts ordering this plugin's stream at first, if it has one.
+func (p *pluginType) armStream(first seqNo) {
+	if p.streamingImpl != nil {
+		p.streamingImpl.arm(first)
+	}
+}
+
+// releaseOrder hands seq on if this plugin's stream never saw it.
+//
+// A plugin on unary calls has no order to hand on: the number exists for
+// the applier and for the writers, and a unary call is neither.
+func (p *pluginType) releaseOrder(seq seqNo) {
+	if p.streamingImpl != nil {
+		p.streamingImpl.skip(seq)
+	}
 }
