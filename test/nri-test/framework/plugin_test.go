@@ -598,7 +598,8 @@ func TestTestPluginUpdateContainers(t *testing.T) {
 	t.Run("should error rather than panic on an unstarted plugin", func(t *testing.T) {
 		p := NewTestPlugin("test", "00", 0, &EventQ{}, &Scope{})
 
-		updates, err := p.UpdateContainers([]*api.ContainerUpdate{{ContainerId: "ctr0"}})
+		updates, err := p.UpdateContainers(context.Background(),
+			[]*api.ContainerUpdate{{ContainerId: "ctr0"}})
 		require.ErrorIs(t, err, stub.ErrNoService)
 		require.Nil(t, updates)
 	})
@@ -975,7 +976,7 @@ func TestTestPluginFiltersEveryExit(t *testing.T) {
 
 		var seen []*api.ContainerUpdate
 		p.stub = &testStub{
-			updateFn: func(updates []*api.ContainerUpdate) ([]*api.ContainerUpdate, error) {
+			updateFn: func(_ context.Context, updates []*api.ContainerUpdate) ([]*api.ContainerUpdate, error) {
 				seen = updates
 
 				return nil, nil
@@ -986,7 +987,7 @@ func TestTestPluginFiltersEveryExit(t *testing.T) {
 		_, _, err := p.CreateContainer(ctx, pod, ctr)
 		require.NoError(t, err)
 
-		_, err = p.UpdateContainers(both)
+		_, err = p.UpdateContainers(ctx, both)
 		require.NoError(t, err)
 		require.Equal(t, []*api.ContainerUpdate{mine}, seen,
 			"the foreign update must be dropped before it reaches the stub")
@@ -996,7 +997,7 @@ func TestTestPluginFiltersEveryExit(t *testing.T) {
 	t.Run("UpdateContainers should keep the nil-stub guard ahead of the filter", func(t *testing.T) {
 		p, q := newPlugin()
 
-		updates, err := p.UpdateContainers(both)
+		updates, err := p.UpdateContainers(ctx, both)
 		require.ErrorIs(t, err, stub.ErrNoService)
 		require.Nil(t, updates)
 
@@ -1217,7 +1218,7 @@ func TestTestPluginFailsClosedOnEmptyIds(t *testing.T) {
 type testStub struct {
 	stopFn   func()
 	waitFn   func()
-	updateFn func([]*api.ContainerUpdate) ([]*api.ContainerUpdate, error)
+	updateFn func(context.Context, []*api.ContainerUpdate) ([]*api.ContainerUpdate, error)
 }
 
 func (s *testStub) Run(context.Context) error   { return nil }
@@ -1235,9 +1236,9 @@ func (s *testStub) Wait() {
 	}
 }
 
-func (s *testStub) UpdateContainers(updates []*api.ContainerUpdate) ([]*api.ContainerUpdate, error) {
+func (s *testStub) UpdateContainers(ctx context.Context, updates []*api.ContainerUpdate) ([]*api.ContainerUpdate, error) {
 	if s.updateFn != nil {
-		return s.updateFn(updates)
+		return s.updateFn(ctx, updates)
 	}
 
 	return nil, nil

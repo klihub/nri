@@ -83,6 +83,10 @@ type delayPlugin struct {
 	// inside the CreateContainer handler, synchronously, while the request
 	// that is being answered still holds its place in the order.
 	updateFromHandler atomic.Bool
+	// updateFromConfigure asks for an unsolicited container update from
+	// inside the Configure handler, while the plugin is still starting and
+	// has yet to be told it is configured.
+	updateFromConfigure atomic.Bool
 	// validates subscribes this plugin to container adjustment validation
 	// as well as to the events it answers. Read by Configure, so a test
 	// sets it before the plugin starts.
@@ -111,7 +115,16 @@ func newDelayPlugin(idx int, delay func(*api.Container) time.Duration) *delayPlu
 	}
 }
 
-func (p *delayPlugin) Configure(context.Context, string, string, string) (stub.EventMask, error) {
+func (p *delayPlugin) Configure(ctx context.Context, _, _, _ string) (stub.EventMask, error) {
+	if p.updateFromConfigure.Load() {
+		_, err := p.stub.UpdateContainers(ctx, []*api.ContainerUpdate{
+			{ContainerId: "configuring"},
+		})
+		if err != nil {
+			return 0, err
+		}
+	}
+
 	events := []string{"CreateContainer", "StopContainer"}
 	if p.validates {
 		events = append(events, "ValidateContainerAdjustment")
@@ -125,7 +138,7 @@ func (p *delayPlugin) Synchronize(context.Context, []*api.PodSandbox, []*api.Con
 	return nil, nil
 }
 
-func (p *delayPlugin) CreateContainer(_ context.Context, _ *api.PodSandbox, ctr *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
+func (p *delayPlugin) CreateContainer(ctx context.Context, _ *api.PodSandbox, ctr *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
 	if p.failCreate.Load() {
 		return nil, nil, errors.New("refused by the plugin")
 	}
@@ -139,7 +152,7 @@ func (p *delayPlugin) CreateContainer(_ context.Context, _ *api.PodSandbox, ctr 
 	time.Sleep(p.delay(ctr))
 
 	if p.updateFromHandler.Load() {
-		_, err := p.stub.UpdateContainers([]*api.ContainerUpdate{
+		_, err := p.stub.UpdateContainers(ctx, []*api.ContainerUpdate{
 			{ContainerId: "unsolicited"},
 		})
 		if err != nil {

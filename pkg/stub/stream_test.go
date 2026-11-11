@@ -190,20 +190,38 @@ func TestADrainedStreamTakesNoFurtherEntry(t *testing.T) {
 	require.NotZero(t, c.msg.GetSeq(), "the request went out without a number")
 }
 
+// unusedRuntimeClient is a unary client that reports every use of it.
+type unusedRuntimeClient struct{}
+
+func (unusedRuntimeClient) RegisterPlugin(context.Context, *api.RegisterPluginRequest) (*api.Empty, error) {
+	return nil, errors.New("the unary client of a lost connection was used")
+}
+
+func (unusedRuntimeClient) UpdateContainers(context.Context, *api.UpdateContainersRequest) (*api.UpdateContainersResponse, error) {
+	return nil, errors.New("the unary client of a lost connection was used")
+}
+
 func TestCloseForgetsTheTransportItHad(t *testing.T) {
 	// Which transport a plugin gets is settled per connection, so a stub
-	// that reconnects settles it again from scratch. One that kept the
-	// previous answer reports a stream it no longer has.
+	// that reconnects settles it again from scratch. One that kept either
+	// of them reports, or uses, the transport of a connection that is
+	// gone. Both are set here because a stub that reconnected onto the
+	// other transport is how it ends up holding both.
 	stub := &stub{
 		logger:  discardLogger{},
 		started: true,
 		stream:  newRuntimeStream(nil, func() {}),
+		runtime: unusedRuntimeClient{},
 	}
 
 	stub.close()
 
 	require.False(t, stub.Streaming(),
 		"a closed stub should not report the stream of the connection it lost")
+
+	_, err := stub.UpdateContainers(context.Background(), nil)
+	require.ErrorIs(t, err, ErrNoService,
+		"a closed stub should not use the unary client of the connection it lost")
 }
 
 func TestEveryStreamedRequestHasAnAnswer(t *testing.T) {

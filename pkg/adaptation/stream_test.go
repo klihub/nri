@@ -465,6 +465,146 @@ func TestRegistrationsOnBothTransportsTakeOneRegistration(t *testing.T) {
 	}
 }
 
+func TestAnUpdateFromConfigureDoesNotDeadlock(t *testing.T) {
+	// The handler a plugin asks for an update from can be the one the
+	// runtime is configuring it with, which runs while the plugin is still
+	// inside Start. Nothing a plugin has to hold to use its transport may
+	// be held across that call, or a plugin asking here never finishes
+	// starting and the runtime never finishes configuring it.
+	//
+	// The failure is a package-wide timeout, not a failed test: this test
+	// reports the stall after startupTimeout, and stopping the plugin then
+	// wants the lock that is held, so the cleanup never returns and Go's
+	// test timeout dumps the goroutines. The dump names the deadlock.
+	rig := startRig(t, 0, fixedDelay(0))
+
+	asked := make(chan []*api.ContainerUpdate, 1)
+	rig.update = func(_ context.Context, u []*api.ContainerUpdate) ([]*api.ContainerUpdate, error) {
+		asked <- u
+
+		return nil, nil
+	}
+
+	plugin := newDelayPlugin(0, fixedDelay(0))
+	plugin.updateFromConfigure.Store(true)
+
+	t.Cleanup(plugin.stop)
+
+	// In a goroutine: the failure this watches for is a Start that never
+	// returns.
+	started := make(chan error, 1)
+
+	go func() { started <- plugin.start(rig.dir) }()
+
+	select {
+	case err := <-started:
+		require.NoError(t, err)
+	case <-time.After(startupTimeout):
+		t.Fatal("a plugin that asked for an update while being configured never started")
+	}
+
+	select {
+	case u := <-asked:
+		require.Len(t, u, 1)
+		require.Equal(t, "configuring", u[0].GetContainerId())
+	default:
+		t.Fatal("the update never reached the runtime")
+	}
+}
+
+func TestAUnaryUpdateIsRefusedOnceAStreamExists(t *testing.T) {
+	// A plugin's traffic is all of it on a stream or all of it on unary
+	// calls, and the two ends can still disagree about which this plugin
+	// got: it gives up waiting for the runtime to accept the stream after
+	// the runtime has started using it, and asks the only way it believes
+	// it can. The refusal is the runtime's to make, for an update exactly
+	// as for a registration.
+	rig := startRig(t, 0, fixedDelay(0))
+	plugin := connectRawPlugin(t, rig.dir)
+
+	asked := make(chan struct{}, 1)
+	rig.update = func(context.Context, []*api.ContainerUpdate) ([]*api.ContainerUpdate, error) {
+		asked <- struct{}{}
+
+		return nil, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), handshakeTimeout)
+	defer cancel()
+
+	_, err := api.NewRuntimeClient(plugin.client).UpdateContainers(ctx,
+		&api.UpdateContainersRequest{
+			Update: []*api.ContainerUpdate{{ContainerId: "unsolicited"}},
+		})
+	require.Error(t, err,
+		"a plugin holding an event stream updated containers with a unary call")
+	require.Empty(t, asked, "a refused update reached the runtime")
+}
+
+func TestAStreamingPluginUpdatesOnItsStream(t *testing.T) {
+	// The failed list is the point, not just the call arriving: nri-plugins
+	// fails a DRA claim on what comes back here, on the reasoning that it
+	// cannot tell whether a container still uses what the claim is being
+	// given. An update that always looked to have succeeded would grant a
+	// claim exclusive access to CPUs another container may still be using.
+	rig := startRig(t, 1, fixedDelay(0))
+	plugin := rig.plugins[0]
+
+	require.True(t, plugin.stub.Streaming(),
+		"this test is about the stream; the plugin is not on one")
+
+	// Over the channel rather than into a variable: what the runtime was
+	// asked for is written by the goroutine answering the plugin.
+	asked := make(chan []*api.ContainerUpdate, 1)
+
+	rig.update = func(_ context.Context, u []*api.ContainerUpdate) ([]*api.ContainerUpdate, error) {
+		asked <- u
+
+		return []*api.ContainerUpdate{{ContainerId: "not-updated"}}, nil
+	}
+
+	failed, err := plugin.stub.UpdateContainers(context.Background(),
+		[]*api.ContainerUpdate{{ContainerId: "unsolicited"}})
+	require.NoError(t, err)
+	require.Len(t, failed, 1)
+	require.Equal(t, "not-updated", failed[0].GetContainerId(),
+		"the plugin did not get the failed list the runtime answered with")
+
+	select {
+	case u := <-asked:
+		require.Len(t, u, 1)
+		require.Equal(t, "unsolicited", u[0].GetContainerId())
+	default:
+		t.Fatal("the update never reached the runtime")
+	}
+}
+
+func TestAStreamingPluginIsToldItsUpdateFailed(t *testing.T) {
+	// The other arm of the same answer, and the one the synchronous reply
+	// exists for: a plugin that read no error from a refused update would
+	// take it for applied. nri-plugins fails a DRA claim on this error, so
+	// a refusal reported as success grants a claim exclusive access to CPUs
+	// another container may still be using.
+	rig := startRig(t, 1, fixedDelay(0))
+	plugin := rig.plugins[0]
+
+	require.True(t, plugin.stub.Streaming(),
+		"this test is about the stream; the plugin is not on one")
+
+	rig.update = func(context.Context, []*api.ContainerUpdate) ([]*api.ContainerUpdate, error) {
+		return []*api.ContainerUpdate{{ContainerId: "not-updated"}},
+			errors.New("the runtime refused the update")
+	}
+
+	failed, err := plugin.stub.UpdateContainers(context.Background(),
+		[]*api.ContainerUpdate{{ContainerId: "unsolicited"}})
+	require.Error(t, err, "a plugin was not told its update failed")
+	require.ErrorContains(t, err, "the runtime refused the update",
+		"the plugin got an error other than the runtime's own")
+	require.Nil(t, failed,
+		"an update answered with an error carries no failed list")
+}
+
 func TestPluginObservesRequestsInDispatchOrder(t *testing.T) {
 	// The regression the sequence exists to prevent. Two numbers -- one for
 	// the applies, one minted by the writer -- could disagree about the same

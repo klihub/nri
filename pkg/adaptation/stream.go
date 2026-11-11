@@ -55,6 +55,14 @@ import (
 // survivable on a unary call.
 var errStreamClosed = errors.New("plugin event stream closed")
 
+// errUnexpectedMessage is what a message answer has no case for is answered
+// with.
+//
+// TestEveryPluginRequestHasAnAnswer matches it, so the guard and the error
+// it guards are one thing and the wording of the error is free to change
+// without the guard quietly stopping guarding.
+var errUnexpectedMessage = errors.New("unexpected message on the plugin event stream")
+
 // streamCall is one request waiting for its reply.
 type streamCall struct {
 	msg   *api.RuntimeMessage
@@ -116,10 +124,10 @@ func newPluginStream(p *plugin, srv api.StreamingRuntime_StartEventStreamServer)
 
 // run pumps the stream until either end stops, and reports why.
 //
-// The caller is the StartEventStream handler, which must not return before
-// the stream is finished with.
-func (s *pluginStream) run() error {
-	go s.read()
+// A request the plugin originates is answered under ctx, which is this
+// stream's own.
+func (s *pluginStream) run(ctx context.Context) error {
+	go s.read(ctx)
 	s.write()
 
 	s.mu.Lock()
@@ -196,7 +204,7 @@ func (s *pluginStream) number(c *streamCall) {
 
 // read hands each reply to the request it answers and each request the
 // plugin originates to handle.
-func (s *pluginStream) read() {
+func (s *pluginStream) read(ctx context.Context) {
 	for {
 		rpl, err := s.srv.Recv()
 		if err != nil {
@@ -208,7 +216,7 @@ func (s *pluginStream) read() {
 		// sequence namespace, so it answers nothing of ours and is not
 		// looked for among the requests waiting for a reply.
 		if isPluginRequest(rpl) {
-			s.handle(rpl)
+			s.handle(ctx, rpl)
 			continue
 		}
 
@@ -220,7 +228,7 @@ func (s *pluginStream) read() {
 		if !ok {
 			// A reply to a request whose caller gave up, or one we never
 			// sent. Neither is worth tearing the stream down for.
-			log.Warnf(noCtx, "plugin answered unknown stream request %d", rpl.GetSeq())
+			log.Warnf(ctx, "plugin answered unknown stream request %d", rpl.GetSeq())
 			continue
 		}
 
@@ -377,7 +385,8 @@ func (s *pluginStream) closed() error {
 // originated rather than a reply to a request of the runtime's.
 func isPluginRequest(msg *api.PluginMessage) bool {
 	switch msg.GetMsg().(type) {
-	case *api.PluginMessage_RegisterPluginRequest:
+	case *api.PluginMessage_RegisterPluginRequest,
+		*api.PluginMessage_UpdateContainersRequest:
 		return true
 	}
 
@@ -385,34 +394,45 @@ func isPluginRequest(msg *api.PluginMessage) bool {
 }
 
 // handle answers one request the plugin originated.
-//
-// Registration is the one such request and the one answer to it reaches
-// a plugin once, so the reader answers it itself. The answer waits for
-// the writer to take it, which makes a plugin that asks for more than it
-// reads the plugin whose reader stalls: its own, and nothing beyond it.
-func (s *pluginStream) handle(msg *api.PluginMessage) {
-	rpl := s.answer(msg)
-	rpl.Seq = msg.GetSeq()
+func (s *pluginStream) handle(ctx context.Context, msg *api.PluginMessage) {
+	answer := func() {
+		rpl := s.answer(ctx, msg)
+		rpl.Seq = msg.GetSeq()
 
-	if err := s.respond(rpl); err != nil {
-		log.Warnf(noCtx, "failed to answer request %d of plugin %q: %v",
-			msg.GetSeq(), s.p.name(), err)
+		if err := s.respond(rpl); err != nil {
+			log.Warnf(ctx, "failed to answer request %d of plugin %q: %v",
+				msg.GetSeq(), s.p.name(), err)
+		}
+	}
+
+	// Registration is answered by the reader itself: a plugin registers
+	// once and nothing of its own can be behind it. Every other request is
+	// answered on a goroutine of its own, because answering it reaches into
+	// the runtime and the reply travels on the same stream the plugin is
+	// waiting on: a reader that answered it would be the reader that the
+	// answer needs.
+	switch msg.GetMsg().(type) {
+	case *api.PluginMessage_RegisterPluginRequest:
+		answer()
+	default:
+		go answer()
 	}
 }
 
 // answer hands a request the plugin originated to the same runtime method
 // the unary path uses and wraps what comes back.
-//
-// A case per request, so a request cannot be quietly missing from the
-// stream path.
-func (s *pluginStream) answer(msg *api.PluginMessage) *api.RuntimeMessage {
+func (s *pluginStream) answer(ctx context.Context, msg *api.PluginMessage) *api.RuntimeMessage {
+	// A case per request, so a request cannot be quietly missing from the
+	// stream path. TestEveryPluginRequestHasAnAnswer fails if one is,
+	// because a message with no case is answered with
+	// errUnexpectedMessage.
 	switch m := msg.GetMsg().(type) {
 	case *api.PluginMessage_RegisterPluginRequest:
 		if err := s.p.claimRegistration(m.RegisterPluginRequest.GetPluginName()); err != nil {
 			return &api.RuntimeMessage{Error: err.Error()}
 		}
 
-		if _, err := s.p.register(noCtx, m.RegisterPluginRequest); err != nil {
+		if _, err := s.p.register(ctx, m.RegisterPluginRequest); err != nil {
 			return &api.RuntimeMessage{Error: err.Error()}
 		}
 
@@ -421,10 +441,25 @@ func (s *pluginStream) answer(msg *api.PluginMessage) *api.RuntimeMessage {
 				RegisterPluginResponse: &api.Empty{},
 			},
 		}
+
+	case *api.PluginMessage_UpdateContainersRequest:
+		// The error rather than the response it came with: a failed list
+		// and an error are two answers to one request, and the error is
+		// the one a caller of UpdateContainers acts on.
+		rpl, err := s.p.updateContainers(ctx, m.UpdateContainersRequest)
+		if err != nil {
+			return &api.RuntimeMessage{Error: err.Error()}
+		}
+
+		return &api.RuntimeMessage{
+			Msg: &api.RuntimeMessage_UpdateContainersResponse{
+				UpdateContainersResponse: rpl,
+			},
+		}
 	}
 
 	return &api.RuntimeMessage{
-		Error: fmt.Sprintf("unexpected %T on the event stream", msg.GetMsg()),
+		Error: fmt.Sprintf("%s: %T", errUnexpectedMessage, msg.GetMsg()),
 	}
 }
 

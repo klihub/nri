@@ -333,14 +333,14 @@ type streamingService struct {
 // StartEventStream uses the stream for this plugin's requests until it ends.
 //
 // It must not return earlier than that: returning closes the stream.
-func (s *streamingService) StartEventStream(_ context.Context, srv api.StreamingRuntime_StartEventStreamServer) error {
+func (s *streamingService) StartEventStream(ctx context.Context, srv api.StreamingRuntime_StartEventStreamServer) error {
 	stream := newPluginStream(s.p, srv)
 
 	if err := s.p.impl.useStream(stream); err != nil {
 		return err
 	}
 
-	log.Infof(noCtx, "plugin %q opened an event stream", s.p.name())
+	log.Infof(ctx, "plugin %q opened an event stream", s.p.name())
 
 	// Tell the plugin the stream is in use before it registers, so that
 	// which transport this plugin gets is settled once rather than raced
@@ -351,9 +351,9 @@ func (s *streamingService) StartEventStream(_ context.Context, srv api.Streaming
 		return fmt.Errorf("failed to accept event stream of plugin %q: %w", s.p.name(), err)
 	}
 
-	err := stream.run()
+	err := stream.run(ctx)
 
-	log.Infof(noCtx, "event stream of plugin %q ended: %v", s.p.name(), err)
+	log.Infof(ctx, "event stream of plugin %q ended: %v", s.p.name(), err)
 
 	// A plugin's transport is settled for the life of its connection, so one
 	// that has lost its stream cannot be served over this connection at all:
@@ -559,8 +559,25 @@ func (p *plugin) register(ctx context.Context, req *RegisterPluginRequest) (*Reg
 	return &RegisterPluginResponse{}, nil
 }
 
-// UpdateContainers relays container update request to the runtime.
+// UpdateContainers handles a plugin's container update request made with a
+// unary call.
+//
+// A plugin that holds an event stream is refused: all of a plugin's traffic
+// goes one way or the other, and a plugin asking here while the runtime is
+// driving it on a stream says the two ends disagree about which transport
+// this plugin got.
 func (p *plugin) UpdateContainers(ctx context.Context, req *UpdateContainersRequest) (*UpdateContainersResponse, error) {
+	if p.impl.isStreaming() {
+		return &UpdateContainersResponse{}, fmt.Errorf(
+			"plugin %q requested container updates with a unary call while holding an event stream",
+			p.name())
+	}
+
+	return p.updateContainers(ctx, req)
+}
+
+// updateContainers relays container update request to the runtime.
+func (p *plugin) updateContainers(ctx context.Context, req *UpdateContainersRequest) (*UpdateContainersResponse, error) {
 	log.Infof(ctx, "plugin %q requested container updates", p.name())
 
 	failed, err := p.r.updateContainers(ctx, req.Update)

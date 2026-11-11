@@ -3090,7 +3090,7 @@ func TestUnsolicitedContainerUpdateRequests(t *testing.T) {
 					},
 				},
 			}
-			_, err := plugin.stub.UpdateContainers(updates)
+			_, err := plugin.stub.UpdateContainers(context.Background(), updates)
 			require.NotNil(t, err)
 		})
 
@@ -3136,7 +3136,7 @@ func TestUnsolicitedContainerUpdateRequests(t *testing.T) {
 					},
 				},
 			}
-			failed, err := plugin.stub.UpdateContainers(requestedUpdates)
+			failed, err := plugin.stub.UpdateContainers(ctx, requestedUpdates)
 
 			require.Nil(t, failed)
 			require.Nil(t, err)

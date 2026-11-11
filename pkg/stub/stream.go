@@ -147,8 +147,9 @@ func (stub *stub) startStream(ctx context.Context, rpcc *ttrpc.Client) {
 
 	rs := newRuntimeStream(stream, cancel)
 
-	// Start() holds the lock, and nothing reads this until it returns.
+	stub.transport.Lock()
 	stub.stream = rs
+	stub.transport.Unlock()
 
 	go rs.sender()
 	go stub.serveStream(rs)
@@ -271,16 +272,10 @@ func (stub *stub) answer(ctx context.Context, rs *runtimeStream, req *api.Runtim
 
 // isRuntimeReply reports whether msg answers a request this plugin
 // originated rather than carrying a request of the runtime's.
-//
-// A runtime that refused a request answers with nothing but the error it
-// refused with, which is an answer too. That rests on an error with no
-// message being the runtime's way of refusing a request and nothing else,
-// which the message itself does not say: RuntimeMessage carries one error
-// field for both directions, so a runtime-originated message that
-// carried an error alone would be taken for an answer here.
 func isRuntimeReply(msg *api.RuntimeMessage) bool {
 	switch msg.GetMsg().(type) {
-	case *api.RuntimeMessage_RegisterPluginResponse:
+	case *api.RuntimeMessage_RegisterPluginResponse,
+		*api.RuntimeMessage_UpdateContainersResponse:
 		return true
 	}
 
@@ -720,8 +715,7 @@ func (stub *stub) answerStream(ctx context.Context, req *api.RuntimeMessage) (*a
 // Streaming reports whether this plugin's requests arrive on an event
 // stream. See the Stub interface for what it implies.
 func (stub *stub) Streaming() bool {
-	stub.Lock()
-	defer stub.Unlock()
+	stream, _ := stub.transports()
 
-	return stub.stream != nil
+	return stream != nil
 }

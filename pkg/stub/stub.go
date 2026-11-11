@@ -167,8 +167,11 @@ type Stub interface {
 	// Wait for the plugin to stop.
 	Wait()
 
-	// UpdateContainer requests unsolicited updates to containers.
-	UpdateContainers([]*api.ContainerUpdate) ([]*api.ContainerUpdate, error)
+	// UpdateContainers requests unsolicited updates to containers and
+	// returns the updates the runtime failed to apply.
+	//
+	// The context bounds the wait for the runtime's answer.
+	UpdateContainers(ctx context.Context, update []*api.ContainerUpdate) ([]*api.ContainerUpdate, error)
 
 	// RegistrationTimeout returns the registration timeout for the stub.
 	// This is the default timeout if the plugin has not been started or
@@ -212,6 +215,10 @@ var (
 
 	// ErrNoService indicates that the stub has no runtime service/connection,
 	// for instance by UpdateContainers on a stub which has not been started.
+	//
+	// A stub that has been stopped, or whose connection has gone, reports
+	// it too: a transport belongs to the connection it was settled on, so
+	// this says the stub has none, whichever one it would have had.
 	ErrNoService = errors.New("stub: no service/connection")
 )
 
@@ -311,11 +318,20 @@ type stub struct {
 	rpcl       stdnet.Listener
 	rpcs       *ttrpc.Server
 	rpcc       *ttrpc.Client
-	runtime    api.RuntimeService
 	started    bool
 
+	// runtime is the unary client, and nil if this plugin got a stream.
 	// stream is the event stream the runtime took, and nil if it took none.
-	stream  *runtimeStream
+	//
+	// transport guards both, and is taken for the length of a read of them
+	// and nothing more. The stub's own lock cannot serve here: Start holds
+	// it until the plugin has been configured, which is after the plugin's
+	// first handler has run, so a plugin asking which transport it got from
+	// inside that handler would wait for the call it is answering.
+	transport sync.Mutex
+	runtime   api.RuntimeService
+	stream    *runtimeStream
+
 	doneC   chan struct{}
 	srvErrC chan error
 	cfgErrC chan error
@@ -462,13 +478,19 @@ func (stub *stub) Start(ctx context.Context) (retErr error) {
 	stub.rpcs = rpcs
 	stub.rpcc = rpcc
 
-	stub.runtime = api.NewRuntimeClient(rpcc)
-
 	// Before registering, so the runtime has settled on a transport for
 	// this plugin before it starts driving it. Registering is what makes
 	// it call Configure, and that call should already be going the way
 	// every later one will.
 	stub.startStream(ctx, rpcc)
+
+	// A stream carries every request this plugin originates, so a runtime
+	// that took one leaves a unary client with nothing to do.
+	stub.transport.Lock()
+	if stub.stream == nil {
+		stub.runtime = api.NewRuntimeClient(rpcc)
+	}
+	stub.transport.Unlock()
 
 	if err = stub.register(ctx); err != nil {
 		stub.close()
@@ -531,14 +553,20 @@ func (stub *stub) close() {
 	stub.started = false
 	stub.conn = nil
 	stub.syncReq = nil
-	// Which transport this plugin got is settled per connection, so a
-	// reconnect that gets unary calls must not keep reporting the stream
-	// the previous one had. Ending it here is what tells a request still
-	// waiting on it that it is gone, rather than leaving it to find out
-	// from the connection underneath.
-	if stub.stream != nil {
-		stub.stream.shutdown(fmt.Errorf("%w with the plugin's connection", errStreamClosed))
-		stub.stream = nil
+	// Which transport this plugin got is settled per connection, so both
+	// go with the connection they belong to: a reconnect settles it again
+	// from scratch, and one that keeps either would offer a request the
+	// transport of a connection that is gone. Ending the stream here is
+	// also what tells a request still waiting on it that it is gone,
+	// rather than leaving it to find out from the connection underneath.
+	stub.transport.Lock()
+	stream := stub.stream
+	stub.stream = nil
+	stub.runtime = nil
+	stub.transport.Unlock()
+
+	if stream != nil {
+		stream.shutdown(fmt.Errorf("%w with the plugin's connection", errStreamClosed))
 	}
 }
 
@@ -648,22 +676,39 @@ func (stub *stub) register(ctx context.Context) error {
 		NRIVersion: nriVersion,
 	}
 
-	if stub.stream != nil {
-		_, err := stub.stream.call(ctx, &api.PluginMessage{
+	stream, runtime := stub.transports()
+
+	switch {
+	case stream != nil:
+		_, err := stream.call(ctx, &api.PluginMessage{
 			Msg: &api.PluginMessage_RegisterPluginRequest{RegisterPluginRequest: req},
 		})
 		if err != nil {
 			return fmt.Errorf("failed to register with NRI/Runtime: %w", err)
 		}
 
-		return nil
-	}
+	case runtime != nil:
+		if _, err := runtime.RegisterPlugin(ctx, req); err != nil {
+			return fmt.Errorf("failed to register with NRI/Runtime: %w", err)
+		}
 
-	if _, err := stub.runtime.RegisterPlugin(ctx, req); err != nil {
-		return fmt.Errorf("failed to register with NRI/Runtime: %w", err)
+	default:
+		// Start settles one transport or the other and registers while it
+		// still holds the stub's lock, so a registration with neither is
+		// one made on a connection that has gone.
+		return fmt.Errorf("failed to register with NRI/Runtime: %w", ErrNoService)
 	}
 
 	return nil
+}
+
+// transports returns the way this plugin reaches the runtime: its event
+// stream, or the unary client, and nil for the one it did not get.
+func (stub *stub) transports() (*runtimeStream, api.RuntimeService) {
+	stub.transport.Lock()
+	defer stub.transport.Unlock()
+
+	return stub.stream, stub.runtime
 }
 
 // Handle a lost connection.
@@ -681,17 +726,38 @@ func (stub *stub) connClosed() {
 // plugin event and request handlers
 //
 
-// UpdateContainers requests unsolicited updates to containers.
-func (stub *stub) UpdateContainers(update []*api.ContainerUpdate) ([]*api.ContainerUpdate, error) {
-	if stub.runtime == nil {
-		return nil, ErrNoService
-	}
+// UpdateContainers requests unsolicited updates to containers and returns
+// the updates the runtime failed to apply.
+//
+// The request goes the way every other request of this plugin's goes: on
+// the event stream if the runtime took one, and otherwise with a unary
+// call.
+func (stub *stub) UpdateContainers(ctx context.Context, update []*api.ContainerUpdate) ([]*api.ContainerUpdate, error) {
+	stream, runtime := stub.transports()
 
-	ctx := context.Background()
 	req := &api.UpdateContainersRequest{
 		Update: update,
 	}
-	rpl, err := stub.runtime.UpdateContainers(ctx, req)
+
+	if stream != nil {
+		rpl, err := stream.call(ctx, &api.PluginMessage{
+			Msg: &api.PluginMessage_UpdateContainersRequest{UpdateContainersRequest: req},
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		return rpl.GetUpdateContainersResponse().GetFailed(), nil
+	}
+
+	// One transport or the other, and neither is a stub with no connection
+	// to the runtime: one that was never started, or one whose connection
+	// has gone and taken its transport with it.
+	if runtime == nil {
+		return nil, ErrNoService
+	}
+
+	rpl, err := runtime.UpdateContainers(ctx, req)
 	if rpl != nil {
 		return rpl.Failed, err
 	}

@@ -406,12 +406,12 @@ func (p *TestPlugin) filterUpdates(updates []*api.ContainerUpdate) []*api.Contai
 // The list is filtered before it reaches the stub: this entry point is exported
 // and takes an arbitrary list, so it is the one update path reachable with no
 // callback, and therefore no scope check, involved at all.
-func (p *TestPlugin) UpdateContainers(updates []*api.ContainerUpdate) ([]*api.ContainerUpdate, error) {
+func (p *TestPlugin) UpdateContainers(ctx context.Context, updates []*api.ContainerUpdate) ([]*api.ContainerUpdate, error) {
 	if p.stub == nil {
 		return nil, stub.ErrNoService
 	}
 
-	return p.stub.UpdateContainers(p.filterUpdates(updates))
+	return p.stub.UpdateContainers(ctx, p.filterUpdates(updates))
 }
 
 // Start connects the plugin to the runtime and waits for it to be synchronized.
