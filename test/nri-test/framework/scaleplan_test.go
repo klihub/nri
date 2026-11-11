@@ -239,6 +239,38 @@ func TestScalePlanDescribeNamesEveryPlugin(t *testing.T) {
 	require.Contains(t, d[1], "CreateContainer=200ms")
 }
 
+func TestScalePlanParallelReachesOnlyTheSimulatedPlugins(t *testing.T) {
+	// The recorder keeps the dispatch order because that order is the
+	// measurement: a recorder answering several requests at once reports the
+	// order its own handlers ran in instead.
+	p := mustPlan(t, 2, nil, []string{"1/CreateContainer=200ms"})
+	p.Parallel = true
+
+	recorder, simulated := &TestPlugin{}, &TestPlugin{}
+
+	p.SimulateWork(recorder, 0)
+	p.SimulateWork(simulated, 1)
+
+	require.True(t, simulated.ParallelEvents,
+		"a simulated plugin did not ask for parallel events")
+	require.False(t, recorder.ParallelEvents,
+		"the recorder asked for parallel events")
+}
+
+func TestScalePlanDescribeSaysWhichRunWasParallel(t *testing.T) {
+	// A run says what it simulated in its own output, so the two halves of
+	// the comparison cannot be told apart by the command line alone.
+	p := mustPlan(t, 2, nil, []string{"1/CreateContainer=200ms"})
+
+	require.NotContains(t, p.Describe()[1], "parallel")
+
+	p.Parallel = true
+
+	require.Contains(t, p.Describe()[1], "parallel")
+	require.NotContains(t, p.Describe()[0], "parallel",
+		"the recorder is never parallel")
+}
+
 // A delay on an event the plugin does not subscribe to never fires, so
 // printing it would describe a run that cannot happen.
 func TestScalePlanDescribeSkipsEventsAPluginDoesNotGet(t *testing.T) {

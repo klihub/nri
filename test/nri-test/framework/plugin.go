@@ -67,6 +67,15 @@ type TestPlugin struct {
 	// Start. Assigning it afterwards is both a data race and too late to matter.
 	ValidateAdjustmentFn func(context.Context, *api.ValidateContainerAdjustmentRequest) error
 
+	// ParallelEvents asks the stub to handle several of the runtime's
+	// requests at once instead of one at a time in dispatch order. Read by
+	// Start, so it must be set before then.
+	//
+	// The recorded event order is then the order this plugin's handlers ran
+	// in, which is no longer the order the runtime dispatched them: a test
+	// asserting on arrival order must not set it.
+	ParallelEvents bool
+
 	name  string
 	idx   string
 	mask  stub.EventMask
@@ -466,13 +475,19 @@ func (p *TestPlugin) Start(ctx context.Context, socket string, timeout time.Dura
 		return c, nil
 	}
 
-	s, err := stub.New(p,
+	opts := []stub.Option{
 		stub.WithPluginName(p.name),
 		stub.WithPluginIdx(p.idx),
 		stub.WithSocketPath(socket),
 		stub.WithDialer(dialer),
 		stub.WithOnClose(p.recordDisconnect),
-	)
+	}
+
+	if p.ParallelEvents {
+		opts = append(opts, stub.WithParallelEvents())
+	}
+
+	s, err := stub.New(p, opts...)
 	if err != nil {
 		return fmt.Errorf("failed to create stub for plugin %s: %w", p.FullName(), err)
 	}

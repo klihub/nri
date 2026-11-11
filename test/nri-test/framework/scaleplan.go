@@ -66,6 +66,10 @@ type ScalePlan struct {
 	// Traced means the run measures from the runtime's spans. There is then no
 	// recorder, and plugin 0 is a simulated plugin like the others.
 	Traced bool
+	// Parallel has every simulated plugin ask for parallel event handling,
+	// so it answers several of the runtime's requests at once. The recorder
+	// is never one of them: the order it records is the measurement.
+	Parallel bool
 
 	events map[int][]EventType
 	rules  []delayRule
@@ -372,6 +376,10 @@ func (p *ScalePlan) Describe() []string {
 			if profile, ok := p.profiles[i]; ok {
 				name = fmt.Sprintf("%s, %d events", profile, len(events))
 			}
+
+			if p.Parallel {
+				name += ", parallel"
+			}
 		}
 
 		lines = append(lines, fmt.Sprintf("plugin %02d (%s): delays %s", i, name, formatDelays(delays)))
@@ -406,9 +414,15 @@ func formatDelays(m map[EventType]time.Duration) string {
 }
 
 // SimulateWork makes plugin idx take the plan's delay to handle each event, by
-// installing a handler that waits and then returns without changes. It leaves
-// events with no delay alone.
+// installing a handler that waits and then returns without changes, and asks
+// for parallel event handling where the plan does. It leaves events with no
+// delay alone.
 func (p *ScalePlan) SimulateWork(tp *TestPlugin, idx int) {
+	// The recorder is excluded here rather than by its caller: the order it
+	// records is the measurement, so a parallel recorder would report the
+	// order its own handlers ran in instead of the order of dispatch.
+	tp.ParallelEvents = p.Parallel && idx >= p.firstSimulated()
+
 	hook := func(ev EventType) func(context.Context) {
 		d := p.Delay(idx, ev)
 		if d <= 0 {
