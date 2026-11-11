@@ -61,6 +61,94 @@ func (c *runtimeClient) UpdateContainers(ctx context.Context, req *UpdateContain
 	return &resp, nil
 }
 
+type StreamingRuntimeService interface {
+	StartEventStream(context.Context, StreamingRuntime_StartEventStreamServer) error
+}
+
+type StreamingRuntime_StartEventStreamServer interface {
+	Send(*RuntimeMessage) error
+	Recv() (*PluginMessage, error)
+	ttrpc.StreamServer
+}
+
+type streamingruntimeStartEventStreamServer struct {
+	ttrpc.StreamServer
+}
+
+func (x *streamingruntimeStartEventStreamServer) Send(m *RuntimeMessage) error {
+	return x.StreamServer.SendMsg(m)
+}
+
+func (x *streamingruntimeStartEventStreamServer) Recv() (*PluginMessage, error) {
+	m := new(PluginMessage)
+	if err := x.StreamServer.RecvMsg(m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+func RegisterStreamingRuntimeService(srv *ttrpc.Server, svc StreamingRuntimeService) {
+	srv.RegisterService("nri.pkg.api.v1alpha1.StreamingRuntime", &ttrpc.ServiceDesc{
+		Streams: map[string]ttrpc.Stream{
+			"StartEventStream": {
+				Handler: func(ctx context.Context, stream ttrpc.StreamServer) (interface{}, error) {
+					return nil, svc.StartEventStream(ctx, &streamingruntimeStartEventStreamServer{stream})
+				},
+				StreamingClient: true,
+				StreamingServer: true,
+			},
+		},
+	})
+}
+
+type StreamingRuntimeClient interface {
+	StartEventStream(context.Context) (StreamingRuntime_StartEventStreamClient, error)
+}
+
+type streamingruntimeClient struct {
+	client *ttrpc.Client
+}
+
+func NewStreamingRuntimeClient(client *ttrpc.Client) StreamingRuntimeClient {
+	return &streamingruntimeClient{
+		client: client,
+	}
+}
+
+func (c *streamingruntimeClient) StartEventStream(ctx context.Context) (StreamingRuntime_StartEventStreamClient, error) {
+	stream, err := c.client.NewStream(ctx, &ttrpc.StreamDesc{
+		StreamingClient: true,
+		StreamingServer: true,
+	}, "nri.pkg.api.v1alpha1.StreamingRuntime", "StartEventStream", nil)
+	if err != nil {
+		return nil, err
+	}
+	x := &streamingruntimeStartEventStreamClient{stream}
+	return x, nil
+}
+
+type StreamingRuntime_StartEventStreamClient interface {
+	Send(*PluginMessage) error
+	Recv() (*RuntimeMessage, error)
+	ttrpc.ClientStream
+}
+
+type streamingruntimeStartEventStreamClient struct {
+	ttrpc.ClientStream
+}
+
+func (x *streamingruntimeStartEventStreamClient) Send(m *PluginMessage) error {
+	return x.ClientStream.SendMsg(m)
+}
+
+func (x *streamingruntimeStartEventStreamClient) Recv() (*RuntimeMessage, error) {
+	m := new(RuntimeMessage)
+	if err := x.ClientStream.RecvMsg(m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
 type PluginService interface {
 	Configure(context.Context, *ConfigureRequest) (*ConfigureResponse, error)
 	Synchronize(context.Context, *SynchronizeRequest) (*SynchronizeResponse, error)
