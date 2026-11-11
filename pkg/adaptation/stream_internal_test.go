@@ -25,6 +25,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -69,6 +70,121 @@ func (s *blockingStreamServer) RecvMsg(interface{}) error {
 	return nil
 }
 
+// scriptedStreamServer hands the reader one message of the test's choosing
+// and reports what the stream looked like when the reader came back for the
+// next one.
+type scriptedStreamServer struct {
+	*blockingStreamServer
+
+	// ready holds the first message back until the test has set the stream
+	// up for it, and first is that message.
+	ready chan struct{}
+	first *api.PluginMessage
+
+	// again is called when the reader asks for a second message, which is
+	// what every message's handling has to be finished with by.
+	again func()
+
+	asked int
+	once  sync.Once
+}
+
+func newScriptedStreamServer(first *api.PluginMessage, again func()) *scriptedStreamServer {
+	return &scriptedStreamServer{
+		blockingStreamServer: newBlockingStreamServer(),
+		ready:                make(chan struct{}),
+		first:                first,
+		again:                again,
+	}
+}
+
+func (s *scriptedStreamServer) Recv() (*api.PluginMessage, error) {
+	s.asked++
+
+	if s.asked == 1 {
+		select {
+		case <-s.ready:
+		case <-s.stop:
+			return nil, errors.New("stream server stopped")
+		}
+
+		return s.first, nil
+	}
+
+	s.once.Do(s.again)
+
+	<-s.stop
+
+	return nil, errors.New("stream server stopped")
+}
+
+// TestAStreamPlacesAnUpdateBeforeItReadsAgain pins where the apply of an
+// unsolicited update is attached: in the reader, before the next message
+// comes off the wire.
+//
+// The reader is the only thing that can move the set of requests a plugin
+// owes an answer on, because a reply to one of them travels behind the
+// update on the one stream. Attached later, on the goroutine that answers
+// the update, the reply to the very request the update was placed below can
+// be read first, that request can reach its apply, and the update then
+// applies beside it rather than before it.
+func TestAStreamPlacesAnUpdateBeforeItReadsAgain(t *testing.T) {
+	applying := make(chan struct{})
+	defer close(applying)
+
+	// Held open, so the update's apply is still attached when the reader
+	// comes back rather than attached, run and gone.
+	r := &Adaptation{
+		updateFn: func(context.Context, []*ContainerUpdate) ([]*ContainerUpdate, error) {
+			<-applying
+
+			return nil, nil
+		},
+	}
+
+	placed := make(chan int, 1)
+
+	srv := newScriptedStreamServer(&api.PluginMessage{
+		Seq: 1,
+		Msg: &api.PluginMessage_UpdateContainersRequest{
+			UpdateContainersRequest: &api.UpdateContainersRequest{
+				Update: []*api.ContainerUpdate{{ContainerId: "unsolicited"}},
+			},
+		},
+	}, func() { placed <- r.applies.attachments(1) })
+	defer close(srv.stop)
+
+	s := newPluginStream(&plugin{r: r}, srv)
+	s.arm(1)
+
+	go func() { _ = s.run(context.Background()) }()
+
+	ctx, cancel := context.WithCancel(withSeq(context.Background(), 1))
+	defer cancel()
+
+	go func() { _, _ = s.call(ctx, &api.RuntimeMessage{}) }()
+
+	// The first number is dispatched and unanswered before the update is
+	// read, which is what gives the update a place to be attached below.
+	select {
+	case <-srv.sent:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the request never reached the wire")
+	}
+
+	require.Equal(t, 1, s.tracking(), "the stream is not tracking the call")
+
+	close(srv.ready)
+
+	select {
+	case attached := <-placed:
+		require.Equal(t, 1, attached,
+			"the reader read on with the update's apply unattached")
+	case <-time.After(10 * time.Second):
+		t.Fatal("the reader never came back for another message")
+	}
+}
+
 // TestAnAbandonedCallLeavesNothingBehind pins that a caller which gives up
 // takes its pending entry with it.
 //
@@ -101,7 +217,7 @@ func TestAnAbandonedCallLeavesNothingBehind(t *testing.T) {
 		t.Fatal("the request never reached the wire")
 	}
 
-	require.Equal(t, 1, s.owed(), "the stream is not tracking the call")
+	require.Equal(t, 1, s.tracking(), "the stream is not tracking the call")
 
 	cancel()
 
@@ -112,7 +228,101 @@ func TestAnAbandonedCallLeavesNothingBehind(t *testing.T) {
 		t.Fatal("the call outlived its context")
 	}
 
-	require.Zero(t, s.owed(), "a call its caller gave up on left its entry behind")
+	require.Zero(t, s.tracking(), "a call its caller gave up on left its entry behind")
+}
+
+// TestWhatAStreamSaysItsPluginOwes pins the owed set an unsolicited update
+// is placed against: the lowest number this plugin has been dispatched a
+// request for and not answered.
+//
+// A call with no number is not one of them. A validator's is not a decision
+// to be ordered, and a call made before the plugin joined the live list has
+// no place in the order either, so neither is anything an update could be
+// ordered against.
+func TestWhatAStreamSaysItsPluginOwes(t *testing.T) {
+	srv := newBlockingStreamServer()
+	defer close(srv.stop)
+
+	s := newPluginStream(&plugin{}, srv)
+	s.arm(1)
+
+	go func() { _ = s.run(context.Background()) }()
+
+	// The entry is written before the message goes on the wire, so one the
+	// server has taken is one the stream is already tracking.
+	sent := func() {
+		t.Helper()
+
+		select {
+		case <-srv.sent:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the request never reached the wire")
+		}
+	}
+
+	first, giveUp := context.WithCancel(withSeq(context.Background(), 1))
+	defer giveUp()
+
+	go func() { _, _ = s.call(first, &api.RuntimeMessage{}) }()
+	sent()
+
+	second := withSeq(context.Background(), 2)
+
+	go func() { _, _ = s.call(second, &api.RuntimeMessage{}) }()
+	sent()
+
+	go func() { _, _ = s.call(context.Background(), &api.RuntimeMessage{}) }()
+	sent()
+
+	at, owed := s.lowestOwed()
+	require.True(t, owed, "the stream says its plugin owes nothing")
+	require.Equal(t, seqNo(1), at, "the lowest owed number is not the lowest")
+
+	giveUp()
+
+	require.Eventually(t, func() bool { return s.tracking() == 2 }, 10*time.Second,
+		time.Millisecond, "a call its caller gave up on left its entry behind")
+
+	at, owed = s.lowestOwed()
+	require.True(t, owed, "the stream says its plugin owes nothing")
+	require.Equal(t, seqNo(2), at,
+		"a call its caller gave up on is still owed an answer")
+}
+
+// TestACallWaitingForItsTurnIsAlreadyOwed pins what the owed set means: a
+// number this plugin is going to be asked about, rather than one the writer
+// has already picked up.
+//
+// An unsolicited update is placed below the lowest number its plugin owes
+// an answer on. A request that has taken its number and is still waiting
+// for its turn is one the plugin has not seen yet, so its answer is a
+// decision the plugin makes after the update; placed above it, the update
+// applies second and overwrites the answer to it.
+func TestACallWaitingForItsTurnIsAlreadyOwed(t *testing.T) {
+	srv := newBlockingStreamServer()
+	defer close(srv.stop)
+
+	s := newPluginStream(&plugin{}, srv)
+	s.arm(1)
+
+	go func() { _ = s.run(context.Background()) }()
+
+	// A number of its own, behind two this plugin is not being asked about
+	// and which nothing has announced yet, so the call waits for its turn.
+	ctx := withSeq(context.Background(), 3)
+
+	go func() { _, _ = s.call(ctx, &api.RuntimeMessage{}) }()
+
+	require.Eventually(t, func() bool {
+		at, owed := s.lowestOwed()
+
+		return owed && at == 3
+	}, 10*time.Second, time.Millisecond,
+		"a numbered call waiting for its turn is owed no answer")
+
+	// Owed while waiting for a turn, which is the whole claim: a call the
+	// writer had picked up would be owed either way.
+	require.Empty(t, srv.sent, "the call was written before its turn")
 }
 
 // TestADrainedPluginStreamTakesNoFurtherEntry and the test after it are
@@ -138,7 +348,7 @@ func TestADrainedPluginStreamTakesNoFurtherEntry(t *testing.T) {
 
 	s.number(c)
 
-	require.Zero(t, s.owed(), "a drained stream took an entry nothing can answer")
+	require.Zero(t, s.tracking(), "a drained stream took an entry nothing can answer")
 	require.NotZero(t, c.msg.GetSeq(), "the request went out without a number")
 }
 
@@ -235,8 +445,8 @@ func TestEveryPluginRequestHasAnAnswer(t *testing.T) {
 	require.NotZero(t, checked, "PluginMessage has no request arms")
 }
 
-// owed is how many answers this stream is still waiting for.
-func (s *pluginStream) owed() int {
+// tracking is how many replies this stream still has an entry waiting for.
+func (s *pluginStream) tracking() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

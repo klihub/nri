@@ -17,7 +17,6 @@
 package adaptation
 
 import (
-	"errors"
 	"math/rand"
 	"sync"
 	"testing"
@@ -25,6 +24,18 @@ import (
 
 	"github.com/stretchr/testify/require"
 )
+
+// newGate returns a gate whose first number is first.
+//
+// A gate in production is a field of what orders by it, armed with the
+// number its plugin was listed at or left to start at the sequencer's
+// first; a test says which number it starts at instead.
+func newGate(first seqNo) *gate {
+	g := &gate{}
+	g.init(first)
+
+	return g
+}
 
 func TestGateRunsInSequenceOrder(t *testing.T) {
 	// Arriving out of order is the normal case: requests take their number
@@ -100,7 +111,7 @@ func TestGateSkipsAHole(t *testing.T) {
 	require.Equal(t, []seqNo{1, 3}, order)
 }
 
-func TestGateAbandonDoesNotStall(t *testing.T) {
+func TestGateSkipsANumberNobodyWaitsFor(t *testing.T) {
 	// A caller whose context ended before its turn must not leave the gate
 	// waiting on it for good.
 	var (
@@ -115,13 +126,175 @@ func TestGateAbandonDoesNotStall(t *testing.T) {
 		close(done)
 	}()
 
-	g.abandon(2)
+	g.skip(2)
 
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the number after an abandoned one never got its turn")
 	}
+}
+
+func TestGateServesEachNumberOnce(t *testing.T) {
+	// A walk announces every number it reaches with g.mu released, and while
+	// it is there that number looks like one whose turn has come and which
+	// nothing has handed on. A skip of it then would announce it a second
+	// time and hand the order on from under the walk: two walks from one
+	// position, and the one that lags hands the order to a number the other
+	// has already passed, which is want going backwards.
+	//
+	// A second skip of one number is ordinary rather than hypothetical:
+	// every request announces its number once it is done with it, whether it
+	// had a turn or not.
+	var (
+		g        = newGate(1)
+		mu       sync.Mutex
+		order    []seqNo
+		ran      int
+		released bool
+		start    = make(chan struct{})
+		ack      = make(chan struct{})
+		wg       sync.WaitGroup
+	)
+
+	g.onServed(func(s seqNo) {
+		mu.Lock()
+		order = append(order, s)
+		release := s == 2 && !released
+		released = released || release
+		mu.Unlock()
+
+		if !release {
+			return
+		}
+
+		// The second skip of 2 runs here, which is the gate serving that
+		// number with its lock released.
+		close(start)
+		<-ack
+	})
+
+	// Parked, so 2 is a number with work of its own: the walk announces it
+	// and only then lets that work go.
+	wg.Add(1)
+
+	go func() {
+		defer wg.Done()
+
+		g.run(2, func() {
+			mu.Lock()
+			ran++
+			mu.Unlock()
+		})
+	}()
+
+	require.Eventually(t, func() bool { return g.parked(2) }, 10*time.Second,
+		time.Millisecond, "nothing ever waited for the second number")
+
+	wg.Add(1)
+
+	go func() {
+		defer wg.Done()
+
+		<-start
+		g.skip(2)
+		close(ack)
+	}()
+
+	g.skip(1)
+
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	require.Equal(t, []seqNo{1, 2, 3}, order, "the gate served a number twice")
+	require.Equal(t, 1, ran, "the work of one number ran more than once")
+}
+
+func TestGateNeverTakesTheOrderBackwards(t *testing.T) {
+	// A number is announced with g.mu released, and the walk that is on it
+	// comes back to hand it on. A turn taken at that number in between
+	// leaves the walk stale: it then hands the order on from a number the
+	// turn's own walk has already passed, so the number the gate wants moves
+	// backwards and the numbers in between are served a second time. One
+	// number is one walk's to hand on.
+	var (
+		g      = newGate(1)
+		mu     sync.Mutex
+		order  []seqNo
+		wanted []seqNo
+		taken  bool
+		inWork = make(chan struct{})
+		walked = make(chan struct{})
+		wg     sync.WaitGroup
+	)
+
+	// Holes at the third and the fourth number, so the walk that leaves the
+	// second behind reaches the fifth -- above where a turn taken at the
+	// second leaves the order.
+	g.skip(3)
+	g.skip(4)
+
+	g.onServed(func(s seqNo) {
+		want := g.wanted()
+
+		mu.Lock()
+		order = append(order, s)
+		wanted = append(wanted, want)
+		take := s == 2 && !taken
+		taken = taken || take
+		mu.Unlock()
+
+		if !take {
+			return
+		}
+
+		// Both of these fall while the gate is serving the second number:
+		// the skip is left as a hole for the walk, and the turn is one the
+		// walk has yet to hand on.
+		g.skip(2)
+
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			g.run(2, func() {
+				close(inWork)
+				<-walked
+			})
+		}()
+
+		// The turn either waits for the walk to hand it on, or is taken
+		// from under the walk.
+		require.Eventually(t, func() bool {
+			select {
+			case <-inWork:
+				return true
+			default:
+			}
+
+			return g.parked(2)
+		}, 10*time.Second, time.Millisecond,
+			"nothing ever asked for the second number")
+	})
+
+	g.skip(1)
+
+	close(walked)
+
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	for i := 1; i < len(wanted); i++ {
+		require.LessOrEqual(t, wanted[i-1], wanted[i],
+			"the number the gate wants went backwards")
+	}
+
+	require.Equal(t, []seqNo{1, 2, 3, 4, 5}, order, "the gate served a number twice")
 }
 
 func TestGateCloseReleasesParked(t *testing.T) {
@@ -138,7 +311,7 @@ func TestGateCloseReleasesParked(t *testing.T) {
 		close(done)
 	}()
 
-	g.close(errors.New("stream gone"))
+	g.close()
 
 	<-done
 
@@ -147,12 +320,104 @@ func TestGateCloseReleasesParked(t *testing.T) {
 
 func TestGateRunAfterCloseReturns(t *testing.T) {
 	g := newGate(1)
-	g.close(errors.New("stream gone"))
+	g.close()
 
 	ran := false
 	g.run(1, func() { ran = true })
 
 	require.False(t, ran, "work ran on a closed gate")
+}
+
+func TestGateHandsOnANumberSkippedWhileServed(t *testing.T) {
+	// The number a walk is in the middle of is left for the walk to hand
+	// on rather than served again, so the skip of it has to be remembered:
+	// the request announcing a number it will never reach has no turn of
+	// its own to be found waiting in, and announces that number once. A
+	// number nothing announces again is one the order stops dead at.
+	var (
+		g        = newGate(1)
+		mu       sync.Mutex
+		order    []seqNo
+		released bool
+		start    = make(chan struct{})
+		ack      = make(chan struct{})
+		third    = make(chan struct{})
+		wg       sync.WaitGroup
+	)
+
+	g.onServed(func(s seqNo) {
+		mu.Lock()
+		order = append(order, s)
+		release := s == 2 && !released
+		released = released || release
+		mu.Unlock()
+
+		if !release {
+			return
+		}
+
+		close(start)
+		<-ack
+	})
+
+	// Parked at 3 rather than at 2, so 2 is a number the walk reaches with
+	// nothing waiting at it, which is what the skip of it races.
+	wg.Add(1)
+
+	go func() {
+		defer wg.Done()
+
+		g.run(3, func() { close(third) })
+	}()
+
+	require.Eventually(t, func() bool { return g.parked(3) }, 10*time.Second,
+		time.Millisecond, "nothing ever waited for the third number")
+
+	wg.Add(1)
+
+	go func() {
+		defer wg.Done()
+
+		<-start
+		g.skip(2)
+		close(ack)
+	}()
+
+	g.skip(1)
+
+	select {
+	case <-third:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the order stopped at a number skipped while it was served")
+	}
+
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	// The fourth number is the one the third's own work hands the order to,
+	// and nothing waits there.
+	require.Equal(t, []seqNo{1, 2, 3, 4}, order,
+		"the gate served a number twice")
+}
+
+// wanted returns the number whose turn it is.
+func (g *gate) wanted() seqNo {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	return g.want
+}
+
+// parked reports whether anything is waiting for seq's turn.
+func (g *gate) parked(seq seqNo) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	_, ok := g.waiter[seq]
+
+	return ok
 }
 
 func TestSequencerAllocatesDistinctNumbers(t *testing.T) {

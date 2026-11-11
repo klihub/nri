@@ -52,7 +52,31 @@ type SyncFn func(context.Context, SyncCB) error
 // SyncCB is an NRI function used to synchronize plugins with the runtime.
 type SyncCB func(context.Context, []*PodSandbox, []*Container) ([]*ContainerUpdate, error)
 
-// UpdateFn is a container runtime function for unsolicited container updates.
+// UpdateFn is a container runtime function for unsolicited container
+// updates.
+//
+// An update from a plugin on an event stream applies in the place in the
+// order its plugin decided it, so this runs wherever the order reaches that
+// place: on another request's goroutine where that request brings the order
+// to the place, and on the goroutine the stream reader answers the update
+// on where the order is at the place already. Two rules it is held to,
+// because the order runs across it:
+//
+//   - it must not call back into Adaptation. A nested request takes a later
+//     number and waits for a turn that cannot come until this returns, and
+//     that wait honours no deadline.
+//   - it must not block on a lock a CRI caller can hold while that caller
+//     is inside NRI. Neither side has a deadline, so each waits out the
+//     other for good.
+//
+// Stop waits behind this on the first of those two goroutines: it runs
+// there inside the order with Adaptation's lock held for reading, and the
+// write lock Stop takes queues behind that read lock. On the other it holds
+// no lock of Adaptation's, and what holds Stop off is the request whose
+// number the update was placed below -- which for an otherwise idle
+// plugin's update is a number nobody has taken, so there is no such
+// request. A runtime that tears state down in Stop has to exclude this
+// itself.
 type UpdateFn func(context.Context, []*ContainerUpdate) ([]*ContainerUpdate, error)
 
 // Adaptation is the NRI abstraction for container runtime NRI adaptation/integration.
@@ -242,6 +266,17 @@ func (r *Adaptation) Stop() {
 	r.Lock()
 	defer r.Unlock()
 
+	// The order ends before what it orders does. An apply still waiting
+	// for a turn does not get one: it would change containers the runtime
+	// no longer looks after, and an update waiting here is answered with
+	// why rather than dropped, because its plugin is waiting for that
+	// answer. Closed first, so nothing applies while the plugins are
+	// being stopped. The write lock keeps every request out of the order
+	// for the duration, but not a placed update the order had already
+	// reached: that one drains on its plugin's stream holding no lock of
+	// this runtime, so it can still be inside its UpdateFn here.
+	r.applies.close()
+
 	r.stopListener()
 	r.stopPlugins()
 }
@@ -362,17 +397,18 @@ func (r *Adaptation) enter(ctx context.Context) (context.Context, seqNo) {
 // number a consumer has already served is ignored, so this needs to know
 // nothing about where the request actually got to.
 //
-// The caller holds the lock for reading, so the plugin list is stable. A
-// request cannot take it again here: Go's RWMutex does not allow a reader
-// to lock recursively.
+// The caller holds the lock for reading, so the plugin list is stable, and
+// nothing here takes it again: a second RLock blocks while a writer is
+// waiting for the first one, and the writer waits for a reader that is
+// blocked on it.
+//
+// The plugin list is the whole of it. Every validator is on it as well:
+// r.validators is rebuilt from r.plugins whenever either changes, so it
+// holds nothing the sweep above has not already announced to.
 func (r *Adaptation) releaseOrderLocked(seq seqNo) {
 	r.applies.release(seq)
 
 	for _, p := range r.plugins {
-		p.impl.releaseOrder(seq)
-	}
-
-	for _, p := range r.validators {
 		p.impl.releaseOrder(seq)
 	}
 }
@@ -402,11 +438,16 @@ func (r *Adaptation) releaseOrderLocked(seq seqNo) {
 //     a deadlock which also blocks Stop, since it takes the write lock
 //     behind the parked reader. A runtime whose apply evicts or updates
 //     containers has to reach its own state directly, not through NRI.
-//   - UpdateContainers from a plugin is not ordered against the request it
-//     follows. It applies as it arrives, so a plugin that answers a request
-//     and then asks for a further update of the same container can have the
-//     answer land after the update. Ordering it would deadlock a plugin
-//     that asks from inside a handler.
+//
+//   - UpdateContainers from a plugin on an event stream applies in the
+//     order that plugin decided it. A plugin's successive decisions take
+//     effect in the order it made them, so a plugin that answers a request
+//     and then asks for a further update of the same container has the
+//     answer applied first. An update asked for from inside a handler
+//     cannot deadlock: it is placed below everything its plugin owes an
+//     answer on, so it never waits on the handler that is waiting for it.
+//     A request counts as owed from the moment it takes its number, so one
+//     the plugin has not been handed yet counts too.
 func (r *Adaptation) CreateContainerAndApply(ctx context.Context, req *CreateContainerRequest,
 	apply func(*CreateContainerResponse) error) error {
 	defer r.removeClosed()
@@ -451,7 +492,7 @@ func (r *Adaptation) CreateContainerAndApply(ctx context.Context, req *CreateCon
 	}
 
 	if apply == nil {
-		r.applies.skip(seq)
+		r.applies.release(seq)
 
 		return nil
 	}
@@ -545,7 +586,7 @@ func (r *Adaptation) UpdateContainerAndApply(ctx context.Context, req *UpdateCon
 	}
 
 	if apply == nil {
-		r.applies.skip(seq)
+		r.applies.release(seq)
 
 		return nil
 	}
@@ -601,7 +642,7 @@ func (r *Adaptation) StopContainerAndApply(ctx context.Context, req *StopContain
 	}
 
 	if apply == nil {
-		r.applies.skip(seq)
+		r.applies.release(seq)
 
 		return nil
 	}
@@ -631,9 +672,95 @@ func (r *Adaptation) RemoveContainer(ctx context.Context, req *RemoveContainerRe
 	return nil
 }
 
-// Perform a set of unsolicited container updates requested by a plugin.
+// Perform a set of unsolicited container updates requested by a plugin, in
+// the place in the order its plugin decided them.
+//
+// A plugin on an event stream says everything it has to say on one ordered
+// channel, so its decisions are in an order the runtime can read rather
+// than infer, and this is where that order is put into practice. A plugin
+// on unary calls gets no place and applies as it arrives: an out-of-band
+// call carries no position, and there is nothing to read.
 func (r *Adaptation) updateContainers(ctx context.Context, req []*ContainerUpdate) ([]*ContainerUpdate, error) {
+	// The place carries the update it was given to, so a plugin that has
+	// one is answered from there rather than from req.
+	if placed, ok := placedUpdateFrom(ctx); ok {
+		return placed.apply(ctx)
+	}
+
 	return r.updateFn(ctx, req)
+}
+
+// placedUpdate is a plugin's unsolicited update with its place in the order
+// taken.
+//
+// Taking the place and applying there are two steps because they happen in
+// two places: the stream reader takes the place, since the set of numbers
+// the place is read from is the reader's own to move, and the apply waits
+// for its turn, which the reader must not do.
+type placedUpdate struct {
+	r   *Adaptation
+	req []*ContainerUpdate
+
+	// at is the number the apply is attached below, and held is the
+	// attachment. The update takes no number of its own either way, so it
+	// announces nothing to anyone.
+	at   seqNo
+	held *attachment
+
+	// failed is what the runtime could not apply, written by the apply and
+	// read once it has run.
+	failed []*ContainerUpdate
+}
+
+// placeUpdate gives req the place its plugin's decisions put it in: below
+// the lowest number its plugin owes an answer on, and below the number
+// nobody has taken yet when it owes none.
+//
+// Called by the stream reader, and waits for nothing.
+func (r *Adaptation) placeUpdate(ctx context.Context, req []*ContainerUpdate, at seqNo, owed bool) *placedUpdate {
+	placed := &placedUpdate{r: r, req: req, at: at}
+
+	// A number its plugin owes an answer on cannot have been served,
+	// because that number's apply needs the answer this plugin has not
+	// sent.
+	if owed {
+		placed.held = r.applies.placeAt(at, placed.update(ctx))
+
+		return placed
+	}
+
+	// The number nobody has taken yet is after every request already
+	// numbered -- so after every decision of this plugin that is in the
+	// order -- and before every request numbered later, because the
+	// request that takes it runs what is attached below it first.
+	//
+	// Attached with the sequencer held, so that no request can take that
+	// number in between and reach its apply before this is attached.
+	r.seq.placeNext(func(next seqNo) {
+		placed.at = next
+		placed.held = r.applies.placeAt(next, placed.update(ctx))
+	})
+
+	return placed
+}
+
+// update is the apply itself, which is the runtime's own update function.
+func (u *placedUpdate) update(ctx context.Context) func() error {
+	return func() error {
+		var err error
+
+		u.failed, err = u.r.updateFn(ctx, u.req)
+
+		return err
+	}
+}
+
+// apply puts the update into practice in the place it was given, and
+// returns what the runtime could not apply.
+func (u *placedUpdate) apply(ctx context.Context) ([]*ContainerUpdate, error) {
+	err := u.r.applies.awaitAt(ctx, u.at, u.held)
+
+	return u.failed, err
 }
 
 // Validate requested container adjustments.

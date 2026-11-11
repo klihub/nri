@@ -752,10 +752,11 @@ func TestApplyErrorDoesNotStallTheOrder(t *testing.T) {
 
 func TestUnsolicitedUpdateFromHandlerDoesNotDeadlock(t *testing.T) {
 	// A plugin may ask for container updates of its own while it is still
-	// answering a request. That path takes no place in the apply order, and
-	// both runtime integrations rely on it: one that gives it a turn behind
-	// the request in flight deadlocks, because the request will not hand
-	// the order on until the plugin has answered.
+	// answering a request, and both runtime integrations rely on it. The
+	// update is placed below everything its plugin owes an answer on, so it
+	// never waits on the request in flight: one that gave it a turn behind
+	// that request would deadlock, because the request does not hand the
+	// order on until the plugin has answered.
 	rig := startRig(t, 1, func(*api.Container) time.Duration { return 0 })
 
 	applied := make(chan []*nri.ContainerUpdate, 1)
@@ -789,6 +790,149 @@ func TestUnsolicitedUpdateFromHandlerDoesNotDeadlock(t *testing.T) {
 	default:
 		t.Fatal("the unsolicited update never reached the runtime")
 	}
+}
+
+func TestAnUpdateFromAnIdlePluginTakesTheNextTurn(t *testing.T) {
+	// A plugin that owes no answer has nothing to place its update below,
+	// so the update goes below the number nobody has taken yet. Its turn
+	// still has to come and still has to be handed on: an update that
+	// waited for a turn that never came, or kept the order waiting after
+	// it, would show up as the next request never reaching the plugin.
+	rig := startRig(t, 1, fixedDelay(0))
+
+	// Recorded rather than asserted here, because this runs on whichever
+	// goroutine brought the order to the update's turn.
+	applied := make(chan []string, 1)
+	rig.update = func(_ context.Context, u []*nri.ContainerUpdate) ([]*nri.ContainerUpdate, error) {
+		ids := make([]string, 0, len(u))
+		for _, update := range u {
+			ids = append(ids, update.GetContainerId())
+		}
+
+		applied <- ids
+
+		return nil, nil
+	}
+
+	_, err := rig.plugins[0].stub.UpdateContainers(context.Background(),
+		[]*api.ContainerUpdate{{ContainerId: "idle"}})
+	require.NoError(t, err, "an update from an idle plugin was refused")
+
+	select {
+	case ids := <-applied:
+		require.Equal(t, []string{"idle"}, ids)
+	default:
+		t.Fatal("the update never reached the runtime")
+	}
+
+	done := make(chan error, 1)
+
+	go func() {
+		done <- rig.runtime.CreateContainerAndApply(context.Background(),
+			&api.CreateContainerRequest{Pod: pod(), Container: container(0)},
+			func(*api.CreateContainerResponse) error { return nil })
+	}()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the request after an idle plugin's update never got its turn")
+	}
+
+	require.Equal(t, []string{container(0).Id}, rig.plugins[0].Seen(),
+		"the request after an idle plugin's update never reached it")
+}
+
+func TestAnUpdateAppliesBeforeTheRequestItsPluginStillOwes(t *testing.T) {
+	// The first plugin asks for an unsolicited update from inside each of
+	// its two CreateContainer handlers, so its decisions are an update, A,
+	// an update, B. The applies have to land in that same order: the
+	// update asked for from B's handler was decided after A was answered
+	// and before B was, so it belongs between their applies.
+	//
+	// Applying an update as it arrives gives update, update, A, B instead,
+	// and the decision A superseded wins.
+	//
+	// Two plugins, because what has to be arranged is an update that
+	// arrives while the apply of an earlier decision of its own plugin is
+	// still outstanding. The first plugin answers A and takes B while
+	// request A is still waiting for the second plugin's answer.
+	//
+	// Recorded from inside each apply, so what is compared is the order
+	// the applied sections ran in.
+	const slow = 300 * time.Millisecond
+
+	delay := func(ctr *api.Container) time.Duration {
+		if ctr.Id == container(0).Id {
+			return slow
+		}
+
+		return 0
+	}
+
+	rig := startRig(t, 2, delay)
+	rig.plugins[0].updateFromHandler.Store(true)
+
+	var (
+		mu       sync.Mutex
+		applied  []string
+		wg       sync.WaitGroup
+		recorded = func(what string) {
+			mu.Lock()
+			defer mu.Unlock()
+			applied = append(applied, what)
+		}
+	)
+
+	// Recorded rather than asserted here, because this runs on whichever
+	// goroutine brought the order to the update's turn. An update carrying
+	// anything but the one container shows up as an extra record.
+	rig.update = func(_ context.Context, u []*nri.ContainerUpdate) ([]*nri.ContainerUpdate, error) {
+		for _, update := range u {
+			recorded(update.GetContainerId())
+		}
+
+		return nil, nil
+	}
+
+	create := func(ctr *api.Container) {
+		defer wg.Done()
+
+		err := rig.runtime.CreateContainerAndApply(context.Background(),
+			&api.CreateContainerRequest{Pod: pod(), Container: ctr},
+			func(*api.CreateContainerResponse) error {
+				recorded(ctr.Id)
+
+				return nil
+			})
+		if err != nil {
+			t.Errorf("CreateContainerAndApply %s: %v", ctr.Id, err)
+		}
+	}
+
+	wg.Add(1)
+	go create(container(0))
+
+	// B is issued once A has been dispatched, so A is the lower number of
+	// the two and the plugin's decisions are in the order the test wants
+	// them rather than the order the scheduler picked.
+	waitForObserved(t, rig.plugins[0], 1)
+
+	wg.Add(1)
+	go create(container(1))
+
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	require.Equal(t,
+		[]string{
+			"unsolicited", container(0).Id,
+			"unsolicited", container(1).Id,
+		}, applied,
+		"a plugin's decisions were applied out of the order it made them")
 }
 
 func TestAFailedRequestReleasesItsNumber(t *testing.T) {

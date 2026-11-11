@@ -74,6 +74,14 @@ type streamCall struct {
 	// the entry from being made at all.
 	id        uint64
 	abandoned bool
+
+	// Where in the order this call's request stands, and whether it stands
+	// anywhere. forgiven says its number has been taken out of the owed
+	// set, which happens once however the call ends. All three are read and
+	// written under pluginStream.mu.
+	seq      seqNo
+	ordered  bool
+	forgiven bool
 }
 
 // pluginStream is one plugin's event stream.
@@ -97,6 +105,14 @@ type pluginStream struct {
 	pending map[uint64]*streamCall
 	err     error
 
+	// owed is the numbers this plugin is going to be asked about and has
+	// not answered, counted so that nothing one call does to it is undone
+	// by another. What an unsolicited update is placed against is the
+	// lowest of them, so the correlation id pending is keyed by does not
+	// serve: it tells one reply from another and says nothing about the
+	// order.
+	owed map[seqNo]int
+
 	// closing says the stream has ended and its pending entries have been
 	// closed, so no further entry is made for anything to wait on.
 	closing bool
@@ -118,6 +134,7 @@ func newPluginStream(p *plugin, srv api.StreamingRuntime_StartEventStreamServer)
 		responses: make(chan *api.RuntimeMessage),
 		order:     &gate{},
 		pending:   make(map[uint64]*streamCall),
+		owed:      make(map[seqNo]int),
 		done:      make(chan struct{}),
 	}
 }
@@ -216,13 +233,22 @@ func (s *pluginStream) read(ctx context.Context) {
 		// sequence namespace, so it answers nothing of ours and is not
 		// looked for among the requests waiting for a reply.
 		if isPluginRequest(rpl) {
-			s.handle(ctx, rpl)
+			s.handle(s.placed(ctx, rpl), rpl)
 			continue
 		}
 
+		// The owed entry goes in the same critical section as the pending
+		// one, and both before the reader asks for the next message: an
+		// update read after this reply is placed against a set this
+		// request has already left, because the plugin answered it before
+		// it decided that update.
 		s.mu.Lock()
 		c, ok := s.pending[rpl.GetSeq()]
 		delete(s.pending, rpl.GetSeq())
+
+		if ok {
+			s.forgiveLocked(c)
+		}
 		s.mu.Unlock()
 
 		if !ok {
@@ -235,6 +261,108 @@ func (s *pluginStream) read(ctx context.Context) {
 		// Buffered, so a caller that has given up cannot block the reader.
 		c.reply <- rpl
 	}
+}
+
+// lowestOwed returns the lowest number this plugin has been dispatched a
+// request for and not answered, and whether there is one.
+func (s *pluginStream) lowestOwed() (seqNo, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// The set is honest because a call joins it before it waits for a turn
+	// and leaves it however it ends, so what is still here is what the
+	// plugin is still going to be asked about.
+	var (
+		lowest seqNo
+		owed   bool
+	)
+
+	for seq := range s.owed {
+		if !owed || seq < lowest {
+			lowest, owed = seq, true
+		}
+	}
+
+	return lowest, owed
+}
+
+// owe records that this plugin is going to be asked about c's number.
+func (s *pluginStream) owe(c *streamCall) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Recorded as the call takes its number rather than as the writer picks
+	// it up: a call waiting for its turn is one the plugin has not seen, so
+	// its answer is a decision the plugin makes after an update it sends
+	// now, and an update placed above it would apply second and overwrite
+	// that answer.
+	if s.owed == nil {
+		s.owed = make(map[seqNo]int)
+	}
+
+	s.owed[c.seq]++
+}
+
+// forgive takes c's number out of the owed set.
+func (s *pluginStream) forgive(c *streamCall) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.forgiveLocked(c)
+}
+
+// forgiveLocked takes c's number out of the owed set, for a caller holding
+// s.mu.
+func (s *pluginStream) forgiveLocked(c *streamCall) {
+	// Once, however the call ends: the reader forgives a call as it takes
+	// the reply, and the call itself forgives the ways that reach no reply.
+	// Both run, and the second has to leave the set alone.
+	if !c.ordered || c.forgiven {
+		return
+	}
+
+	c.forgiven = true
+
+	if s.owed[c.seq] <= 1 {
+		delete(s.owed, c.seq)
+
+		return
+	}
+
+	s.owed[c.seq]--
+}
+
+// placed returns ctx carrying the place msg takes in the order, for the one
+// request of a plugin's own that has a place in it: an unsolicited update.
+//
+// Must be called in the reader, before the next message comes off the wire.
+func (s *pluginStream) placed(ctx context.Context, msg *api.PluginMessage) context.Context {
+	m, ok := msg.GetMsg().(*api.PluginMessage_UpdateContainersRequest)
+	if !ok {
+		return ctx
+	}
+
+	// The reader is the only thing that moves the set of requests this
+	// plugin owes an answer on, because a reply to one of them travels
+	// behind the update on the one stream -- so the set as the reader reads
+	// the update is the set the plugin had as it sent the update, and the
+	// apply attached to it cannot be attached below a number whose own
+	// apply has started. Taken on the goroutine that answers the update
+	// instead, the reply to the very request the update was placed below
+	// can be read first, that request can reach its apply, and the update
+	// then apply beside it.
+	//
+	// An unarmed stream has no place to give: nothing is dispatched to a
+	// plugin before it joins the live list, so it has made no decision that
+	// is in the order and its update is ordered against nothing.
+	if !s.order.isArmed() {
+		return ctx
+	}
+
+	at, owed := s.lowestOwed()
+
+	return withPlacedUpdate(ctx,
+		s.p.r.placeUpdate(ctx, m.UpdateContainersRequest.GetUpdate(), at, owed))
 }
 
 // arm starts ordering this stream at first.
@@ -265,7 +393,7 @@ func (s *pluginStream) shutdown(err error) {
 
 		// Releases whatever is still waiting for a turn, so a plugin that
 		// dies mid-burst does not strand the requests behind it.
-		s.order.close(err)
+		s.order.close()
 
 		// A closed reply channel is how a waiter learns the stream is gone.
 		for _, c := range pending {
@@ -294,11 +422,21 @@ func (s *pluginStream) call(ctx context.Context, msg *api.RuntimeMessage) (*api.
 	}
 
 	seq, ordered := seqFrom(ctx)
+	ordered = ordered && s.order.isArmed()
+	c.seq, c.ordered = seq, ordered
+
+	if ordered {
+		s.owe(c)
+
+		// For every way this call reaches no reply. The reader has already
+		// forgiven the ones that do.
+		defer s.forgive(c)
+	}
 
 	// The turn is over once the message is handed to the writer, not once
 	// the plugin answers: a stream write does not wait for a reply, which
 	// is the whole reason a stream can carry an order a unary call cannot.
-	if ordered && s.order.isArmed() {
+	if ordered {
 		s.order.run(seq, hand)
 	} else {
 		hand()
@@ -367,6 +505,8 @@ func (s *pluginStream) abandon(c *streamCall) {
 
 	c.abandoned = true
 	delete(s.pending, c.id)
+
+	s.forgiveLocked(c)
 }
 
 // closed reports why the stream ended.
