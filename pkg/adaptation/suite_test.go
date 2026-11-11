@@ -246,16 +246,41 @@ func (m *mockRuntime) UpdatePodSandbox(ctx context.Context, req *api.UpdatePodSa
 	return m.runtime.UpdatePodSandbox(ctx, req)
 }
 
+// CreateContainer keeps the response for the caller. The apply callback is
+// how Adaptation lets a runtime put an answer into practice inside the
+// order; a test only wants to look at the answer, so it captures it here
+// and the turn is over.
 func (m *mockRuntime) CreateContainer(ctx context.Context, req *api.CreateContainerRequest) (*api.CreateContainerResponse, error) {
 	b := m.runtime.BlockPluginSync()
 	defer b.Unblock()
-	return m.runtime.CreateContainer(ctx, req)
+
+	var rpl *api.CreateContainerResponse
+
+	err := m.runtime.CreateContainerAndApply(ctx, req,
+		func(resp *api.CreateContainerResponse) error {
+			rpl = resp
+
+			return nil
+		})
+
+	return rpl, err
 }
 
+// UpdateContainer keeps the response for the caller. See CreateContainer.
 func (m *mockRuntime) UpdateContainer(ctx context.Context, req *api.UpdateContainerRequest) (*api.UpdateContainerResponse, error) {
 	b := m.runtime.BlockPluginSync()
 	defer b.Unblock()
-	return m.runtime.UpdateContainer(ctx, req)
+
+	var rpl *api.UpdateContainerResponse
+
+	err := m.runtime.UpdateContainerAndApply(ctx, req,
+		func(resp *api.UpdateContainerResponse) error {
+			rpl = resp
+
+			return nil
+		})
+
+	return rpl, err
 }
 
 func (m *mockRuntime) startStopPodAndContainer(ctx context.Context, pod *api.PodSandbox, ctr *api.Container) error {
@@ -331,10 +356,12 @@ func (m *mockRuntime) startStopPodAndContainer(ctx context.Context, pod *api.Pod
 		return err
 	}
 
-	_, err = m.runtime.StopContainer(ctx, &api.StopContainerRequest{
+	// No apply callback: this caller has no use for the answer, which is
+	// also how it tells the order that its number applies nothing.
+	err = m.runtime.StopContainerAndApply(ctx, &api.StopContainerRequest{
 		Pod:       pod,
 		Container: ctr,
-	})
+	}, nil)
 	if err != nil {
 		return err
 	}

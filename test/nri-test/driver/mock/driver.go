@@ -162,13 +162,14 @@ func (r *Runtime) CreateContainer(ctx context.Context, p *framework.Pod, spec *f
 	var rpl *adaptation.CreateContainerResponse
 
 	err := r.withStablePlugins(func() error {
-		var err error
-		rpl, err = r.adaptation.CreateContainer(ctx, &adaptation.CreateContainerRequest{
+		return r.adaptation.CreateContainerAndApply(ctx, &adaptation.CreateContainerRequest{
 			Pod:       podMessage(parent),
 			Container: containerMessage(c, parent),
-		})
+		}, func(resp *adaptation.CreateContainerResponse) error {
+			rpl = resp
 
-		return err
+			return nil
+		})
 	})
 	if err != nil {
 		return out, fmt.Errorf("mock CreateContainer for %s: %w", c.id, err)
@@ -232,14 +233,15 @@ func (r *Runtime) UpdateContainerResources(ctx context.Context, ctr *framework.C
 	var rpl *adaptation.UpdateContainerResponse
 
 	err = r.withStablePlugins(func() error {
-		var err error
-		rpl, err = r.adaptation.UpdateContainer(ctx, &adaptation.UpdateContainerRequest{
+		return r.adaptation.UpdateContainerAndApply(ctx, &adaptation.UpdateContainerRequest{
 			Pod:            podMessage(p),
 			Container:      containerMessage(c, p),
 			LinuxResources: linuxResources(res),
-		})
+		}, func(resp *adaptation.UpdateContainerResponse) error {
+			rpl = resp
 
-		return err
+			return nil
+		})
 	})
 	if err != nil {
 		return fmt.Errorf("mock UpdateContainer for %s: %w", c.id, err)
@@ -275,13 +277,14 @@ func (r *Runtime) StopContainer(ctx context.Context, ctr *framework.Container) e
 	var rpl *adaptation.StopContainerResponse
 
 	err = r.withStablePlugins(func() error {
-		var err error
-		rpl, err = r.adaptation.StopContainer(ctx, &adaptation.StopContainerRequest{
+		return r.adaptation.StopContainerAndApply(ctx, &adaptation.StopContainerRequest{
 			Pod:       podMessage(p),
 			Container: containerMessage(c, p),
-		})
+		}, func(resp *adaptation.StopContainerResponse) error {
+			rpl = resp
 
-		return err
+			return nil
+		})
 	})
 	if err != nil {
 		return fmt.Errorf("mock StopContainer for %s: %w", c.id, err)

@@ -57,7 +57,12 @@ type UpdateFn func(context.Context, []*ContainerUpdate) ([]*ContainerUpdate, err
 
 // Adaptation is the NRI abstraction for container runtime NRI adaptation/integration.
 type Adaptation struct {
-	sync.Mutex
+	// Held for writing by startup, shutdown and plugin registration, and
+	// for reading by every request, so requests run alongside each other.
+	// The order they are applied in is seq's and applies' job.
+	sync.RWMutex
+	seq         sequencer
+	applies     *applier
 	name        string
 	version     string
 	nriVersion  string
@@ -188,6 +193,7 @@ func New(name, version string, syncFn SyncFn, updateFn UpdateFn, opts ...Option)
 	}
 
 	r := &Adaptation{
+		applies:     newApplier(1),
 		name:        name,
 		version:     version,
 		nriVersion:  nriver.GetFromBuildInfo(),
@@ -243,9 +249,10 @@ func (r *Adaptation) Stop() {
 
 // RunPodSandbox relays the corresponding CRI request to plugins.
 func (r *Adaptation) RunPodSandbox(ctx context.Context, req *RunPodSandboxRequest) error {
-	r.Lock()
-	defer r.Unlock()
-	defer r.removeClosedPlugins()
+	defer r.removeClosed()
+
+	r.RLock()
+	defer r.RUnlock()
 
 	for _, plugin := range r.plugins {
 		if _, err := plugin.runPodSandbox(ctx, req); err != nil {
@@ -258,9 +265,10 @@ func (r *Adaptation) RunPodSandbox(ctx context.Context, req *RunPodSandboxReques
 
 // UpdatePodSandbox relays the corresponding CRI request to plugins.
 func (r *Adaptation) UpdatePodSandbox(ctx context.Context, req *UpdatePodSandboxRequest) (*UpdatePodSandboxResponse, error) {
-	r.Lock()
-	defer r.Unlock()
-	defer r.removeClosedPlugins()
+	defer r.removeClosed()
+
+	r.RLock()
+	defer r.RUnlock()
 
 	for _, plugin := range r.plugins {
 		_, err := plugin.updatePodSandbox(ctx, req)
@@ -274,9 +282,10 @@ func (r *Adaptation) UpdatePodSandbox(ctx context.Context, req *UpdatePodSandbox
 
 // PostUpdatePodSandbox relays the corresponding CRI request to plugins.
 func (r *Adaptation) PostUpdatePodSandbox(ctx context.Context, req *PostUpdatePodSandboxRequest) error {
-	r.Lock()
-	defer r.Unlock()
-	defer r.removeClosedPlugins()
+	defer r.removeClosed()
+
+	r.RLock()
+	defer r.RUnlock()
 
 	for _, plugin := range r.plugins {
 		_, err := plugin.postUpdatePodSandbox(ctx, req)
@@ -290,9 +299,10 @@ func (r *Adaptation) PostUpdatePodSandbox(ctx context.Context, req *PostUpdatePo
 
 // StopPodSandbox relays the corresponding CRI request to plugins.
 func (r *Adaptation) StopPodSandbox(ctx context.Context, req *StopPodSandboxRequest) error {
-	r.Lock()
-	defer r.Unlock()
-	defer r.removeClosedPlugins()
+	defer r.removeClosed()
+
+	r.RLock()
+	defer r.RUnlock()
 
 	for _, plugin := range r.plugins {
 		_, err := plugin.stopPodSandbox(ctx, req)
@@ -306,9 +316,10 @@ func (r *Adaptation) StopPodSandbox(ctx context.Context, req *StopPodSandboxRequ
 
 // RemovePodSandbox relays the corresponding CRI request to plugins.
 func (r *Adaptation) RemovePodSandbox(ctx context.Context, req *RemovePodSandboxRequest) error {
-	r.Lock()
-	defer r.Unlock()
-	defer r.removeClosedPlugins()
+	defer r.removeClosed()
+
+	r.RLock()
+	defer r.RUnlock()
 
 	for _, plugin := range r.plugins {
 		_, err := plugin.removePodSandbox(ctx, req)
@@ -320,11 +331,50 @@ func (r *Adaptation) RemovePodSandbox(ctx context.Context, req *RemovePodSandbox
 	return nil
 }
 
-// CreateContainer relays the corresponding CRI request to plugins.
-func (r *Adaptation) CreateContainer(ctx context.Context, req *CreateContainerRequest) (*CreateContainerResponse, error) {
-	r.Lock()
-	defer r.Unlock()
-	defer r.removeClosedPlugins()
+// takeSeq returns this request's place in the order.
+func (r *Adaptation) takeSeq() seqNo {
+	return r.seq.take()
+}
+
+// CreateContainerAndApply relays the request to plugins and calls apply
+// with the answer, in the order the requests arrived.
+//
+// apply is where a runtime puts the answer into practice: the container
+// updates and evictions it carries reach containers other than the one this
+// request is about, so two requests applying them out of order is exactly
+// what the ordering guarantee forbids. The next request's apply does not
+// start until this one has returned, so there is one order and the runtime
+// is inside it.
+//
+// A callback rather than a handle to release, because a handle a caller
+// forgets does not weaken the order, it stops it: every later request would
+// wait for a turn that never comes. A callback cannot be forgotten.
+//
+// An adjustment needs none of this. It describes the container the request
+// is about, which no other request touches.
+//
+// Two rules apply is held to, because the order runs across it:
+//
+//   - apply must not call back into Adaptation. A nested request takes a
+//     later number and waits for a turn that cannot come until apply
+//     returns, and that wait honours no deadline. On one goroutine that is
+//     a deadlock which also blocks Stop, since it takes the write lock
+//     behind the parked reader. A runtime whose apply evicts or updates
+//     containers has to reach its own state directly, not through NRI.
+//   - UpdateContainers from a plugin is not ordered against the request it
+//     follows. It applies as it arrives, so a plugin that answers a request
+//     and then asks for a further update of the same container can have the
+//     answer land after the update. Ordering it would deadlock a plugin
+//     that asks from inside a handler.
+func (r *Adaptation) CreateContainerAndApply(ctx context.Context, req *CreateContainerRequest,
+	apply func(*CreateContainerResponse) error) error {
+	defer r.removeClosed()
+
+	r.RLock()
+	defer r.RUnlock()
+
+	seq := r.takeSeq()
+	defer r.applies.release(seq)
 
 	var (
 		result   = collectCreateContainerResult(req)
@@ -344,22 +394,36 @@ func (r *Adaptation) CreateContainer(ctx context.Context, req *CreateContainerRe
 		}
 		rpl, err := plugin.createContainer(ctx, req)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		err = result.apply(rpl, plugin.name())
 		if err != nil {
-			return nil, err
+			return err
 		}
 	}
 
-	return r.validateContainerAdjustment(ctx, validate, result)
+	// Validators only approve or refuse, so they are not a decision to be
+	// ordered and run alongside other requests' validators.
+	rpl, err := r.validateContainerAdjustment(ctx, validate, result)
+	if err != nil {
+		return err
+	}
+
+	if apply == nil {
+		r.applies.skip(seq)
+
+		return nil
+	}
+
+	return r.applies.apply(ctx, seq, func() error { return apply(rpl) })
 }
 
 // PostCreateContainer relays the corresponding CRI request to plugins.
 func (r *Adaptation) PostCreateContainer(ctx context.Context, req *PostCreateContainerRequest) error {
-	r.Lock()
-	defer r.Unlock()
-	defer r.removeClosedPlugins()
+	defer r.removeClosed()
+
+	r.RLock()
+	defer r.RUnlock()
 
 	for _, plugin := range r.plugins {
 		_, err := plugin.postCreateContainer(ctx, req)
@@ -373,9 +437,10 @@ func (r *Adaptation) PostCreateContainer(ctx context.Context, req *PostCreateCon
 
 // StartContainer relays the corresponding CRI request to plugins.
 func (r *Adaptation) StartContainer(ctx context.Context, req *StartContainerRequest) error {
-	r.Lock()
-	defer r.Unlock()
-	defer r.removeClosedPlugins()
+	defer r.removeClosed()
+
+	r.RLock()
+	defer r.RUnlock()
 
 	for _, plugin := range r.plugins {
 		_, err := plugin.startContainer(ctx, req)
@@ -389,9 +454,10 @@ func (r *Adaptation) StartContainer(ctx context.Context, req *StartContainerRequ
 
 // PostStartContainer relays the corresponding CRI request to plugins.
 func (r *Adaptation) PostStartContainer(ctx context.Context, req *PostStartContainerRequest) error {
-	r.Lock()
-	defer r.Unlock()
-	defer r.removeClosedPlugins()
+	defer r.removeClosed()
+
+	r.RLock()
+	defer r.RUnlock()
 
 	for _, plugin := range r.plugins {
 		_, err := plugin.postStartContainer(ctx, req)
@@ -403,32 +469,48 @@ func (r *Adaptation) PostStartContainer(ctx context.Context, req *PostStartConta
 	return nil
 }
 
-// UpdateContainer relays the corresponding CRI request to plugins.
-func (r *Adaptation) UpdateContainer(ctx context.Context, req *UpdateContainerRequest) (*UpdateContainerResponse, error) {
-	r.Lock()
-	defer r.Unlock()
-	defer r.removeClosedPlugins()
+// UpdateContainerAndApply relays the request to plugins and calls apply
+// with the answer, in the order the requests arrived. See
+// CreateContainerAndApply.
+func (r *Adaptation) UpdateContainerAndApply(ctx context.Context, req *UpdateContainerRequest,
+	apply func(*UpdateContainerResponse) error) error {
+	defer r.removeClosed()
+
+	r.RLock()
+	defer r.RUnlock()
+
+	seq := r.takeSeq()
+	defer r.applies.release(seq)
 
 	result := collectUpdateContainerResult(req)
 	for _, plugin := range r.plugins {
 		rpl, err := plugin.updateContainer(ctx, req)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		err = result.apply(rpl, plugin.name())
 		if err != nil {
-			return nil, err
+			return err
 		}
 	}
 
-	return result.updateContainerResponse(), nil
+	if apply == nil {
+		r.applies.skip(seq)
+
+		return nil
+	}
+
+	return r.applies.apply(ctx, seq, func() error {
+		return apply(result.updateContainerResponse())
+	})
 }
 
 // PostUpdateContainer relays the corresponding CRI request to plugins.
 func (r *Adaptation) PostUpdateContainer(ctx context.Context, req *PostUpdateContainerRequest) error {
-	r.Lock()
-	defer r.Unlock()
-	defer r.removeClosedPlugins()
+	defer r.removeClosed()
+
+	r.RLock()
+	defer r.RUnlock()
 
 	for _, plugin := range r.plugins {
 		_, err := plugin.postUpdateContainer(ctx, req)
@@ -440,32 +522,48 @@ func (r *Adaptation) PostUpdateContainer(ctx context.Context, req *PostUpdateCon
 	return nil
 }
 
-// StopContainer relays the corresponding CRI request to plugins.
-func (r *Adaptation) StopContainer(ctx context.Context, req *StopContainerRequest) (*StopContainerResponse, error) {
-	r.Lock()
-	defer r.Unlock()
-	defer r.removeClosedPlugins()
+// StopContainerAndApply relays the request to plugins and calls apply with
+// the answer, in the order the requests arrived. See
+// CreateContainerAndApply.
+func (r *Adaptation) StopContainerAndApply(ctx context.Context, req *StopContainerRequest,
+	apply func(*StopContainerResponse) error) error {
+	defer r.removeClosed()
+
+	r.RLock()
+	defer r.RUnlock()
+
+	seq := r.takeSeq()
+	defer r.applies.release(seq)
 
 	result := collectStopContainerResult()
 	for _, plugin := range r.plugins {
 		rpl, err := plugin.stopContainer(ctx, req)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		err = result.apply(rpl, plugin.name())
 		if err != nil {
-			return nil, err
+			return err
 		}
 	}
 
-	return result.stopContainerResponse(), nil
+	if apply == nil {
+		r.applies.skip(seq)
+
+		return nil
+	}
+
+	return r.applies.apply(ctx, seq, func() error {
+		return apply(result.stopContainerResponse())
+	})
 }
 
 // RemoveContainer relays the corresponding CRI request to plugins.
 func (r *Adaptation) RemoveContainer(ctx context.Context, req *RemoveContainerRequest) error {
-	r.Lock()
-	defer r.Unlock()
-	defer r.removeClosedPlugins()
+	defer r.removeClosed()
+
+	r.RLock()
+	defer r.RUnlock()
 
 	for _, plugin := range r.plugins {
 		_, err := plugin.removeContainer(ctx, req)
@@ -603,6 +701,39 @@ func (r *Adaptation) stopPlugins() {
 		p.stop()
 	}
 	r.plugins = nil
+}
+
+// removeClosed drops plugins that closed while a request was running.
+//
+// The write lock is taken only when there is something to drop: taking it
+// on every request would wait out every request running alongside this
+// one, which is the serialisation one order per request replaces.
+func (r *Adaptation) removeClosed() {
+	// A read lock of its own: every request registers this defer ahead of
+	// the one that releases the lock it held, so this runs after that
+	// release rather than under it.
+	r.RLock()
+
+	closed := false
+
+	for _, p := range r.plugins {
+		if p.isClosed() {
+			closed = true
+
+			break
+		}
+	}
+
+	r.RUnlock()
+
+	if !closed {
+		return
+	}
+
+	r.Lock()
+	defer r.Unlock()
+
+	r.removeClosedPlugins()
 }
 
 func (r *Adaptation) removeClosedPlugins() {
