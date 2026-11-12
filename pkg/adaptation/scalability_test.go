@@ -342,6 +342,14 @@ func processesInParallel(idx int) rigOption {
 	}
 }
 
+// allProcessInParallel returns an option that has every plugin ask for
+// parallel event processing.
+func allProcessInParallel() rigOption {
+	return func(_ int, p *delayPlugin) {
+		p.parallel = true
+	}
+}
+
 // startRig brings up an Adaptation with count plugins, each answering after
 // delay and prepared by every option given, and waits until every one of
 // them is eligible for events.
@@ -531,6 +539,107 @@ func TestScalabilityMatrix(t *testing.T) {
 		t.Logf("%-16s %4d %4d %12v %12v %12v %10.2f", r.event, r.n, r.p,
 			r.total.Round(time.Millisecond), r.slowest.Round(time.Millisecond),
 			r.perRecord.Round(time.Millisecond), float64(r.total)/float64(ideal))
+	}
+}
+
+// TestScalabilityOptInMatrix reports what the parallel-processing opt-in
+// buys, by running one grid twice: every plugin ordered, then every plugin
+// parallel.
+//
+// It asserts nothing, like TestScalabilityMatrix, and for the same reason:
+// these are in-process plugins whose only work is to sleep, so the figures
+// say what concurrency is worth when the plugin is the whole bottleneck and
+// nothing else. They are an indication and a direction check, not a number
+// to quote. The measurement that can be quoted is a real runtime with
+// -nri-test.scale-parallel.
+//
+// What the shape should be: ordered answers N requests one at a time per
+// plugin and pipelines across plugins, so it is bound by about (N+P-1)*d,
+// while parallel answers all N at once per plugin and is bound by about
+// P*d, the plugins still being called in series within a request. So the
+// ratio should grow with N and shrink with P, and be about 1 at N=1.
+func TestScalabilityOptInMatrix(t *testing.T) {
+	const delay = 10 * time.Millisecond
+
+	counts := []int{1, 8, 32}
+	plugins := []int{1, 2, 4}
+
+	if testing.Short() {
+		counts, plugins = []int{1, 8}, []int{1, 2}
+	}
+
+	// A fresh rig per half, so neither half answers a request the other
+	// issued and the plugin's queue starts empty in both. The overlap count
+	// comes back with the time: a parallel half that reports no overlap
+	// measured nothing, and the ratio beside it would be noise.
+	burst := func(t *testing.T, p, n int, parallel bool) (time.Duration, int) {
+		t.Helper()
+
+		var opts []rigOption
+		if parallel {
+			opts = append(opts, allProcessInParallel())
+		}
+
+		rig := startRig(t, p, fixedDelay(delay), opts...)
+
+		var wg sync.WaitGroup
+
+		start := time.Now()
+
+		for i := 0; i < n; i++ {
+			wg.Add(1)
+
+			go func(i int) {
+				defer wg.Done()
+
+				err := rig.runtime.CreateContainerAndApply(context.Background(),
+					&api.CreateContainerRequest{Pod: pod(), Container: container(i)}, nil)
+				if err != nil {
+					t.Errorf("CreateContainer %d: %v", i, err)
+				}
+			}(i)
+		}
+
+		wg.Wait()
+		took := time.Since(start)
+
+		overlap := 0
+		for _, pl := range rig.plugins {
+			overlap += pl.Overlap()
+		}
+
+		return took, overlap
+	}
+
+	type row struct {
+		n, p              int
+		ordered, parallel time.Duration
+		overlap           int
+	}
+
+	var rows []row
+
+	for _, p := range plugins {
+		for _, n := range counts {
+			ordered, _ := burst(t, p, n, false)
+			parallel, overlap := burst(t, p, n, true)
+
+			rows = append(rows, row{n: n, p: p,
+				ordered: ordered, parallel: parallel, overlap: overlap})
+		}
+	}
+
+	t.Logf("plugin delay %v per request, CreateContainer, in-process plugins", delay)
+	t.Logf("%4s %4s %12s %12s %8s %10s %9s", "N", "P",
+		"ordered", "parallel", "ratio", "(N+P-1)/P", "overlap")
+
+	for _, r := range rows {
+		ratio := float64(r.ordered) / float64(r.parallel)
+		predicted := float64(r.n+r.p-1) / float64(r.p)
+
+		t.Logf("%4d %4d %12v %12v %8.2fx %10.2f %9d", r.n, r.p,
+			r.ordered.Round(time.Millisecond), r.parallel.Round(time.Millisecond),
+			ratio, predicted, r.overlap)
 	}
 }
 
