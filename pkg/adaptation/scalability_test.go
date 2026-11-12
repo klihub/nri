@@ -350,6 +350,48 @@ func allProcessInParallel() rigOption {
 	}
 }
 
+// answersAfter returns an option that has plugin idx answer after d,
+// whatever delay the rig itself was given.
+//
+// For a measurement that needs the plugins to cost different amounts:
+// startRig takes one delay keyed on the container, which cannot tell two
+// plugins apart.
+func answersAfter(idx int, d time.Duration) rigOption {
+	return func(i int, p *delayPlugin) {
+		if i == idx {
+			p.delay = fixedDelay(d)
+		}
+	}
+}
+
+// concurrentCreates issues n CreateContainer requests at once and returns
+// how long the last of them took to come back.
+func concurrentCreates(t *testing.T, rig *scaleRig, n int) time.Duration {
+	t.Helper()
+
+	var wg sync.WaitGroup
+
+	start := time.Now()
+
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+
+		go func(i int) {
+			defer wg.Done()
+
+			err := rig.runtime.CreateContainerAndApply(context.Background(),
+				&api.CreateContainerRequest{Pod: pod(), Container: container(i)}, nil)
+			if err != nil {
+				t.Errorf("CreateContainer %d: %v", i, err)
+			}
+		}(i)
+	}
+
+	wg.Wait()
+
+	return time.Since(start)
+}
+
 // startRig brings up an Adaptation with count plugins, each answering after
 // delay and prepared by every option given, and waits until every one of
 // them is eligible for events.
@@ -582,26 +624,7 @@ func TestScalabilityOptInMatrix(t *testing.T) {
 
 		rig := startRig(t, p, fixedDelay(delay), opts...)
 
-		var wg sync.WaitGroup
-
-		start := time.Now()
-
-		for i := 0; i < n; i++ {
-			wg.Add(1)
-
-			go func(i int) {
-				defer wg.Done()
-
-				err := rig.runtime.CreateContainerAndApply(context.Background(),
-					&api.CreateContainerRequest{Pod: pod(), Container: container(i)}, nil)
-				if err != nil {
-					t.Errorf("CreateContainer %d: %v", i, err)
-				}
-			}(i)
-		}
-
-		wg.Wait()
-		took := time.Since(start)
+		took := concurrentCreates(t, rig, n)
 
 		overlap := 0
 		for _, pl := range rig.plugins {
@@ -640,6 +663,79 @@ func TestScalabilityOptInMatrix(t *testing.T) {
 		t.Logf("%4d %4d %12v %12v %8.2fx %10.2f %9d", r.n, r.p,
 			r.ordered.Round(time.Millisecond), r.parallel.Round(time.Millisecond),
 			ratio, predicted, r.overlap)
+	}
+}
+
+// TestScalabilityOptInBesideAnOrderedPlugin reports whether the opt-in
+// survives a co-resident plugin that did not take it.
+//
+// It asserts nothing, like the other two matrices, and the same caveat
+// applies: in-process plugins whose only work is to sleep, so this is the
+// ceiling. What it is for is the claim the handoff had no measurement
+// behind -- that the win survives an ordered co-resident provided that
+// plugin is fast, and that a slow one dominates and hides it.
+//
+// Plugin 0 is the one that takes the opt-in and costs dA. Plugin 1 is the
+// co-resident, costs dB, and never takes it. Within a request the two are
+// called in index order either way.
+//
+// What the shape should be: with both ordered the burst is bound by the
+// slowest stage, about N*max(dA,dB). With plugin 0 parallel it is no
+// longer a stage, leaving about N*dB + dA. So the ratio tends to
+// max(dA,dB)/dB, which is 1 whenever dB >= dA.
+//
+// The pairs are chosen to separate the two readings of "a fast
+// co-resident": it is not enough for the co-resident to be fast in the
+// abstract, it has to be cheap relative to the plugin taking the opt-in.
+// The last pair is the deployment that matters -- a cheap adjuster taking
+// the opt-in beside a slow policy plugin that cannot.
+func TestScalabilityOptInBesideAnOrderedPlugin(t *testing.T) {
+	const ms = time.Millisecond
+
+	pairs := []struct {
+		what   string
+		dA, dB time.Duration
+	}{
+		{"opting-in plugin dominates, co-resident free", 10 * ms, 0},
+		{"opting-in plugin dominates, co-resident cheap", 10 * ms, ms},
+		{"both cost the same", 10 * ms, 10 * ms},
+		{"co-resident dominates, opting-in plugin cheap", ms, 10 * ms},
+	}
+
+	counts := []int{8, 32}
+	if testing.Short() {
+		counts = []int{8}
+	}
+
+	burst := func(t *testing.T, n int, dA, dB time.Duration, parallel bool) time.Duration {
+		t.Helper()
+
+		opts := []rigOption{answersAfter(0, dA), answersAfter(1, dB)}
+		if parallel {
+			opts = append(opts, processesInParallel(0))
+		}
+
+		return concurrentCreates(t, startRig(t, 2, fixedDelay(dA), opts...), n)
+	}
+
+	t.Log("plugin 0 takes the opt-in and costs dA; plugin 1 never does and costs dB")
+	t.Logf("%4s %7s %7s %12s %12s %8s %9s", "N", "dA", "dB",
+		"both ordered", "0 parallel", "ratio", "max/dB")
+
+	for _, n := range counts {
+		for _, p := range pairs {
+			ordered := burst(t, n, p.dA, p.dB, false)
+			mixed := burst(t, n, p.dA, p.dB, true)
+
+			predicted := "inf"
+			if p.dB > 0 {
+				predicted = fmt.Sprintf("%.2f", float64(max(p.dA, p.dB))/float64(p.dB))
+			}
+
+			t.Logf("%4d %7v %7v %12v %12v %8.2fx %9s   %s", n, p.dA, p.dB,
+				ordered.Round(time.Millisecond), mixed.Round(time.Millisecond),
+				float64(ordered)/float64(mixed), predicted, p.what)
+		}
 	}
 }
 
