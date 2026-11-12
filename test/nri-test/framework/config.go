@@ -222,7 +222,11 @@ type Config struct {
 	// handling, which is what prices the ordering guarantee: the same run
 	// with and without it differs only in whether a plugin answers one
 	// request at a time.
-	ScaleParallel bool
+	//
+	// ScaleParallelPlugins names plugins one at a time instead, for a mixed
+	// run. A plugin is parallel if either says so.
+	ScaleParallel        bool
+	ScaleParallelPlugins string
 	// ScaleEvents holds the raw -nri-test.scale-events entries. ScaleDelays
 	// holds the -nri-test.scale-delay and -nri-test.scale-delay-file entries
 	// interleaved in the order they appeared, which is what lets a later one
@@ -348,6 +352,10 @@ func RegisterFlags() {
 		"have every simulated plugin handle several of the runtime's requests at "+
 			"once, instead of one at a time in the order the runtime dispatched "+
 			"them; the recorder always keeps that order")
+	flag.StringVar(&TestConfig.ScaleParallelPlugins, "nri-test.scale-parallel-plugins", "",
+		"have only these simulated plugins handle requests several at once, as a "+
+			"comma separated list of plugin indices, for a run where some plugins "+
+			"take the option and others do not")
 	flag.Func("nri-test.scale-events",
 		"events simulated plugins subscribe to, as [INDEX=]EVENT,EVENT...; repeatable; "+
 			"the default is every hook except ValidateContainerAdjustment",
@@ -536,6 +544,10 @@ func (c *Config) Complete() error {
 		return err
 	}
 	plan.Parallel = c.ScaleParallel
+	if err := plan.SetParallelPlugins(c.ScaleParallelPlugins); err != nil {
+		return fmt.Errorf("-nri-test.scale-parallel-plugins %q: %w",
+			c.ScaleParallelPlugins, err)
+	}
 	c.ScalePlan = plan
 	if c.ScaleTraceProtocol == "" {
 		c.ScaleTraceProtocol = TraceHTTP

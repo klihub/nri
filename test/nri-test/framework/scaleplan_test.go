@@ -257,6 +257,51 @@ func TestScalePlanParallelReachesOnlyTheSimulatedPlugins(t *testing.T) {
 		"the recorder asked for parallel events")
 }
 
+func TestScalePlanParallelIndexReachesOnlyThatPlugin(t *testing.T) {
+	// The mixed deployment is the one that decides who the opt-in helps, so
+	// which plugins take it has to be settable per plugin and not only for
+	// all of them at once.
+	p := mustPlan(t, 3, nil, []string{"50ms"})
+	require.NoError(t, p.SetParallelPlugins("2"))
+
+	one, two := &TestPlugin{}, &TestPlugin{}
+
+	p.SimulateWork(one, 1)
+	p.SimulateWork(two, 2)
+
+	require.False(t, one.ParallelEvents, "plugin 1 was not asked for")
+	require.True(t, two.ParallelEvents, "plugin 2 was asked for and did not get it")
+}
+
+func TestScalePlanRefusesToParallelizeTheRecorder(t *testing.T) {
+	// Refused rather than ignored, like a delay on the recorder: the order
+	// the recorder records is the measurement.
+	p := mustPlan(t, 3, nil, []string{"50ms"})
+
+	require.Error(t, p.SetParallelPlugins("0"))
+	require.Error(t, p.SetParallelPlugins("1,0"))
+	require.NoError(t, p.SetParallelPlugins("1,2"))
+}
+
+func TestScalePlanRefusesAnUnusableParallelIndex(t *testing.T) {
+	p := mustPlan(t, 3, nil, []string{"50ms"})
+
+	require.Error(t, p.SetParallelPlugins("3"), "index past the plugin count")
+	require.Error(t, p.SetParallelPlugins("x"), "index that is not a number")
+	require.Error(t, p.SetParallelPlugins("-1"), "negative index")
+}
+
+func TestScalePlanDescribeNamesTheParallelPluginsOnly(t *testing.T) {
+	p := mustPlan(t, 3, nil, []string{"50ms"})
+	require.NoError(t, p.SetParallelPlugins("2"))
+
+	d := p.Describe()
+
+	require.NotContains(t, d[0], "parallel", "the recorder is never parallel")
+	require.NotContains(t, d[1], "parallel", "plugin 1 was not asked for")
+	require.Contains(t, d[2], "parallel", "plugin 2 was asked for")
+}
+
 func TestScalePlanDescribeSaysWhichRunWasParallel(t *testing.T) {
 	// A run says what it simulated in its own output, so the two halves of
 	// the comparison cannot be told apart by the command line alone.

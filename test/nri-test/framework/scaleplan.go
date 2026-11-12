@@ -71,6 +71,11 @@ type ScalePlan struct {
 	// is never one of them: the order it records is the measurement.
 	Parallel bool
 
+	// parallel holds the plugins named one at a time by SetParallelPlugins,
+	// for a mixed run where some plugins take the opt-in and others do not.
+	// A plugin is parallel if Parallel is set or it is in here.
+	parallel map[int]bool
+
 	events map[int][]EventType
 	rules  []delayRule
 	// profiles records which delay profile a plugin was last given a profile
@@ -136,6 +141,55 @@ func newScalePlan(traced bool, plugins int, eventSpecs []string, delays []DelayS
 }
 
 // firstSimulated is the index of the first plugin whose events can be chosen.
+// SetParallelPlugins marks the plugins that ask for parallel event
+// handling, as a comma separated list of plugin indices. An empty spec
+// marks none, and replaces whatever a previous call marked.
+//
+// It returns an error for an index that is not a number, is out of range,
+// or names the recorder, rather than running a simulation that differs
+// from the one asked for.
+func (p *ScalePlan) SetParallelPlugins(spec string) error {
+	marked := map[int]bool{}
+
+	for _, item := range strings.Split(spec, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+
+		idx, err := strconv.Atoi(item)
+		if err != nil {
+			return fmt.Errorf("plugin index %q is not a number", item)
+		}
+
+		if idx >= p.Plugins {
+			return fmt.Errorf("plugin index %d is past the %d plugins of this run",
+				idx, p.Plugins)
+		}
+
+		if idx < p.firstSimulated() {
+			return fmt.Errorf(
+				"plugin index %d is the recorder, whose event order is the measurement",
+				idx)
+		}
+
+		marked[idx] = true
+	}
+
+	p.parallel = marked
+
+	return nil
+}
+
+// isParallel reports whether plugin idx asks for parallel event handling.
+func (p *ScalePlan) isParallel(idx int) bool {
+	if idx < p.firstSimulated() {
+		return false
+	}
+
+	return p.Parallel || p.parallel[idx]
+}
+
 func (p *ScalePlan) firstSimulated() int {
 	if p.Traced {
 		return 0
@@ -377,7 +431,7 @@ func (p *ScalePlan) Describe() []string {
 				name = fmt.Sprintf("%s, %d events", profile, len(events))
 			}
 
-			if p.Parallel {
+			if p.isParallel(i) {
 				name += ", parallel"
 			}
 		}
@@ -418,10 +472,11 @@ func formatDelays(m map[EventType]time.Duration) string {
 // for parallel event handling where the plan does. It leaves events with no
 // delay alone.
 func (p *ScalePlan) SimulateWork(tp *TestPlugin, idx int) {
-	// The recorder is excluded here rather than by its caller: the order it
-	// records is the measurement, so a parallel recorder would report the
-	// order its own handlers ran in instead of the order of dispatch.
-	tp.ParallelEvents = p.Parallel && idx >= p.firstSimulated()
+	// The recorder is excluded inside isParallel rather than by this
+	// function's caller: the order it records is the measurement, so a
+	// parallel recorder would report the order its own handlers ran in
+	// instead of the order of dispatch.
+	tp.ParallelEvents = p.isParallel(idx)
 
 	hook := func(ev EventType) func(context.Context) {
 		d := p.Delay(idx, ev)
