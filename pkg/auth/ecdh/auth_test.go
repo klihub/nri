@@ -228,3 +228,48 @@ func TestPublicKeyDerivation(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, auth.PublicKey(pub.Encode()), derived)
 }
+
+// TestRecordedResponseDoesNotReplay verifies that the runtime's proof
+// of identity is bound to the seed the plugin drew for that exchange.
+//
+// This is the property which separates this handshake from one where
+// the runtime simply presents a long-term key: without a seed of the
+// plugin's own choosing, a recording of a licensed runtime answering
+// one plugin would authenticate an unlicensed runtime to that same
+// plugin forever. If anyone ever decides the plugin's seed is
+// redundant, this test is what should stop them.
+func TestRecordedResponseDoesNotReplay(t *testing.T) {
+	impl, err := auth.Get(ecdh.Name)
+	require.NoError(t, err)
+
+	runtimePriv, runtimePub, err := ecdh.GenerateKeyPair()
+	require.NoError(t, err)
+	pluginPriv, pluginPub, err := ecdh.GenerateKeyPair()
+	require.NoError(t, err)
+
+	// a licensed runtime answers the plugin's challenge, and someone
+	// records the answer off the wire
+	first, err := impl.NewWithKeys(auth.PluginSide, pluginPriv.Encode(), pluginPub.Encode())
+	require.NoError(t, err)
+
+	challenge, pluginKey, err := first.Challenge(randomSeed(t), runtimePub.Encode())
+	require.NoError(t, err)
+
+	runtime, err := impl.NewWithKeys(auth.RuntimeSide, runtimePriv.Encode(), runtimePub.Encode())
+	require.NoError(t, err)
+
+	recorded, err := runtime.Response(challenge, pluginKey)
+	require.NoError(t, err)
+	require.NoError(t, first.Verify(recorded))
+
+	// the same plugin, on a new connection with a fresh seed, must not
+	// accept the recording
+	second, err := impl.NewWithKeys(auth.PluginSide, pluginPriv.Encode(), pluginPub.Encode())
+	require.NoError(t, err)
+
+	_, _, err = second.Challenge(randomSeed(t), runtimePub.Encode())
+	require.NoError(t, err)
+
+	require.Error(t, second.Verify(recorded),
+		"a recorded response authenticated a runtime which never answered")
+}
